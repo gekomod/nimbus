@@ -241,6 +241,28 @@ func (m *Manager) SessionUser(token string) string {
 	return m.sessions[token].username
 }
 
+// LoginDirect tworzy sesję dla użytkownika bez weryfikacji hasła.
+// Używane po pomyślnej weryfikacji 2FA.
+func (m *Manager) LoginDirect(username string) (string, UserInfo, error) {
+	info := UserInfo{
+		Username: username,
+		UID:      resolveUID(username),
+		Groups:   resolveGroups(username),
+	}
+	token, err := genToken()
+	if err != nil { return "", UserInfo{}, err }
+
+	m.mu.Lock()
+	m.sessions[token] = session{
+		token:    token,
+		username: username,
+		expires:  time.Now().Add(sessionTTL),
+	}
+	m.saveSessions()
+	m.mu.Unlock()
+	return token, info, nil
+}
+
 func (m *Manager) Logout(token string) {
 	m.mu.Lock()
 	delete(m.sessions, token)

@@ -663,3 +663,19 @@ func (s *Server) handleNotifDefaultRules(w http.ResponseWriter, r *http.Request)
 	saveNotifConfig(cfg)
 	jsonOK(w, map[string]any{"status": "ok", "added": added})
 }
+
+// notifUpdateRuleTriggered aktualizuje pole Triggered dla reguły po wysłaniu alertu.
+func notifUpdateRuleTriggered(ruleID, timestamp string) {
+	cfg := loadNotifConfig()
+	changed := false
+	for i, ru := range cfg.Rules {
+		if ru.ID == ruleID {
+			cfg.Rules[i].Triggered = timestamp
+			changed = true
+			break
+		}
+	}
+	if changed {
+		saveNotifConfig(cfg)
+	}
+}

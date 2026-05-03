@@ -497,12 +497,16 @@ func startDockerStatsPoller() {
 	_dockerStatsOnce.Do(func() {
 		go func() {
 			for {
+				// Sprawdź czy Docker działa zanim odpytamy stats
+				if _, err := runCmd("docker", "info"); err != nil {
+					time.Sleep(30 * time.Second)
+					continue
+				}
 				out, err := runCmd("docker", "stats", "--no-stream", "--format",
 					`{"id":"{{.ID}}","name":"{{.Name}}","cpu":"{{.CPUPerc}}","mem":"{{.MemUsage}}","net":"{{.NetIO}}","block":"{{.BlockIO}}"}`)
 				if err == nil && out != "" {
 					var stats []json.RawMessage
-					for _, l := range strings.Split(out, "
-") {
+					for _, l := range strings.Split(out, "\n") {
 						if l = strings.TrimSpace(l); l != "" {
 							stats = append(stats, json.RawMessage(l))
 						}
@@ -511,7 +515,8 @@ func startDockerStatsPoller() {
 					_dockerStatsCache = stats
 					_dockerStatsCacheMu.Unlock()
 				}
-				time.Sleep(2 * time.Second)
+				// 5s zamiast 2s — wystarczy dla live stats, mniej procesów
+				time.Sleep(5 * time.Second)
 			}
 		}()
 	})

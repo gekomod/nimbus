@@ -204,9 +204,53 @@ func (s *Server) handleTOTPGlobalToggle(w http.ResponseWriter, r *http.Request) 
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// currentUser wyciąga nazwę użytkownika z sesji.
+// currentUser wyciąga nazwę użytkownika z sesji przez cookie.
 func (s *Server) currentUser(r *http.Request) string {
-	sess, err := s.auth.GetSession(r)
+	c, err := r.Cookie("nimbus_session")
 	if err != nil { return "" }
-	return sess.User
+	return s.auth.SessionUser(c.Value)
+}
+
+// ── Tymczasowe sesje oczekujące na kod TOTP ───────────────────────────────────
+
+var (
+	totpPending   = map[string]totpPendingEntry{}
+	totpPendingMu sync.Mutex
+)
+
+type totpPendingEntry struct {
+	username string
+	expires  time.Time
+}
+
+// totpCreatePendingSession tworzy tymczasowy token ważny 5 minut.
+func totpCreatePendingSession(username string) string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	token := base32.StdEncoding.EncodeToString(b)
+
+	totpPendingMu.Lock()
+	// Wyczyść stare wpisy
+	for k, v := range totpPending {
+		if time.Now().After(v.expires) { delete(totpPending, k) }
+	}
+	totpPending[token] = totpPendingEntry{username: username, expires: time.Now().Add(5 * time.Minute)}
+	totpPendingMu.Unlock()
+	return token
+}
+
+// totpGetPendingUser zwraca username dla tymczasowego tokenu (lub "" jeśli wygasł).
+func totpGetPendingUser(token string) string {
+	totpPendingMu.Lock()
+	defer totpPendingMu.Unlock()
+	e, ok := totpPending[token]
+	if !ok || time.Now().After(e.expires) { return "" }
+	return e.username
+}
+
+// totpRemovePendingSession usuwa tymczasowy token po użyciu.
+func totpRemovePendingSession(token string) {
+	totpPendingMu.Lock()
+	delete(totpPending, token)
+	totpPendingMu.Unlock()
 }

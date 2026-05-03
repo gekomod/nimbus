@@ -14,12 +14,14 @@ const fmtSize = (tb) => {
 };
 // HistoryChart — wykres historyczny z próbek metrycznych ──────────────────────
 const HistoryChart = ({ samples, width=560, height=80 }) => {
-  if (!samples || samples.length < 2) return (
+  if (!samples || samples.length === 0) return (
     <div style={{height,display:'flex',alignItems:'center',justifyContent:'center',
       color:'var(--fg-dim)',fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-      Zbieranie danych… (próbka co minutę)
+      Zbieranie danych… (próbka co 10s)
     </div>
   );
+  // Jeśli tylko 1 próbka — zduplikuj żeby narysować linię
+  if (samples.length === 1) samples = [samples[0], samples[0]];
 
   const W = width, H = height;
   const toPath = (key, color) => {
@@ -176,22 +178,14 @@ const Dashboard = () => {
         {/* Wykres */}
         <div className="card">
           <div className="card-head">
-            <div><div className="card-title">Aktywność systemu</div><div className="card-sub">historia z /api/metrics</div></div>
-            <div className="card-actions">
-              <div className="segmented">
-                {['1h','6h','24h'].map(r=>(
-                  <button key={r} className={metricsRange===r?'active':''} onClick={()=>setMetricsRange(r)}>{r}</button>
-                ))}
-              </div>
-            </div>
+            <div><div className="card-title">Aktywność systemu</div><div className="card-sub">auto-odświeżanie · 3s</div></div>
           </div>
           <div className="card-body">
             <div className="row" style={{gap:24,marginBottom:8,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',color:'var(--fg-muted)'}}>
               <span><span style={{display:'inline-block',width:8,height:8,background:'var(--accent)',borderRadius:2,marginRight:6}}/>CPU %</span>
-              <span><span style={{display:'inline-block',width:8,height:8,background:'oklch(0.7 0.15 280)',borderRadius:2,marginRight:6}}/>RAM %</span>
-              {metricsLoading && <span style={{color:'var(--fg-dim)'}}>ładowanie…</span>}
+              <span><span style={{display:'inline-block',width:8,height:8,background:'oklch(0.7 0.15 280)',borderRadius:2,marginRight:6}}/>Pamięć %</span>
             </div>
-            <HistoryChart samples={metricsSamples} width={560} height={80}/>
+            <LineChart series={[cpu,mem]} colors={['var(--accent)','oklch(0.7 0.15 280)']} labels={['-60m','-45m','-30m','-15m','teraz']}/>
           </div>
         </div>
 

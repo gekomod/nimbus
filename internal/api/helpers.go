@@ -26,7 +26,13 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 
 func round2(f float64) float64 { return float64(int(f*100)) / 100 }
 
+// cmdSem limituje równoczesne wywołania exec.Command do 8
+// Bez limitu każdy request może tworzyć nowy proces OS
+var cmdSem = make(chan struct{}, 8)
+
 func runCmd(name string, args ...string) (string, error) {
+	cmdSem <- struct{}{}
+	defer func() { <-cmdSem }()
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

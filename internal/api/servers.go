@@ -126,10 +126,6 @@ func sshReachable(srv remoteServer) bool {
 	return true
 }
 
-func errStr(err error) string {
-	if err == nil { return "" }
-	return err.Error()
-}
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 

@@ -78,11 +78,11 @@ watch: ## Nasłuchuj zmian JSX i przebudowuj automatycznie
 # ── Go ────────────────────────────────────────────────────────────────────────
 go: ## Skompiluj binarke Go
 	@printf "🔨  Go build (v$(VERSION)) … "
-	@$(CGO) go build $(LDFLAGS) -o $(BINARY) $(CMD)
+	@$(CGO) go build -buildvcs=false $(LDFLAGS) -o $(BINARY) $(CMD)
 	@printf "✓  ./$(BINARY)\n"
 
 go-race: ## Skompiluj z detektorem race condition
-	@$(CGO) go build -race $(LDFLAGS) -o $(BINARY)-race $(CMD)
+	@$(CGO) go build -race -buildvcs=false $(LDFLAGS) -o $(BINARY)-race $(CMD)
 
 # ── Uruchamianie ──────────────────────────────────────────────────────────────
 dev: js-dev go ## Dev build + uruchom serwer

@@ -103,6 +103,9 @@ func (e *alertsEngine) check() {
 			// Zapisz do historii
 			notifAddHistory(rule.Name, sev, msg, "alert-engine", true)
 			log.Printf("[alerts] %s: %s", rule.Name, msg)
+
+			// Zaktualizuj pole Triggered w regule
+			notifUpdateRuleTriggered(rule.ID, time.Now().Format("02.01.2006 15:04:05"))
 		}
 	}
 }

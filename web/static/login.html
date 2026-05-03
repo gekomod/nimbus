@@ -582,9 +582,24 @@ async function doLogin() {
 
     setLoading('btn-login', 'btn-login-text', false);
 
-    if (r.ok) {
-      // Zalogowano — przekieruj do panelu
+    const data = await r.json().catch(() => ({}));
+
+    if (r.ok && data.success) {
+      // Zalogowano bez 2FA — przekieruj do panelu
       showSuccess();
+    } else if (data.needs_2fa) {
+      // Wymagany kod 2FA — pokaż drugi krok
+      window._totpTmpToken = data.tmp_token;
+      document.getElementById('step-creds').style.display = 'none';
+      const s2fa = document.getElementById('step-2fa');
+      if (s2fa) {
+        s2fa.style.display = 'block';
+        build2FA(); // Zbuduj pola cyfr
+        setTimeout(() => {
+          const first = document.getElementById('digit-0');
+          if (first) first.focus();
+        }, 100);
+      }
     } else {
       // 401 — złe dane
       document.getElementById('inp-pass').classList.add('error');
@@ -600,18 +615,40 @@ async function doLogin() {
   }
 }
 
-// 2FA — na razie nieużywane (serwer nie obsługuje TOTP)
-// Pozostawione jako UI placeholder dla przyszłej implementacji
-function do2FA() {
+// 2FA — weryfikacja kodu TOTP
+async function do2FA() {
   const code = getCode();
   if (code.length < 6) return;
   hideErr('err-msg-2fa');
   setLoading('btn-2fa', 'btn-2fa-text', true);
-  // TODO: POST /api/login/2fa gdy backend będzie gotowy
-  setTimeout(() => {
+
+  try {
+    const r = await fetch('/api/login/verify-totp', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tmp_token: window._totpTmpToken || '',
+        code: code,
+      }),
+    });
+
     setLoading('btn-2fa', 'btn-2fa-text', false);
-    showErr('err-msg-2fa', '2FA nie jest jeszcze skonfigurowane na serwerze.');
-  }, 600);
+
+    if (r.ok) {
+      window._totpTmpToken = null;
+      showSuccess();
+    } else {
+      showErr('err-msg-2fa', 'Nieprawidłowy kod — spróbuj ponownie.');
+      // Wyczyść pola kodu
+      document.querySelectorAll('.digit-input').forEach(el => { el.value = ''; });
+      const first = document.querySelector('.digit-input');
+      if (first) first.focus();
+    }
+  } catch(e) {
+    setLoading('btn-2fa', 'btn-2fa-text', false);
+    showErr('err-msg-2fa', 'Błąd połączenia z serwerem.');
+  }
 }
 
 function showSuccess() {

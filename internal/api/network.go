@@ -375,3 +375,82 @@ func (s *Server) handleDNSUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
 }
+
+// ── Fail2Ban ──────────────────────────────────────────────────────────────────
+
+func (s *Server) handleFail2BanStatus(w http.ResponseWriter, r *http.Request) {
+	// Sprawdź czy fail2ban jest zainstalowany
+	_, err := runCmd("which", "fail2ban-client")
+	if err != nil {
+		jsonOK(w, map[string]any{"installed": false, "jails": []any{}})
+		return
+	}
+
+	running := serviceActive("fail2ban")
+
+	if !running {
+		jsonOK(w, map[string]any{"installed": true, "running": false, "jails": []any{}})
+		return
+	}
+
+	// Pobierz listę jails
+	out, err := runCmd("fail2ban-client", "status")
+	if err != nil {
+		jsonOK(w, map[string]any{"installed": true, "running": true, "jails": []any{}, "error": err.Error()})
+		return
+	}
+
+	// Parsuj: "Jail list: sshd, nginx-http-auth"
+	var jailNames []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Jail list:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				for _, j := range strings.Split(parts[1], ",") {
+					j = strings.TrimSpace(j)
+					if j != "" {
+						jailNames = append(jailNames, j)
+					}
+				}
+			}
+		}
+	}
+
+	// Pobierz szczegóły każdego jail
+	var jails []map[string]any
+	for _, name := range jailNames {
+		jailOut, err := runCmd("fail2ban-client", "status", name)
+		banned  := 0
+		failed  := 0
+		active  := err == nil
+
+		if err == nil {
+			for _, line := range strings.Split(jailOut, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.Contains(line, "Currently banned:") {
+					fmt.Sscanf(strings.SplitN(line, ":", 2)[1], "%d", &banned)
+				}
+				if strings.Contains(line, "Total failed:") {
+					fmt.Sscanf(strings.SplitN(line, ":", 2)[1], "%d", &failed)
+				}
+			}
+		}
+
+		jails = append(jails, map[string]any{
+			"name":   name,
+			"active": active,
+			"banned": banned,
+			"failed": failed,
+		})
+	}
+
+	if jails == nil {
+		jails = []map[string]any{}
+	}
+
+	jsonOK(w, map[string]any{
+		"installed": true,
+		"running":   running,
+		"jails":     jails,
+	})
+}

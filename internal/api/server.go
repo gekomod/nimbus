@@ -40,12 +40,22 @@ func NewServer(cfg Config) *Server {
 }
 
 func (s *Server) ListenAndServe() error {
-	return http.ListenAndServe(fmt.Sprintf(":%d", s.cfg.Port), s.ProxyHandler(s.mux))
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", s.cfg.Port),
+		Handler:           s.ProxyHandler(s.mux),
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
+	}
+	return srv.ListenAndServe()
 }
 
 func (s *Server) routes() {
 	// public
-	s.mux.HandleFunc("/api/login",      s.handleLogin)
+	s.mux.HandleFunc("/api/login",             s.handleLogin)
+	s.mux.HandleFunc("/api/login/verify-totp", s.handleVerifyTOTP)
 	s.mux.HandleFunc("/api/logout",     s.handleLogout)
 	s.mux.HandleFunc("/api/check-auth", s.handleCheckAuth)
 	s.mux.HandleFunc("/api/status",     s.handlePublicStatus) // bez auth — dla strony logowania
@@ -163,6 +173,9 @@ func (s *Server) routes() {
 	a("/network/speedtest/install", s.handleSpeedtestInstall)
 	a("/network/speedtest/servers", s.handleSpeedtestServers)
 	a("/network/speedtest/quick", s.handleSpeedtestQuick)
+	// Fail2Ban
+	a("/api/system/fail2ban-status", s.handleFail2BanStatus)
+
 	// DHCP
 	a("/api/network/dhcp/leases",  s.handleDHCPLeases)
 	a("/api/network/dhcp/config",  s.handleDHCPConfig)
@@ -494,31 +507,25 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	token, userInfo, err := s.auth.Login(req.Username, req.Password)
 	if err != nil {
+		// Celowo nie ujawniamy czy użytkownik istnieje
 		jsonErr(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	// Sprawdź 2FA — jeśli włączone, wymagaj kodu TOTP
+	// Jeśli użytkownik ma 2FA — nie twórz sesji, zwróć needs_2fa
+	// token jest tymczasowy — zostanie zamieniony na sesję po weryfikacji kodu
 	if totpEnabled(req.Username) {
-		// Bez kodu TOTP — zwróć "needs_2fa" bez tworzenia sesji
-		var req2fa struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-			TOTPCode string `json:"totp_code"`
-		}
-		// Odczytaj ponownie body (już zdekodowane wyżej — użyj pola z req)
-		// Sprawdź czy kod był w oryginalnym request
-		if req2faCode := r.Header.Get("X-TOTP-Code"); req2faCode != "" {
-			if !totpVerify(req.Username, req2faCode) {
-				jsonErr(w, "invalid_totp", http.StatusUnauthorized); return
-			}
-		} else {
-			// Brak kodu — poinformuj frontend że potrzebuje 2FA
-			jsonOK(w, map[string]any{"success": false, "needs_2fa": true, "token": token})
-			return
-		}
+		// Unieważnij token (usuń sesję) — nie chcemy żeby działał bez 2FA
+		s.auth.Logout(token)
+		// Zwróć tymczasowy identyfikator do weryfikacji TOTP
+		tmpToken := totpCreatePendingSession(req.Username)
+		jsonOK(w, map[string]any{
+			"success":   false,
+			"needs_2fa": true,
+			"tmp_token": tmpToken,
+		})
+		return
 	}
-	_ = userInfo // suppress unused
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     "nimbus_session",
@@ -531,8 +538,51 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	jsonOK(w, map[string]any{
 		"success": true,
-		"user":    req.Username,
+		"user":    userInfo,
 	})
+}
+
+func (s *Server) handleVerifyTOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
+	var req struct {
+		TmpToken string `json:"tmp_token"`
+		Code     string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.TmpToken == "" || req.Code == "" {
+		jsonErr(w, "tmp_token i code są wymagane", http.StatusBadRequest); return
+	}
+
+	// Sprawdź tymczasowy token
+	username := totpGetPendingUser(req.TmpToken)
+	if username == "" {
+		jsonErr(w, "invalid or expired token", http.StatusUnauthorized); return
+	}
+
+	// Weryfikuj kod TOTP
+	if !totpVerify(username, req.Code) {
+		jsonErr(w, "invalid_totp", http.StatusUnauthorized); return
+	}
+
+	// Usuń tymczasowy token
+	totpRemovePendingSession(req.TmpToken)
+
+	// Utwórz prawdziwą sesję
+	token, userInfo, err := s.auth.LoginDirect(username)
+	if err != nil {
+		jsonErr(w, "session error: "+err.Error(), http.StatusInternalServerError); return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nimbus_session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((24 * time.Hour).Seconds()),
+	})
+
+	jsonOK(w, map[string]any{"success": true, "user": userInfo})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

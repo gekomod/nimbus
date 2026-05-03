@@ -920,48 +920,56 @@ const AddChannelDialog = ({ onClose, onAdd }) => {
   );
 };
 
-const AddRuleDialog = ({ onClose, onAdd, channels }) => {
-  const [name, setName]         = React.useState('');
-  const [condition, setCondition] = React.useState('');
-  const [severity, setSeverity] = React.useState('warn');
-  const [selCh, setSelCh]       = React.useState([]);
-  const [saving, setSaving]     = React.useState(false);
+const RuleDialog = ({ onClose, onSave, channels, initial }) => {
+  const isEdit = !!initial;
+  const [name,      setName]      = React.useState(initial?.name      || '');
+  const [condition, setCondition] = React.useState(initial?.condition || '');
+  const [severity,  setSeverity]  = React.useState(initial?.severity  || 'warn');
+  const [selCh,     setSelCh]     = React.useState(initial?.channels  || []);
+  const [saving,    setSaving]    = React.useState(false);
 
   const inpSt = {
     background:'var(--bg-2)', border:'1px solid var(--line-strong)', borderRadius:5,
     padding:'6px 10px', color:'var(--fg)', fontSize:'var(--fs-sm)', outline:'none', width:'100%',
+    fontFamily:'var(--font-mono)',
   };
   const sevOpts = [
     { val:'info', label:'INFO',      color:'var(--info,#60a5fa)' },
     { val:'warn', label:'WARN',      color:'var(--warn)' },
     { val:'crit', label:'KRYTYCZNY', color:'var(--err)' },
   ];
+
+  // Presety pasujące do składni alerts.go
   const condPresets = [
-    'Użycie puli > 90%',
-    'temp dysku > 48°C',
-    'S.M.A.R.T. status ≠ PASSED',
-    'docker state → stopped (exit≠0)',
-    'cron rsync exit ≠ 0',
-    'UPS on battery > 30s',
-    'zpool scrub errors > 0',
-    'fail2ban ban count > 5/h',
+    { label:'CPU > 90%',          val:'cpu > 90' },
+    { label:'CPU > 95%',          val:'cpu > 95' },
+    { label:'RAM > 85%',          val:'mem > 85' },
+    { label:'RAM > 90%',          val:'mem > 90' },
+    { label:'Load > 8',           val:'load > 8' },
+    { label:'Dysk / < 10%',       val:'disk:/ < 10' },
+    { label:'Dysk / < 3%',        val:'disk:/ < 3' },
+    { label:'Dysk /srv < 10%',    val:'disk:/srv < 10' },
+    { label:'Samba down',         val:'service:smbd = down' },
+    { label:'SSH down',           val:'service:ssh = down' },
+    { label:'NFS down',           val:'service:nfsd = down' },
+    { label:'Docker down',        val:'service:docker = down' },
   ];
   const toggleCh = (id) => setSelCh(cs => cs.includes(id) ? cs.filter(c=>c!==id) : [...cs, id]);
 
   return (
-    <Modal title="Nowa reguła alertu" sub="warunek · powaga · kanały" onClose={onClose} width={540}
+    <Modal title={isEdit ? 'Edytuj regułę alertu' : 'Nowa reguła alertu'} sub="warunek · powaga · kanały" onClose={onClose} width={580}
       footer={<div className="row gap-sm" style={{marginLeft:'auto'}}>
         <button className="btn sm" onClick={onClose}>Anuluj</button>
         <button className="btn sm primary" disabled={saving} onClick={async () => {
           if (!name || !condition) { alert('Wypełnij nazwę i warunek.'); return; }
           setSaving(true);
           try {
-            await onAdd({ name, condition, severity, channels: selCh, enabled: true, triggered: 'nigdy' });
+            await onSave({ ...(initial||{}), name, condition, severity, channels: selCh, enabled: initial?.enabled ?? true });
             onClose();
           } catch (e) { alert(`Błąd: ${e.message}`); }
           finally { setSaving(false); }
         }}>
-          <Icon name="plus" size={11}/> {saving ? 'Zapisuję…' : 'Dodaj regułę'}
+          <Icon name={isEdit?'check':'plus'} size={11}/> {saving ? 'Zapisuję…' : isEdit ? 'Zapisz zmiany' : 'Dodaj regułę'}
         </button>
       </div>}
     >
@@ -972,15 +980,19 @@ const AddRuleDialog = ({ onClose, onAdd, channels }) => {
         </div>
         <div>
           <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:6}}>Warunek</div>
-          <input style={inpSt} value={condition} onChange={e=>setCondition(e.target.value)} placeholder="np. Użycie puli > 90%"/>
-          <div style={{display:'flex',flexWrap:'wrap',gap:5,marginTop:8}}>
+          <input style={inpSt} value={condition} onChange={e=>setCondition(e.target.value)}
+            placeholder="np. cpu > 90  |  disk:/ < 10  |  service:ssh = down"/>
+          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginTop:6,marginBottom:4}}>
+            Składnia: <code style={{color:'var(--accent)'}}>cpu</code> / <code style={{color:'var(--accent)'}}>mem</code> / <code style={{color:'var(--accent)'}}>load</code> / <code style={{color:'var(--accent)'}}>disk:/ścieżka</code> / <code style={{color:'var(--accent)'}}>service:nazwa</code> &nbsp;+&nbsp; <code style={{color:'var(--accent)'}}>&gt; &lt; = &gt;= &lt;=</code> &nbsp;+&nbsp; wartość
+          </div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:5,marginTop:4}}>
             {condPresets.map(p=>(
-              <button key={p} onClick={()=>setCondition(p)}
+              <button key={p.val} onClick={()=>setCondition(p.val)}
                 style={{padding:'3px 8px',borderRadius:5,border:'1px solid var(--line-strong)',
-                  background: condition===p ? 'oklch(0.55 0.2 260 / 0.2)' : 'var(--bg-2)',
-                  color: condition===p ? 'var(--accent)' : 'var(--fg-dim)',
-                  fontSize:11, cursor:'pointer'}}>
-                {p}
+                  background: condition===p.val ? 'oklch(0.55 0.2 260 / 0.2)' : 'var(--bg-2)',
+                  color: condition===p.val ? 'var(--accent)' : 'var(--fg-dim)',
+                  fontSize:11, cursor:'pointer', fontFamily:'var(--font-mono)'}}>
+                {p.label}
               </button>
             ))}
           </div>
@@ -1029,6 +1041,7 @@ const Notifications = () => {
   const [error, setError]       = React.useState(null);
   const [showAddCh, setShowAddCh] = React.useState(false);
   const [showAddRule, setShowAddRule] = React.useState(false);
+  const [editRule,    setEditRule]    = React.useState(null);
   const [testingId, setTestingId] = React.useState(null);
 
   const fetchAll = React.useCallback(async () => {
@@ -1089,10 +1102,19 @@ const Notifications = () => {
   };
 
   // ── Rules ──
-  const addRule = async (data) => {
-    const created = await api.post('/api/notifications/rules', data);
-    setRules(rs => [...rs, created]);
+  const saveRule = async (rule) => {
+    if (rule.id) {
+      // Edycja istniejącej
+      const updated = await api.put(`/api/notifications/rules/${rule.id}`, rule);
+      setRules(rs => rs.map(r => r.id === rule.id ? (updated || rule) : r));
+    } else {
+      // Nowa reguła
+      const created = await api.post('/api/notifications/rules', rule);
+      setRules(rs => [...rs, created || rule]);
+    }
   };
+
+  const addRule = saveRule; // backward compat
 
   const toggleRule = async (id) => {
     const r = rules.find(r => r.id === id);
@@ -1123,7 +1145,12 @@ const Notifications = () => {
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
       {showAddCh && <AddChannelDialog onClose={()=>setShowAddCh(false)} onAdd={addChannel}/>}
-      {showAddRule && <AddRuleDialog onClose={()=>setShowAddRule(false)} onAdd={addRule} channels={channels}/>}
+      {(showAddRule || editRule) && <RuleDialog
+        onClose={()=>{setShowAddRule(false);setEditRule(null);}}
+        onSave={saveRule}
+        channels={channels}
+        initial={editRule}
+      />}
 
       <div className="segmented">
         <button className={tab==='rules'?'active':''} onClick={()=>setTab('rules')}>Reguły alertów</button>
@@ -1207,7 +1234,7 @@ const Notifications = () => {
                 }}>
                   <Icon name="plus" size={11}/> Domyślne reguły
                 </button>
-                <button className="btn sm primary" onClick={()=>setShowAddRule(true)}><Icon name="plus" size={12}/> Nowa reguła</button>
+                <button className="btn sm primary" onClick={()=>{setEditRule(null);setShowAddRule(true);}}><Icon name="plus" size={12}/> Nowa reguła</button>
               </div>
             </div>
             {rules.length === 0 ? (
@@ -1232,7 +1259,12 @@ const Notifications = () => {
                       </td>
                       <td className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{r.triggered}</td>
                       <td>
-                        <button className="icon-btn" onClick={()=>deleteRule(r.id)}><Icon name="trash" size={13}/></button>
+                        <div className="row gap-sm">
+                          <button className="icon-btn" onClick={()=>{setEditRule(r);setShowAddRule(false);}}
+                            title="Edytuj regułę"><Icon name="edit" size={13}/></button>
+                          <button className="icon-btn" onClick={()=>deleteRule(r.id)}
+                            title="Usuń regułę"><Icon name="trash" size={13}/></button>
+                        </div>
                       </td>
                     </tr>
                   ))}
