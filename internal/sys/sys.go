@@ -358,38 +358,40 @@ func Mounts() []MountPoint {
 		}
 		seen[mp] = true
 
-		// statfs z timeoutem — zawieszone NFS/CIFS blokuje w nieskończoność
-		type statResult struct {
-			mp    MountPoint
-			ok    bool
+		// NFS, CIFS, SMB — NIE wywołuj statfs, kernel blokuje wątek OS
+		// w nieskończoność gdy serwer jest niedostępny (rpc_wait_bit_killable)
+		// Goroutyna z timeoutem NIE pomaga — blokada jest na poziomie kernela
+		isNetwork := fs == "nfs" || fs == "nfs4" || fs == "nfs3" ||
+			fs == "cifs" || fs == "smb3" || fs == "smb2" ||
+			fs == "smbfs" || fs == "davfs" || fs == "fuse.sshfs" ||
+			fs == "fuse.rclone" || fs == "glusterfs" || fs == "ceph"
+
+		if isNetwork {
+			// Dodaj mount bez danych o rozmiarze — nie blokujemy
+			out = append(out, MountPoint{
+				Device:  dev,
+				MountAt: mp,
+				FS:      fs,
+				Options: opts,
+				// TotalB/UsedB/FreeB = 0 — brak danych, nie ryzykujemy
+			})
+			continue
 		}
-		ch := make(chan statResult, 1)
-		mpCopy, devCopy, fsCopy, optsCopy := mp, dev, fs, opts
-		go func() {
-			var stat syscallStatfs
-			if err := statfs(mpCopy, &stat); err == nil {
-				total := stat.Bsize * int64(stat.Blocks)
-				free  := stat.Bsize * int64(stat.Bfree)
-				ch <- statResult{ok: true, mp: MountPoint{
-					Device:  devCopy,
-					MountAt: mpCopy,
-					FS:      fsCopy,
-					Options: optsCopy,
-					TotalB:  uint64(total),
-					UsedB:   uint64(total - free),
-					FreeB:   uint64(free),
-				}}
-			} else {
-				ch <- statResult{ok: false}
-			}
-		}()
-		select {
-		case res := <-ch:
-			if res.ok {
-				out = append(out, res.mp)
-			}
-		case <-time.After(2 * time.Second):
-			// Punkt montowania nie odpowiada — pomijamy
+
+		// Lokalne systemy plików — statfs jest bezpieczny
+		var stat syscallStatfs
+		if err := statfs(mp, &stat); err == nil {
+			total := stat.Bsize * int64(stat.Blocks)
+			free  := stat.Bsize * int64(stat.Bfree)
+			out = append(out, MountPoint{
+				Device:  dev,
+				MountAt: mp,
+				FS:      fs,
+				Options: opts,
+				TotalB:  uint64(total),
+				UsedB:   uint64(total - free),
+				FreeB:   uint64(free),
+			})
 		}
 	}
 	return out
