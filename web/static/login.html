@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Nimbus NAS — Logowanie</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #080b11;
+  --bg-1:     #0d1117;
+  --bg-2:     #131920;
+  --bg-3:     #1a2330;
+  --line:     #1e2837;
+  --line-str: #263044;
+  --fg:       #e4e8f0;
+  --fg-m:     #8a95a8;
+  --fg-d:     #5a6477;
+  --accent:   oklch(0.65 0.18 245);
+  --accent-g: oklch(0.55 0.18 245);
+  --ok:       oklch(0.72 0.14 150);
+  --err:      oklch(0.66 0.2 25);
+  --warn:     oklch(0.78 0.15 75);
+  --mono:     'JetBrains Mono', ui-monospace, monospace;
+  --ui:       'Inter', system-ui, sans-serif;
+  --radius:   10px;
+}
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--ui);
+  background: var(--bg);
+  color: var(--fg);
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Animated grid background ── */
+.bg-canvas {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  overflow: hidden;
+}
+.bg-grid {
+  position: absolute; inset: -20px;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  opacity: 0.5;
+  animation: gridShift 40s linear infinite;
+}
+@keyframes gridShift {
+  0%   { transform: translate(0, 0); }
+  100% { transform: translate(48px, 48px); }
+}
+.bg-glow {
+  position: absolute;
+  width: 600px; height: 600px;
+  border-radius: 50%;
+  background: radial-gradient(circle, oklch(0.5 0.18 245 / 0.12) 0%, transparent 70%);
+  top: -100px; left: 50%;
+  transform: translateX(-50%);
+  animation: glowPulse 6s ease-in-out infinite;
+}
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.6; transform: translateX(-50%) scale(1); }
+  50%       { opacity: 1;   transform: translateX(-50%) scale(1.1); }
+}
+.bg-glow-2 {
+  position: absolute;
+  width: 400px; height: 400px;
+  border-radius: 50%;
+  background: radial-gradient(circle, oklch(0.6 0.15 270 / 0.08) 0%, transparent 70%);
+  bottom: -50px; right: 10%;
+  animation: glowPulse2 9s ease-in-out infinite;
+}
+@keyframes glowPulse2 {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 0.9; }
+}
+
+/* ── Card ── */
+.card-wrap {
+  position: relative; z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  padding: 20px;
+  animation: fadeUp 0.5s cubic-bezier(.22,.68,0,1.2) both;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.logo-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+.logo-icon {
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-g));
+  display: grid; place-items: center;
+  font-size: 20px; font-weight: 700; color: #fff;
+  box-shadow: 0 0 24px oklch(0.65 0.18 245 / 0.4), inset 0 1px 0 oklch(0.75 0.14 245 / 0.3);
+}
+.logo-text { line-height: 1.2; }
+.logo-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+.logo-sub  { font-size: 11px; color: var(--fg-d); font-family: var(--mono); margin-top: 1px; }
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--line-str);
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow:
+    0 0 0 1px oklch(0.65 0.18 245 / 0.06),
+    0 24px 48px #000a,
+    0 4px 12px #0006;
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+.card-hint {
+  font-size: 12px;
+  color: var(--fg-m);
+  margin-bottom: 24px;
+  font-family: var(--mono);
+}
+
+/* ── Form ── */
+.field { margin-bottom: 16px; }
+.field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-m);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.field-input-wrap {
+  position: relative;
+}
+.field-icon {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  color: var(--fg-d);
+  pointer-events: none;
+  display: grid; place-items: center;
+}
+.field-input {
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--line-str);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--ui);
+  font-size: 14px;
+  padding: 10px 12px 10px 38px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  -webkit-font-smoothing: antialiased;
+}
+.field-input::placeholder { color: var(--fg-d); }
+.field-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px oklch(0.65 0.18 245 / 0.15);
+}
+.field-input.error {
+  border-color: var(--err);
+  box-shadow: 0 0 0 3px oklch(0.66 0.2 25 / 0.15);
+  animation: shake 0.35s cubic-bezier(.36,.07,.19,.97) both;
+}
+@keyframes shake {
+  10%, 90% { transform: translateX(-2px); }
+  20%, 80% { transform: translateX(4px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.pw-toggle {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; color: var(--fg-d); cursor: pointer;
+  padding: 4px; border-radius: 4px;
+  transition: color 0.15s;
+}
+.pw-toggle:hover { color: var(--fg); }
+
+/* ── 2FA ── */
+.twofa-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.twofa-digit {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--line-str);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 500;
+  text-align: center;
+  padding: 10px 0;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  width: 100%;
+}
+.twofa-digit:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px oklch(0.65 0.18 245 / 0.15);
+}
+
+/* ── Btn ── */
+.btn-primary {
+  width: 100%;
+  padding: 12px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #fff;
+  font-family: var(--ui);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: -0.01em;
+  transition: filter 0.15s, transform 0.1s;
+  box-shadow: 0 4px 16px oklch(0.65 0.18 245 / 0.35);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  position: relative;
+  overflow: hidden;
+}
+.btn-primary:hover  { filter: brightness(1.1); }
+.btn-primary:active { transform: scale(0.98); }
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-primary .ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: #fff3;
+  transform: scale(0);
+  animation: ripple 0.5s linear;
+  pointer-events: none;
+}
+@keyframes ripple {
+  to { transform: scale(4); opacity: 0; }
+}
+
+.btn-secondary {
+  width: 100%;
+  padding: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-str);
+  border-radius: var(--radius);
+  color: var(--fg-m);
+  font-family: var(--ui);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: background 0.15s, color 0.15s;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn-secondary:hover { background: var(--bg-3); color: var(--fg); }
+
+/* ── Spinner ── */
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid #fff5;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Divider ── */
+.divider {
+  display: flex; align-items: center; gap: 12px;
+  margin: 20px 0;
+  font-size: 11px; color: var(--fg-d);
+}
+.divider::before, .divider::after {
+  content: ''; flex: 1;
+  border-top: 1px solid var(--line-str);
+}
+
+/* ── Status badge ── */
+.status-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--fg-m);
+  font-family: var(--mono);
+  margin-top: 20px;
+}
+.dot-green {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+  flex-shrink: 0;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+/* ── Error msg ── */
+.err-msg {
+  display: flex; align-items: center; gap: 8px;
+  background: oklch(0.66 0.2 25 / 0.1);
+  border: 1px solid oklch(0.66 0.2 25 / 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--err);
+  margin-bottom: 16px;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } }
+
+/* ── Footer ── */
+.footer {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 11px;
+  color: var(--fg-d);
+  font-family: var(--mono);
+}
+</style>
+</head>
+<body>
+
+<div class="bg-canvas">
+  <div class="bg-grid"></div>
+  <div class="bg-glow"></div>
+  <div class="bg-glow-2"></div>
+</div>
+
+<div class="card-wrap">
+  <div class="logo-row">
+    <div class="logo-icon">N</div>
+    <div class="logo-text">
+      <div class="logo-name">Nimbus NAS</div>
+      <div class="logo-sub">v3.4.2 · nimbus.lan</div>
+    </div>
+  </div>
+
+  <!-- Step 1: credentials -->
+  <div class="card" id="step-creds">
+    <div class="card-title">Zaloguj się</div>
+    <div class="card-hint">nimbus.lan · sesja administracyjna</div>
+
+    <div id="err-msg" class="err-msg" style="display:none">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+      </svg>
+      <span id="err-text">Nieprawidłowe dane logowania.</span>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Użytkownik</label>
+      <div class="field-input-wrap">
+        <span class="field-icon">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+          </svg>
+        </span>
+        <input class="field-input" id="inp-user" type="text" placeholder="kuba" autocomplete="username" autofocus/>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Hasło</label>
+      <div class="field-input-wrap">
+        <span class="field-icon">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>
+          </svg>
+        </span>
+        <input class="field-input" id="inp-pass" type="password" placeholder="••••••••" autocomplete="current-password"/>
+        <button class="pw-toggle" id="pw-toggle" onclick="togglePw()" title="Pokaż/ukryj hasło">
+          <svg id="eye-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="btn-login" onclick="doLogin()">
+      <span id="btn-login-text">Zaloguj się</span>
+    </button>
+
+    <div class="divider">lub</div>
+
+    <button class="btn-secondary" onclick="doYubikey()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <rect x="4" y="8" width="16" height="12" rx="2"/>
+        <path d="M8 8V6a4 4 0 018 0v2"/>
+        <circle cx="12" cy="14" r="2" fill="currentColor" stroke="none"/>
+      </svg>
+      Klucz sprzętowy (YubiKey / FIDO2)
+    </button>
+  </div>
+
+  <!-- Step 2: 2FA -->
+  <div class="card" id="step-2fa" style="display:none">
+    <div class="card-title">Weryfikacja dwuetapowa</div>
+    <div class="card-hint" id="twofa-hint">Wprowadź 6-cyfrowy kod z aplikacji authenticator</div>
+
+    <div id="err-msg-2fa" class="err-msg" style="display:none">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+      </svg>
+      Nieprawidłowy kod. Pozostało prób: <span id="tries-left">2</span>
+    </div>
+
+    <div class="twofa-row" id="digits-row"></div>
+
+    <button class="btn-primary" id="btn-2fa" onclick="do2FA()">
+      <span id="btn-2fa-text">Weryfikuj</span>
+    </button>
+    <button class="btn-secondary" onclick="backToLogin()">← Wróć do logowania</button>
+  </div>
+
+  <!-- Step 3: success -->
+  <div class="card" id="step-ok" style="display:none; text-align:center">
+    <div style="margin-bottom:16px">
+      <div style="width:56px;height:56px;border-radius:50%;background:oklch(0.72 0.14 150 / 0.15);border:1px solid oklch(0.72 0.14 150 / 0.4);display:grid;place-items:center;margin:0 auto 12px">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="oklch(0.72 0.14 150)" stroke-width="2.2">
+          <path d="M5 12l4 4L19 7"/>
+        </svg>
+      </div>
+      <div style="font-size:16px;font-weight:600;margin-bottom:4px">Zalogowano pomyślnie</div>
+      <div style="font-size:12px;color:var(--fg-m);font-family:var(--mono)" id="ok-sub">Przekierowanie do pulpitu…</div>
+    </div>
+    <div style="height:3px;background:var(--bg-2);border-radius:4px;overflow:hidden">
+      <div id="ok-bar" style="height:100%;background:var(--ok);width:0%;transition:width 2s linear;border-radius:4px"></div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <div class="dot-green" id="status-dot"></div>
+    <span id="status-text">Łączenie z serwerem…</span>
+  </div>
+
+  <div class="footer" id="footer-text">Nimbus NAS · ładowanie…</div>
+</div>
+
+<script>
+// ---- state ----
+let pwVisible  = false;
+let tries2FA   = 3;
+
+// ---- pobierz dane systemu ----
+async function fetchSystemStatus() {
+  try {
+    // /api/status jest publiczny — nie wymaga sesji
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error('server error');
+    const d = await r.json();
+
+    const parts = ['System online', 'uptime ' + (d.uptime_str || '—')];
+    if (d.ip) parts.push(d.ip);
+    document.getElementById('status-text').textContent = parts.join(' · ');
+    document.getElementById('status-dot').style.background = 'var(--ok)';
+
+    const hostname = d.hostname || 'Nimbus NAS';
+    const kernel   = (d.kernel || '').split('-')[0];
+    document.getElementById('footer-text').textContent =
+      hostname + (kernel ? ' · ' + kernel : '') + ' · sesja wygaśnie po 24h';
+
+  } catch {
+    document.getElementById('status-text').textContent = 'Serwer online';
+    document.getElementById('status-dot').style.background = 'var(--ok)';
+    document.getElementById('footer-text').textContent = 'Nimbus NAS · sesja wygaśnie po 24h';
+  }
+}
+fetchSystemStatus();
+
+// ---- helpers ----
+function togglePw() {
+  pwVisible = !pwVisible;
+  document.getElementById('inp-pass').type = pwVisible ? 'text' : 'password';
+}
+
+function showErr(id, msg) {
+  const el = document.getElementById(id);
+  if (msg && el.querySelector('span')) el.querySelector('span').textContent = msg;
+  el.style.display = 'flex';
+}
+function hideErr(id) { document.getElementById(id).style.display = 'none'; }
+
+function setLoading(btnId, textId, loading) {
+  const btn = document.getElementById(btnId);
+  const txt = document.getElementById(textId);
+  btn.disabled = loading;
+  txt.innerHTML = loading
+    ? '<div class="spinner"></div>'
+    : (btnId === 'btn-login' ? 'Zaloguj się' : 'Weryfikuj');
+}
+
+// ---- build 2FA digit inputs ----
+function build2FA() {
+  const row = document.getElementById('digits-row');
+  row.innerHTML = '';
+  for (let i = 0; i < 6; i++) {
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.maxLength = 1;
+    inp.inputMode = 'numeric'; inp.pattern = '[0-9]';
+    inp.className = 'twofa-digit'; inp.id = 'digit-' + i;
+    inp.addEventListener('input', e => {
+      e.target.value = e.target.value.replace(/\D/, '');
+      if (e.target.value && i < 5) document.getElementById('digit-' + (i+1)).focus();
+      if (getCode().length === 6) do2FA();
+    });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Backspace' && !e.target.value && i > 0)
+        document.getElementById('digit-' + (i-1)).focus();
+    });
+    inp.addEventListener('paste', e => {
+      e.preventDefault();
+      const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g,'').slice(0,6);
+      for (let j = 0; j < 6; j++) {
+        const d = document.getElementById('digit-' + j);
+        d.value = pasted[j] || '';
+      }
+      if (pasted.length === 6) do2FA();
+    });
+    row.appendChild(inp);
+  }
+}
+
+function getCode() {
+  let c = '';
+  for (let i = 0; i < 6; i++) c += (document.getElementById('digit-'+i)?.value || '');
+  return c;
+}
+
+// ---- login flow — prawdziwe API ----
+async function doLogin() {
+  const user = document.getElementById('inp-user').value.trim();
+  const pass = document.getElementById('inp-pass').value;
+  hideErr('err-msg');
+
+  if (!user || !pass) {
+    showErr('err-msg', 'Wypełnij wszystkie pola.');
+    ['inp-user','inp-pass'].forEach(id => {
+      if (!document.getElementById(id).value) document.getElementById(id).classList.add('error');
+    });
+    setTimeout(() => document.querySelectorAll('.field-input').forEach(el => el.classList.remove('error')), 600);
+    return;
+  }
+
+  setLoading('btn-login', 'btn-login-text', true);
+
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+
+    setLoading('btn-login', 'btn-login-text', false);
+
+    if (r.ok) {
+      // Zalogowano — przekieruj do panelu
+      showSuccess();
+    } else {
+      // 401 — złe dane
+      document.getElementById('inp-pass').classList.add('error');
+      document.getElementById('inp-user').classList.add('error');
+      showErr('err-msg', 'Nieprawidłowe dane logowania.');
+      setTimeout(() => document.querySelectorAll('.field-input').forEach(el => el.classList.remove('error')), 600);
+      document.getElementById('inp-pass').value = '';
+      document.getElementById('inp-pass').focus();
+    }
+  } catch(e) {
+    setLoading('btn-login', 'btn-login-text', false);
+    showErr('err-msg', 'Błąd połączenia z serwerem.');
+  }
+}
+
+// 2FA — na razie nieużywane (serwer nie obsługuje TOTP)
+// Pozostawione jako UI placeholder dla przyszłej implementacji
+function do2FA() {
+  const code = getCode();
+  if (code.length < 6) return;
+  hideErr('err-msg-2fa');
+  setLoading('btn-2fa', 'btn-2fa-text', true);
+  // TODO: POST /api/login/2fa gdy backend będzie gotowy
+  setTimeout(() => {
+    setLoading('btn-2fa', 'btn-2fa-text', false);
+    showErr('err-msg-2fa', '2FA nie jest jeszcze skonfigurowane na serwerze.');
+  }, 600);
+}
+
+function showSuccess() {
+  document.getElementById('step-creds').style.display = 'none';
+  // Ukryj ewentualny step-2fa też
+  const s2fa = document.getElementById('step-2fa');
+  if (s2fa) s2fa.style.display = 'none';
+  const ok = document.getElementById('step-ok');
+  ok.style.display = 'block';
+  setTimeout(() => {
+    document.getElementById('ok-bar').style.width = '100%';
+  }, 100);
+  setTimeout(() => {
+    // Wróć na stronę główną (panel) — zachowaj hash jeśli był
+    const hash = sessionStorage.getItem('nimbus_redirect') || '';
+    sessionStorage.removeItem('nimbus_redirect');
+    window.location.href = '/' + hash;
+  }, 1200);
+}
+
+function backToLogin() {
+  tries2FA = 3;
+  hideErr('err-msg-2fa');
+  document.getElementById('step-2fa').style.display = 'none';
+  document.getElementById('step-creds').style.display = 'block';
+  document.getElementById('inp-pass').value = '';
+  document.getElementById('inp-user').focus();
+}
+
+function doYubikey() {
+  const btn = document.querySelector('.btn-secondary');
+  btn.disabled = true;
+  btn.textContent = 'Dotknij klucza…';
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M8 8V6a4 4 0 018 0v2"/><circle cx="12" cy="14" r="2" fill="currentColor" stroke="none"/></svg> Klucz sprzętowy (YubiKey / FIDO2)`;
+    showErr('err-msg', 'Klucz FIDO2 nie wykryty. Upewnij się, że jest podłączony.');
+  }, 2500);
+}
+
+// ---- sprawdź sesję przy ładowaniu ----
+// Jeśli użytkownik ma ważne ciasteczko — od razu do panelu
+(async () => {
+  try {
+    const r = await fetch('/api/check-auth', { credentials: 'include' });
+    if (r.ok) {
+      window.location.replace('/');
+    }
+  } catch {}
+})();
+
+// ---- keyboard ----
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    if (document.getElementById('step-creds').style.display !== 'none') doLogin();
+    else if (document.getElementById('step-2fa') && document.getElementById('step-2fa').style.display !== 'none') do2FA();
+  }
+});
+</script>
+</body>
+</html>

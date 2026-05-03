@@ -1,0 +1,35 @@
+# Binary
+nimbus
+nimbus-race
+
+# JS build artifacts
+web/static/bundle.js
+web/static/bundle.js.map
+web/static/bundle.js.gz
+web/static/styles.css.gz
+
+# Distribution
+dist/
+
+# Go
+*.test
+*.out
+coverage.html
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime / dane wrażliwe
+/var/lib/nimbus/
+~/.nimbus/sessions.json
+
+# Logi
+*.log
+
+# esbuild local
+node_modules/
