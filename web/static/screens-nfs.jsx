@@ -33,6 +33,205 @@ const NfsServer = () => {
 // SERWER NFS
 // ═══════════════════════════════════════════════════════════════════════════
 
+const NfsNotInstalled = ({ onInstalled }) => {
+  const [installing, setInstalling] = React.useState(false);
+  const [log, setLog] = React.useState([]);
+  const [err, setErr] = React.useState('');
+  const logRef = React.useRef(null);
+
+  const packages = ['nfs-kernel-server', 'nfs-common', 'rpcbind'];
+
+  const runInstall = async () => {
+    setInstalling(true);
+    setErr('');
+    setLog(['Rozpoczynanie instalacji NFS Server...']);
+
+    try {
+      const res = await fetch('/api/nfs-server/install', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packages })
+      });
+
+      if (res.ok) {
+        setLog(prev => [...prev, '✓ Instalacja NFS zakończona pomyślnie']);
+        setTimeout(() => onInstalled?.(), 800);
+      } else {
+        const errMsg = await res.text().catch(() => '');
+        setErr(`Błąd instalacji: ${errMsg || res.status}`);
+      }
+    } catch (e) {
+      setErr(`Błąd: ${e.message}`);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  if (installing) {
+    return (
+      <div className="col" style={{ gap: 'var(--gutter)' }}>
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">apt install nfs-kernel-server</div>
+              <div className="card-sub">nfs-kernel-server · nfs-common · rpcbind</div>
+            </div>
+            <div className="card-actions">
+              <span className="badge warn">
+                <span className="dot pulse" /> Instalowanie…
+              </span>
+            </div>
+          </div>
+          <div
+            ref={logRef}
+            style={{
+              padding: '14px 18px',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--fs-xs)',
+              lineHeight: 1.8,
+              background: 'var(--bg)',
+              minHeight: 320,
+              maxHeight: 460,
+              overflowY: 'auto',
+              color: 'var(--fg-muted)'
+            }}
+          >
+            {log.map((line, i) => {
+              let color = 'var(--fg-muted)';
+              if (line.startsWith('✓')) color = 'var(--ok)';
+              else if (line.startsWith('Rozpoczynanie')) color = 'var(--accent)';
+              return <div key={i} style={{ color }}>{line}</div>;
+            })}
+            <span style={{ color: 'var(--accent)' }}>█</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="col" style={{ gap: 'var(--gutter)' }}>
+      {/* Hero section */}
+      <div style={{
+        borderRadius: 12, overflow: 'hidden', position: 'relative',
+        background: 'linear-gradient(135deg, oklch(0.18 0.04 200) 0%, oklch(0.13 0.03 220) 100%)',
+        border: '1px solid oklch(0.65 0.15 200 / 0.2)',
+        padding: '36px 40px',
+      }}>
+        <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.04, pointerEvents: 'none' }} viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice">
+          {[0, 50, 100, 150, 200, 250, 300, 350, 400].map(x => <line key={x} x1={x} y1="0" x2={x} y2="200" stroke="white" strokeWidth="1" />)}
+          {[0, 40, 80, 120, 160, 200].map(y => <line key={y} x1="0" y1={y} x2="400" y2={y} stroke="white" strokeWidth="1" />)}
+        </svg>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 32, flexWrap: 'wrap' }}>
+          <div style={{
+            width: 72, height: 72, borderRadius: 18, flexShrink: 0,
+            background: 'oklch(0.55 0.18 200 / 0.25)',
+            border: '1px solid oklch(0.65 0.15 200 / 0.4)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Icon name="network" size={32} style={{ color: 'oklch(0.75 0.15 200)' }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--fg)', marginBottom: 6 }}>
+              NFS nie jest zainstalowany
+            </div>
+            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--fg-muted)', lineHeight: 1.7, maxWidth: 520 }}>
+              NFS (Network File System) umożliwia montowanie zdalnych katalogów przez sieć lokalną — natywnie obsługiwany przez Linux i macOS, z wysoką wydajnością i niskim narzutem.
+            </div>
+          </div>
+          <button className="btn primary" style={{ padding: '10px 24px', fontSize: 'var(--fs-sm)', flexShrink: 0 }} onClick={runInstall} disabled={installing}>
+            <Icon name="download" size={14} /> Zainstaluj NFS
+          </button>
+        </div>
+      </div>
+
+      {/* Info cards */}
+      <div className="grid grid-3">
+        {[
+          { icon: 'share', title: 'Eksporty NFS', desc: 'Udostępniaj katalogi dla systemów Linux i macOS z precyzyjną kontrolą dostępu per klient.' },
+          { icon: 'cpu', title: 'Wysoka wydajność', desc: 'NFSv4.2 z opcją pNFS i RDMA — minimalne opóźnienia, idealne do transferu dużych plików.' },
+          { icon: 'shield', title: 'Kerberos (krb5)', desc: 'Opcjonalne uwierzytelnianie Kerberos zapewnia szyfrowanie i silną weryfikację tożsamości.' }
+        ].map(({ icon, title, desc }) => (
+          <div key={title} className="card" style={{ padding: '18px 20px' }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 9, marginBottom: 12,
+              background: 'oklch(0.55 0.15 200 / 0.12)',
+              border: '1px solid oklch(0.55 0.15 200 / 0.2)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Icon name={icon} size={17} style={{ color: 'oklch(0.72 0.15 200)' }} />
+            </div>
+            <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)', marginBottom: 5 }}>{title}</div>
+            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)', lineHeight: 1.65 }}>{desc}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Package details */}
+      <div className="grid grid-2">
+        <div className="card">
+          <div className="card-head">
+            <div><div className="card-title">Pakiety do instalacji</div><div className="card-sub">apt install nfs-kernel-server · 3 pakiety · ~1.4 MB</div></div>
+          </div>
+          <table className="table">
+            <thead><tr><th>Pakiet</th><th>Wersja</th><th>Rozmiar</th><th>Opis</th></tr></thead>
+            <tbody>
+              {[
+                { name: 'nfs-kernel-server', ver: '1:2.6.4-3ubuntu1', size: '0.5 MB', desc: 'Serwer NFS (jądro Linux)' },
+                { name: 'nfs-common', ver: '1:2.6.4-3ubuntu1', size: '0.7 MB', desc: 'Wspólne narzędzia NFS/RPC' },
+                { name: 'rpcbind', ver: '1.2.6-6', size: '0.2 MB', desc: 'Mapowanie portów RPC' }
+              ].map(p => (
+                <tr key={p.name}>
+                  <td><span className="mono" style={{ fontWeight: 600 }}>{p.name}</span></td>
+                  <td className="mono dim" style={{ fontSize: 'var(--fs-xs)' }}>{p.ver}</td>
+                  <td className="mono dim">{p.size}</td>
+                  <td style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)' }}>{p.desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div><div className="card-title">Po instalacji dostępne będą</div><div className="card-sub">funkcje panelu NFS</div></div>
+          </div>
+          <div className="card-body col" style={{ gap: 9 }}>
+            {[
+              ['Eksporty NFS', 'Zarządzaj /etc/exports w panelu graficznym'],
+              ['Klient NFS', 'Skanuj sieć i montuj zdalne udziały NFS'],
+              ['Aktywni klienci', 'Monitoruj podłączone hosty w czasie rzeczywistym'],
+              ['Wersje protokołu', 'Wybierz NFSv3, NFSv4 lub NFSv4.2 (pNFS/RDMA)'],
+              ['Kerberos (krb5)', 'Włącz uwierzytelnianie i szyfrowanie Kerberos'],
+              ['Konfiguracja rpcbind', 'Zarządzaj mapowaniem portów RPC i wątkami nfsd']
+            ].map(([k, v]) => (
+              <div key={k} className="row" style={{ gap: 10, alignItems: 'flex-start', fontSize: 'var(--fs-sm)' }}>
+                <span style={{ color: 'var(--ok)', flexShrink: 0, marginTop: 2 }}><Icon name="check" size={13} /></span>
+                <div><span style={{ fontWeight: 500 }}>{k}</span><span style={{ color: 'var(--fg-muted)' }}> — {v}</span></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {err && (
+        <div className="card" style={{ borderColor: 'var(--err)', background: 'oklch(0.25 0.12 20 / 0.15)' }}>
+          <div className="card-head"><div className="card-title" style={{ color: 'var(--err)' }}>Błąd instalacji</div></div>
+          <div style={{ padding: '0 20px 16px', color: 'var(--err)', fontSize: 'var(--fs-sm)' }}>{err}</div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0' }}>
+        <button className="btn primary" style={{ padding: '11px 36px', fontSize: 'var(--fs-base)' }} onClick={runInstall} disabled={installing}>
+          <Icon name="download" size={14} /> apt install nfs-kernel-server
+        </button>
+      </div>
+
+    </div>
+  );
+};
+
 const NfsServerTab = () => {
   const [status,     setStatus]     = React.useState(null);
   const [exports_,   setExports]    = React.useState([]);
@@ -184,87 +383,10 @@ const NfsServerTab = () => {
 
   // ── Ekran instalacji ──────────────────────────────────────────────────────
   if (!installed && !loading) {
-    return (
-      <div className="col" style={{gap:'var(--gutter)'}}>
-        <div className="card" style={{padding:40, textAlign:'center'}}>
-          <div style={{fontSize:48, marginBottom:16, opacity:0.3}}>🖴</div>
-          <div className="card-title" style={{marginBottom:8, fontSize:'var(--fs-lg)'}}>
-            Serwer NFS nie jest zainstalowany
-          </div>
-          <div className="card-sub" style={{marginBottom:24, maxWidth:500, margin:'0 auto 20px'}}>
-            NFS (Network File System) umożliwia udostępnianie katalogów przez sieć dla systemów Linux/Unix.
-            Po instalacji będziesz mógł eksportować udziały NFS i montować je na innych serwerach.
-          </div>
-          
-          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:14, maxWidth:700, margin:'0 auto 24px', textAlign:'left'}}>
-            <div style={{padding:14, background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:8}}>
-              <div style={{fontWeight:600, marginBottom:4, fontSize:'var(--fs-sm)'}}>📦 Pakiety</div>
-              <div className="mono dim" style={{fontSize:'var(--fs-xs)', lineHeight:1.6}}>
-                nfs-kernel-server<br/>
-                nfs-common<br/>
-                rpcbind
-              </div>
-            </div>
-            <div style={{padding:14, background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:8}}>
-              <div style={{fontWeight:600, marginBottom:4, fontSize:'var(--fs-sm)'}}>⚙️ Konfiguracja</div>
-              <div className="mono dim" style={{fontSize:'var(--fs-xs)', lineHeight:1.6}}>
-                /etc/exports<br/>
-                /etc/nfs.conf<br/>
-                /etc/idmapd.conf
-              </div>
-            </div>
-            <div style={{padding:14, background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:8}}>
-              <div style={{fontWeight:600, marginBottom:4, fontSize:'var(--fs-sm)'}}>🔌 Porty</div>
-              <div className="mono dim" style={{fontSize:'var(--fs-xs)', lineHeight:1.6}}>
-                2049 (nfsd)<br/>
-                111 (rpcbind)<br/>
-                mountd, statd
-              </div>
-            </div>
-          </div>
-
-          <button className="btn primary" onClick={installNFS} disabled={installing}
-            style={{padding:'10px 24px', fontSize:'var(--fs-base)'}}>
-            {installing ? (
-              <><span className="dot pulse" style={{display:'inline-block',marginRight:8}}/>Instalowanie NFS Server...</>
-            ) : (
-              <><Icon name="download" size={16}/> Zainstaluj NFS Server</>
-            )}
-          </button>
-          
-          <div style={{marginTop:12, fontSize:'var(--fs-xs)', color:'var(--fg-dim)'}}>
-            Wymaga uprawnień root • Instalacja zajmuje ~30 sekund
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-head">
-            <div className="card-title">Instalacja ręczna</div>
-          </div>
-          <div className="card-body">
-            <div style={{fontSize:'var(--fs-sm)', marginBottom:12, color:'var(--fg-dim)'}}>
-              Możesz również zainstalować NFS Server ręcznie przez terminal:
-            </div>
-            <pre style={{
-              background:'var(--bg-1)', border:'1px solid var(--line)', borderRadius:6,
-              padding:'12px 16px', fontFamily:'var(--font-mono)', fontSize:'var(--fs-xs)',
-              color:'var(--fg-muted)', lineHeight:1.8, margin:0
-            }}>
-{`# Zainstaluj pakiety NFS
-sudo apt-get update
-sudo apt-get install -y nfs-kernel-server nfs-common rpcbind
-
-# Włącz i uruchom usługi
-sudo systemctl enable nfs-server rpcbind
-sudo systemctl start nfs-server rpcbind
-
-# Sprawdź status
-sudo systemctl status nfs-server`}
-            </pre>
-          </div>
-        </div>
-      </div>
-    );
+    return <NfsNotInstalled onInstalled={() => {
+      setInstalled(true);
+      loadAll();
+    }} />;
   }
 
   // ── Normalny widok ────────────────────────────────────────────────────────

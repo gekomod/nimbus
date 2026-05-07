@@ -176,6 +176,17 @@ func (s *Server) routes() {
 	// Fail2Ban
 	a("/api/system/fail2ban-status", s.handleFail2BanStatus)
 
+	// Network detail — bandwidth, container traffic, firewall
+	a("/api/network/bandwidth",       s.handleNetworkBandwidth)
+	a("/api/network/containers",      s.handleContainerNetwork)
+	a("/api/network/firewall/rules",  s.handleFirewallRulesDirect)
+
+	// Temperatury i wentylatory
+	a("/api/temps",              s.handleTemps)
+	a("/api/temps/install",      s.handleTempsInstall)
+	a("/api/fans/control",       s.handleFanControl)
+	a("/api/fans/auto",          s.handleFanAuto)
+
 	// DHCP
 	a("/api/network/dhcp/leases",  s.handleDHCPLeases)
 	a("/api/network/dhcp/config",  s.handleDHCPConfig)

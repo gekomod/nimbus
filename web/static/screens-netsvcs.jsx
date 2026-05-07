@@ -1003,6 +1003,257 @@ const InstallBannerNetSvc = ({ name, icon='download', desc, packages=[], install
   );
 };
 
+const WebDavNotInstalled = ({ onInstall }) => {
+  const [installing, setInstalling] = React.useState(false);
+  const [log, setLog] = React.useState([]);
+  const [err, setErr] = React.useState('');
+  const logRef = React.useRef(null);
+
+  const packages = ['apache2', 'apache2-utils', 'libapache2-mod-dav', 'certbot', 'python3-certbot-apache'];
+
+  const runInstall = async () => {
+    setInstalling(true);
+    setErr('');
+    setLog(['Rozpoczynanie instalacji WebDAV...']);
+    
+    try {
+      const res = await fetch('/api/install-webdav', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packages })
+      });
+      
+      if (res.ok) {
+        setLog(prev => [...prev, '✓ Instalacja WebDAV zakończona pomyślnie']);
+        setTimeout(() => onInstall?.(), 800);
+      } else {
+        const errMsg = await res.text().catch(() => '');
+        setErr(`Błąd instalacji: ${errMsg || res.status}`);
+      }
+    } catch (e) {
+      setErr(`Błąd: ${e.message}`);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  if (installing) {
+    return (
+      <div className="col" style={{ gap: 'var(--gutter)' }}>
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">apt install apache2 libapache2-mod-dav</div>
+              <div className="card-sub">apache2 · mod_dav · mod_ssl · certbot</div>
+            </div>
+            <div className="card-actions">
+              <span className="badge warn">
+                <span className="dot pulse" /> Instalowanie…
+              </span>
+            </div>
+          </div>
+          <div
+            ref={logRef}
+            style={{
+              padding: '14px 18px',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--fs-xs)',
+              lineHeight: 1.8,
+              background: 'var(--bg)',
+              minHeight: 320,
+              maxHeight: 460,
+              overflowY: 'auto',
+              color: 'var(--fg-muted)'
+            }}
+          >
+            {log.map((line, i) => (
+              <div key={i} style={{ color: line.startsWith('✓') ? 'var(--ok)' : 'var(--fg-muted)' }}>
+                {line}
+              </div>
+            ))}
+            <span style={{ color: 'var(--accent)' }}>█</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="col" style={{ gap: 'var(--gutter)' }}>
+      {/* Hero section z gradientem */}
+      <div
+        style={{
+          borderRadius: 12,
+          overflow: 'hidden',
+          position: 'relative',
+          background: 'linear-gradient(135deg, oklch(0.18 0.04 170) 0%, oklch(0.13 0.03 190) 100%)',
+          border: '1px solid oklch(0.65 0.15 170 / 0.2)',
+          padding: '36px 40px'
+        }}
+      >
+        <svg
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.04, pointerEvents: 'none' }}
+          viewBox="0 0 400 200"
+          preserveAspectRatio="xMidYMid slice"
+        >
+          {[0, 50, 100, 150, 200, 250, 300, 350, 400].map(x => (
+            <line key={x} x1={x} y1="0" x2={x} y2="200" stroke="white" strokeWidth="1" />
+          ))}
+          {[0, 40, 80, 120, 160, 200].map(y => (
+            <line key={y} x1="0" y1={y} x2="400" y2={y} stroke="white" strokeWidth="1" />
+          ))}
+        </svg>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 32, flexWrap: 'wrap' }}>
+          <div
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 18,
+              flexShrink: 0,
+              background: 'oklch(0.55 0.18 170 / 0.25)',
+              border: '1px solid oklch(0.65 0.15 170 / 0.4)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+          >
+            <Icon name="network" size={32} style={{ color: 'oklch(0.75 0.15 170)' }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--fg)', marginBottom: 6 }}>
+              WebDAV nie jest zainstalowany
+            </div>
+            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--fg-muted)', lineHeight: 1.7, maxWidth: 520 }}>
+              WebDAV (Apache <span style={{ color: 'oklch(0.75 0.15 170)', fontFamily: 'var(--font-mono)' }}>mod_dav</span>) umożliwia dostęp do plików przez przeglądarkę i klientów DAV — kompatybilny z Windows, macOS, Android i aplikacjami chmurowymi.
+            </div>
+          </div>
+          <button
+            className="btn primary"
+            style={{ padding: '10px 24px', fontSize: 'var(--fs-sm)', flexShrink: 0 }}
+            onClick={runInstall}
+          >
+            <Icon name="download" size={14} /> Zainstaluj WebDAV
+          </button>
+        </div>
+      </div>
+
+      {/* Karty informacyjne */}
+      <div className="grid grid-3">
+        {[
+          { icon: 'network', title: 'Dostęp przez HTTP/HTTPS', desc: 'Montuj foldery jak dysk sieciowy w Windows, macOS i Linux bez dodatkowego oprogramowania.' },
+          { icon: 'shield', title: 'SSL/TLS + Let\'s Encrypt', desc: 'Automatyczny certyfikat HTTPS przez certbot — szyfrowana transmisja danych out-of-the-box.' },
+          { icon: 'key', title: 'Basic i Digest auth', desc: 'Uwierzytelnianie per ścieżka URL — kontroluj dostęp dla poszczególnych użytkowników.' }
+        ].map(({ icon, title, desc }) => (
+          <div key={title} className="card" style={{ padding: '18px 20px' }}>
+            <div
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 9,
+                marginBottom: 12,
+                background: 'oklch(0.55 0.15 170 / 0.12)',
+                border: '1px solid oklch(0.55 0.15 170 / 0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+            >
+              <Icon name={icon} size={17} style={{ color: 'oklch(0.72 0.15 170)' }} />
+            </div>
+            <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)', marginBottom: 5 }}>{title}</div>
+            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)', lineHeight: 1.65 }}>{desc}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabela pakietów i funkcje */}
+      <div className="grid grid-2">
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Pakiety do instalacji</div>
+              <div className="card-sub">apt install apache2 libapache2-mod-dav · 5 pakietów · ~4.8 MB</div>
+            </div>
+          </div>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Pakiet</th>
+                <th>Wersja</th>
+                <th>Rozmiar</th>
+                <th>Opis</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { name: 'apache2', ver: '2.4.58-1ubuntu1', size: '1.9 MB', desc: 'Serwer HTTP Apache2' },
+                { name: 'apache2-utils', ver: '2.4.58-1ubuntu1', size: '0.4 MB', desc: 'Narzędzia (htpasswd, ab)' },
+                { name: 'libapache2-mod-dav', ver: '2.4.58-1ubuntu1', size: '0.3 MB', desc: 'Moduł WebDAV (mod_dav)' },
+                { name: 'certbot', ver: '2.10.0-1', size: '1.2 MB', desc: 'Klient Let\'s Encrypt' },
+                { name: 'python3-certbot-apache', ver: '2.10.0-1', size: '1.0 MB', desc: 'Plugin certbot dla Apache' }
+              ].map(p => (
+                <tr key={p.name}>
+                  <td><span className="mono" style={{ fontWeight: 600 }}>{p.name}</span></td>
+                  <td className="mono dim" style={{ fontSize: 'var(--fs-xs)' }}>{p.ver}</td>
+                  <td className="mono dim">{p.size}</td>
+                  <td style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)' }}>{p.desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Po instalacji dostępne będą</div>
+              <div className="card-sub">funkcje panelu WebDAV</div>
+            </div>
+          </div>
+          <div className="card-body col" style={{ gap: 9 }}>
+            {[
+              ['Ścieżki WebDAV', 'Twórz i zarządzaj udziałami DAV w panelu graficznym'],
+              ['HTTPS / Let\'s Encrypt', 'Automatyczne certyfikaty SSL z auto-odnowieniem'],
+              ['Autoryzacja per ścieżka', 'Basic lub Digest auth dla każdego udziału osobno'],
+              ['Instrukcje klientów', 'Gotowe polecenia dla Windows, macOS, Linux i Android'],
+              ['Blokowanie DAV (locks)', 'Zarządzanie blokadami plików /var/lock/dav'],
+              ['Integracja z mod_ssl', 'TLS 1.2/1.3, HSTS i przekierowanie HTTP→HTTPS']
+            ].map(([k, v]) => (
+              <div key={k} className="row" style={{ gap: 10, alignItems: 'flex-start', fontSize: 'var(--fs-sm)' }}>
+                <span style={{ color: 'var(--ok)', flexShrink: 0, marginTop: 2 }}>
+                  <Icon name="check" size={13} />
+                </span>
+                <div>
+                  <span style={{ fontWeight: 500 }}>{k}</span>
+                  <span style={{ color: 'var(--fg-muted)' }}> — {v}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Błąd instalacji */}
+      {err && (
+        <div className="card" style={{ borderColor: 'var(--err)', background: 'oklch(0.25 0.12 20 / 0.15)' }}>
+          <div className="card-head">
+            <div className="card-title" style={{ color: 'var(--err)' }}>Błąd instalacji</div>
+          </div>
+          <div style={{ padding: '0 20px 16px', color: 'var(--err)', fontSize: 'var(--fs-sm)' }}>{err}</div>
+        </div>
+      )}
+
+      {/* Główny przycisk instalacji */}
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0' }}>
+        <button className="btn primary" style={{ padding: '11px 36px', fontSize: 'var(--fs-base)' }} onClick={runInstall}>
+          <Icon name="download" size={14} /> apt install apache2 libapache2-mod-dav certbot
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const WebDavService = () => {
   const [webdavInstalled, setWebdavInstalled] = React.useState(null); // null = checking
   const [running, setRunning] = React.useState(false);
@@ -1052,16 +1303,10 @@ const WebDavService = () => {
       <div style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)'}}>Sprawdzanie WebDAV…</div>
     </div>
   );
-
-  if (webdavInstalled === false) return (
-    <InstallBannerNetSvc name="Apache WebDAV" icon="globe"
-      desc="WebDAV (Web Distributed Authoring and Versioning) umożliwia udostępnianie plików przez protokół HTTP/HTTPS. Kompatybilny z Windows, macOS, Linux i aplikacjami mobilnymi."
-      packages={['apache2', 'libapache2-mod-webdav']}
-      installEndpoint="/api/services/webdav/install"
-      onInstalled={()=>setWebdavInstalled(true)}
-      docsUrl="https://httpd.apache.org/docs/current/mod/mod_dav.html"
-    />
-  );
+  
+  if (webdavInstalled === false) {
+    return <WebDavNotInstalled onInstall={() => setInstalled(true)} />;
+  }
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>

@@ -162,13 +162,16 @@ func Memory() MemInfo {
 // ─── Network ────────────────────────────────────────────────────────────────
 
 type NetIface struct {
-	Name  string
-	RxB   uint64
-	TxB   uint64
-	State string
-	IP    string
-	MAC   string
-	Speed string
+	Name  string  `json:"name"`
+	RxB   uint64  `json:"rx_bytes"`
+	TxB   uint64  `json:"tx_bytes"`
+	Rx    float64 `json:"rx"`
+	Tx    float64 `json:"tx"`
+	State string  `json:"state"`
+	IP    string  `json:"ip"`
+	MAC   string  `json:"mac"`
+	Speed string  `json:"speed"`
+	VLAN  string  `json:"vlan"`
 }
 
 func NetInterfaces() []NetIface {
@@ -190,6 +193,18 @@ func NetInterfaces() []NetIface {
 			continue
 		}
 		name := strings.TrimSpace(line[:colonIdx])
+
+		// Pomiń lo i interfejsy wirtualne (docker, veth, br-, virbr, tun, tap)
+		if name == "lo" ||
+			strings.HasPrefix(name, "veth") ||
+			strings.HasPrefix(name, "br-") ||
+			strings.HasPrefix(name, "docker") ||
+			strings.HasPrefix(name, "virbr") ||
+			strings.HasPrefix(name, "tun") ||
+			strings.HasPrefix(name, "tap") {
+			continue
+		}
+
 		fields := strings.Fields(line[colonIdx+1:])
 		if len(fields) < 9 {
 			continue
@@ -233,6 +248,12 @@ func NetInterfaces() []NetIface {
 			}
 		}
 
+		// Sprawdź czy interfejs ma VLAN (np. eth0.100)
+		vlan := ""
+		if idx := strings.LastIndex(name, "."); idx > 0 {
+			vlan = name[idx+1:]
+		}
+
 		ifaces = append(ifaces, NetIface{
 			Name:  name,
 			RxB:   rxB,
@@ -241,6 +262,7 @@ func NetInterfaces() []NetIface {
 			IP:    ip,
 			MAC:   mac,
 			Speed: speed,
+			VLAN:  vlan,
 		})
 	}
 	return ifaces
@@ -367,14 +389,42 @@ func Mounts() []MountPoint {
 			fs == "fuse.rclone" || fs == "glusterfs" || fs == "ceph"
 
 		if isNetwork {
-			// Dodaj mount bez danych o rozmiarze — nie blokujemy
-			out = append(out, MountPoint{
-				Device:  dev,
-				MountAt: mp,
-				FS:      fs,
-				Options: opts,
-				// TotalB/UsedB/FreeB = 0 — brak danych, nie ryzykujemy
-			})
+			// NFS/CIFS — użyj "df" z timeoutem procesu zamiast statfs
+			// df ma własny timeout i nie blokuje wątku OS kernela
+			mp2, dev2, fs2, opts2 := mp, dev, fs, opts
+			type dfResult struct {
+				total, used, free uint64
+				ok                bool
+			}
+			ch := make(chan dfResult, 1)
+			go func() {
+				cmd := exec.Command("df", "--output=size,used,avail", "--block-size=1", mp2)
+				cmd.Env = append(os.Environ(), "LC_ALL=C")
+				// Timeout procesu — df sam się przerwie
+				timer := time.AfterFunc(3*time.Second, func() { cmd.Process.Kill() })
+				out2, err := cmd.Output()
+				timer.Stop()
+				if err != nil { ch <- dfResult{}; return }
+				lines := strings.Split(strings.TrimSpace(string(out2)), "\n")
+				if len(lines) < 2 { ch <- dfResult{}; return }
+				fields := strings.Fields(lines[1])
+				if len(fields) < 3 { ch <- dfResult{}; return }
+				var total, used, free uint64
+				fmt.Sscanf(fields[0], "%d", &total)
+				fmt.Sscanf(fields[1], "%d", &used)
+				fmt.Sscanf(fields[2], "%d", &free)
+				ch <- dfResult{total: total, used: used, free: free, ok: true}
+			}()
+			select {
+			case res := <-ch:
+				out = append(out, MountPoint{
+					Device: dev2, MountAt: mp2, FS: fs2, Options: opts2,
+					TotalB: res.total, UsedB: res.used, FreeB: res.free,
+				})
+			case <-time.After(4 * time.Second):
+				// df też się zawiesił — dodaj bez rozmiaru
+				out = append(out, MountPoint{Device: dev2, MountAt: mp2, FS: fs2, Options: opts2})
+			}
 			continue
 		}
 

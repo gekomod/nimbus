@@ -451,7 +451,7 @@ func (s *Server) handleDynDNSInstallCron(w http.ResponseWriter, r *http.Request)
 		selfPath = "/usr/local/bin/nimbus"
 	}
 
-	cronLine := fmt.Sprintf("*/%d * * * * root curl -sf -X POST http://localhost:8585/network/dynamic-dns/update-all -H 'Cookie: session=$(cat /etc/nas-panel/.session 2>/dev/null)' > /dev/null 2>&1", req.Interval)
+	cronLine := fmt.Sprintf("*/%d * * * * root curl -sf -X POST http://localhost/network/dynamic-dns/update-all -H 'Cookie: session=$(cat /etc/nas-panel/.session 2>/dev/null)' > /dev/null 2>&1", req.Interval)
 	marker := "# NimbusNAS DynDNS"
 	cronFile := "/etc/cron.d/nimbus-ddns"
 

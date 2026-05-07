@@ -1,6 +1,7 @@
 // entry.jsx — punkt wejścia dla esbuild
 // Kolejność zgodna z index.html (globale muszą być definiowane w tej kolejności)
 
+import './visibility.jsx';
 import './tweaks-panel.jsx';
 import './icons.jsx';
 import './store.jsx';
@@ -16,6 +17,8 @@ import './screens-nfs.jsx';
 import './screens-servers.jsx';
 import './screens-updates.jsx';
 import './screens-advanced.jsx';
+import './screens-temps.jsx';
+import './screens-network-detail.jsx';
 import './screens-filemanager.jsx';
 import './screens-packages.jsx';
 import './app.jsx';

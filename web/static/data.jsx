@@ -48,13 +48,15 @@ window.NAV = [
     { id: "webdav",  label: "WebDAV",        icon: "globe" },
   ]},
   { group: "Sieć", items: [
-    { id: "network", label: "Sieć", icon: "network" },
-    { id: "servers", label: "Serwery", icon: "network" },
+    { id: "network",    label: "Sieć",           icon: "network" },
+    { id: "netdetail",  label: "Sieć szczegółowo", icon: "network" },
+    { id: "servers",    label: "Serwery",          icon: "network" },
   ]},
   { group: "System", items: [
     { id: "logs", label: "Logi systemowe", icon: "log", badgeAlert: "3" },
     { id: "processes", label: "Procesy", icon: "process" },
     { id: "smart",     label: "S.M.A.R.T.",       icon: "thermometer", badgeAlert: "2" },
+    { id: "temps",     label: "Temperatury",       icon: "thermometer" },
     { id: "terminal", label: "Terminal", icon: "terminal" },
   ]},
   { group: "Administracja", items: [
@@ -68,6 +70,34 @@ window.NAV = [
 ];
 
 // ─── Fetch helper ──────────────────────────────────────────────────────────
+// ── Session interceptor ──────────────────────────────────────────────────────
+// Każdy fetch który dostanie 401 → przekieruj na /login.html
+let _sessionExpired = false;
+
+const _origFetch = window.fetch.bind(window);
+window.fetch = async function(...args) {
+  const r = await _origFetch(...args);
+  if (r.status === 401 && !_sessionExpired) {
+    // Nie przekierowuj jeśli to sam login lub check-auth
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    if (!url.includes('/api/login') && !url.includes('check-auth')) {
+      _sessionExpired = true;
+      // Pokaż komunikat przed przekierowaniem
+      const banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+        'background:var(--err,#ef4444);color:#fff;text-align:center;' +
+        'padding:12px;font-size:14px;font-family:sans-serif;';
+      banner.textContent = '⚠️ Sesja wygasła — przekierowanie do logowania…';
+      document.body.appendChild(banner);
+      setTimeout(() => {
+        sessionStorage.setItem('nimbus_redirect', window.location.hash);
+        window.location.replace('/login.html');
+      }, 1500);
+    }
+  }
+  return r;
+};
+
 async function _get(path) {
   try {
     const r = await fetch(path, { credentials:'include' });
@@ -240,15 +270,26 @@ function _parseUsers(raw) {
 
 // ─── Główna pętla synchronizacji ──────────────────────────────────────────
 async function _syncOnce() {
-  // Jeden endpoint zamiast 14 równoległych żądań
-  const dash = await _get('/api/dashboard');
-  if (!dash) return;
+  // Ładuj tylko dane potrzebne dla dashboardu i sidebaru
+  // Dane specyficzne dla ekranów są ładowane lazy przez same ekrany
+  const [overview, containers, pools, network, smb, ssh, nfs, ftp, logs] = await Promise.all([
+    _get('/api/overview'),
+    _get('/services/docker/containers'),
+    _get('/api/zfs/pools'),
+    _get('/api/network'),
+    _get('/services/samba/status'),
+    _get('/services/ssh/status'),
+    _get('/api/nfs-server/status'),
+    _get('/api/services/ftp-sftp/status'),
+    _get('/api/logs?n=50'),
+  ]);
 
-  const {
-    overview, pools, containers, mounts, network,
-    processes: procs, logs, smb, ssh, nfs, ftp,
-    users, fstab, media: mediaDash,
-  } = dash;
+  // Zmienne których już nie pobieramy globalnie (lazy load per ekran)
+  const mounts = null;
+  const procs  = null;
+  const users  = null;
+  const fstab  = null;
+  const mediaDash = null;
 
   // Overview — zapisz do store dla Sidebar
   if (overview) {
@@ -329,8 +370,47 @@ async function _syncOnce() {
 let _syncTimer = null;
 window.__startSync = function() {
   _syncOnce();
-  _syncTimer = setInterval(_syncOnce, 5000);
+  _syncTimer = setInterval(_syncOnce, 8000);
 };
 window.__stopSync = function() {
   clearInterval(_syncTimer);
+};
+
+// ── Lazy loading per ekran ────────────────────────────────────────────────────
+// Każdy ekran wywołuje useLazyData(url, interval) zamiast polegać na globalnym sync
+// Dane są ładowane TYLKO gdy ekran jest widoczny
+
+window.useLazyData = function(url, interval = 10000) {
+  const [data,    setData]    = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error,   setError]   = React.useState(null);
+
+  React.useEffect(() => {
+    let timer = null;
+    let cancelled = false;
+
+    const load = async () => {
+      if (document.hidden) return; // nie ładuj gdy tab niewidoczny
+      try {
+        const r = await fetch(url, { credentials: 'include' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        if (!cancelled) { setData(d); setError(null); }
+      } catch(e) {
+        if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    timer = setInterval(load, interval);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [url, interval]);
+
+  return { data, loading, error };
 };

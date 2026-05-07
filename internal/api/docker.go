@@ -348,12 +348,30 @@ func (s *Server) handleDockerCompose(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Sprawdź status przez docker compose ps
-		psOut, _ := runCmd("docker", "compose", "-f", file, "ps", "--format", "json")
+		// Sprawdź status przez docker compose ps (z --project-name)
+		// Nazwa projektu = nazwa katalogu (tak jak docker compose domyślnie)
+		psOut, _ := runCmd("docker", "compose", "-f", file, "--project-name", name, "ps", "--format", "json")
 		status := "stopped"
-		if strings.Contains(psOut, `"running"`) || strings.Contains(psOut, `"Up"`) {
+		if psOut == "" {
+			// Fallback — sprawdź przez docker ps czy kontenery z tą nazwą działają
+			psOut2, _ := runCmd("docker", "ps", "--format", "{{.Names}}	{{.Status}}")
+			running := 0
+			for _, line := range strings.Split(psOut2, "") {
+				line = strings.ToLower(line)
+				if strings.Contains(line, strings.ToLower(name)) && strings.Contains(line, "up") {
+					running++
+				}
+			}
+			if running > 0 {
+				if len(services) == 0 || running >= len(services) {
+					status = "running"
+				} else {
+					status = "partial"
+				}
+			}
+		} else if strings.Contains(psOut, `"running"`) || strings.Contains(psOut, `"Up"`) || strings.Contains(psOut, "running") {
 			runningCount := strings.Count(psOut, `"running"`) + strings.Count(psOut, `"Up"`)
-			if runningCount == len(services) || len(services) == 0 {
+			if runningCount >= len(services) || len(services) == 0 {
 				status = "running"
 			} else {
 				status = "partial"
@@ -670,14 +688,19 @@ func (s *Server) handleDockerInspect(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(v, &cfg)
 	}
 
-	// NetworkSettings
+	// NetworkSettings — w tym sieci kontenera
 	var netSettings struct {
-		IPAddress   string `json:"IPAddress"`
-		MacAddress  string `json:"MacAddress"`
-		Gateway     string `json:"Gateway"`
+		IPAddress   string                     `json:"IPAddress"`
+		MacAddress  string                     `json:"MacAddress"`
+		Gateway     string                     `json:"Gateway"`
+		Networks    map[string]json.RawMessage `json:"Networks"`
 	}
 	if v, ok := full["NetworkSettings"]; ok {
 		json.Unmarshal(v, &netSettings)
+	}
+	var networkNames []string
+	for netName := range netSettings.Networks {
+		networkNames = append(networkNames, netName)
 	}
 
 	// Mounts
@@ -693,14 +716,16 @@ func (s *Server) handleDockerInspect(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(v, &mounts)
 	}
 
-	// HostConfig — Ports, RestartPolicy
+	// HostConfig — Ports, RestartPolicy, Binds, NanoCpus
 	var hostCfg struct {
 		PortBindings  map[string]json.RawMessage `json:"PortBindings"`
 		RestartPolicy struct {
 			Name string `json:"Name"`
 		} `json:"RestartPolicy"`
-		Memory    int64 `json:"Memory"`
-		CPUShares int64 `json:"CpuShares"`
+		Memory    int64    `json:"Memory"`
+		NanoCpus  int64    `json:"NanoCpus"`
+		CPUShares int64    `json:"CpuShares"`
+		Binds     []string `json:"Binds"`
 	}
 	if v, ok := full["HostConfig"]; ok {
 		json.Unmarshal(v, &hostCfg)
@@ -759,6 +784,9 @@ func (s *Server) handleDockerInspect(w http.ResponseWriter, r *http.Request) {
 		"memory_limit":   hostCfg.Memory,
 		"cpu_shares":     hostCfg.CPUShares,
 		"mounts":         mounts,
+		"binds":          hostCfg.Binds,
+		"network_names":  networkNames,
+		"nano_cpus":      hostCfg.NanoCpus,
 		"network": map[string]any{
 			"ip":      netSettings.IPAddress,
 			"mac":     netSettings.MacAddress,

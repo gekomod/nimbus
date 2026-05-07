@@ -128,7 +128,7 @@ const Storage = () => {
         setDevices(data.devices);
       }).catch(()=>{});
     load();
-    const id = setInterval(load, 10000);
+    const id = setInterval(load, 15000);
     return () => clearInterval(id);
   }, []);
 
@@ -242,6 +242,36 @@ const PoolDetail = ({ pool, onBack }) => {
   const pct    = pool.total > 0 ? (pool.used / pool.total) * 100 : 0;
   const blocks = 32;
   const used   = Math.round((pct / 100) * blocks);
+
+  const [scrubRunning, setScrubRunning] = React.useState(false);
+  const [scrubOutput,  setScrubOutput]  = React.useState('');
+  const [autoSnap,     setAutoSnap]     = React.useState(null);
+  const [poolProps,    setPoolProps]     = React.useState({});
+
+  React.useEffect(() => {
+    // Prawdziwe właściwości ZFS
+    fetch('/api/storage/exec-command', {method:'POST', credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command: 'zfs get -H -o property,value compression,dedup,encryption '+pool.name})})
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{
+        if(!d?.output) return;
+        const props = {};
+        d.output.split('\n').forEach(line=>{
+          const parts = line.split('\t');
+          if(parts.length>=2) props[parts[0].trim()] = parts[1].trim();
+        });
+        setPoolProps(props);
+      }).catch(()=>{});
+
+    // Sprawdź cron dla auto-migawek
+    fetch('/api/storage/exec-command', {method:'POST', credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command: `crontab -l 2>/dev/null | grep -c "zfs snapshot.*${pool.name}" || echo 0`})})
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{ setAutoSnap(parseInt(d?.output||'0') > 0); })
+      .catch(()=>setAutoSnap(false));
+  }, [pool.name]);
   const parity = (pool.parity || 0) * 4;
 
   return (
@@ -254,9 +284,25 @@ const PoolDetail = ({ pool, onBack }) => {
           <span className="dim mono" style={{fontSize:'var(--fs-xs)'}}>/{pool.name}</span>
         </div>
         <div className="row gap-sm">
-          <button className="btn sm">Migawki</button>
-          <button className="btn sm" onClick={()=>fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'zpool scrub '+pool.name})})}>Scrub</button>
-          <button className="btn sm primary">Eksportuj</button>
+          <button className="btn sm" onClick={()=>setShowSnaps(true)}>Migawki</button>
+          <button className="btn sm" disabled={scrubRunning} onClick={async()=>{
+            setScrubRunning(true);
+            const r = await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({command:'zpool scrub '+pool.name})});
+            const d = await r.json();
+            setScrubOutput(d.output||'Scrub uruchomiony');
+            setTimeout(()=>setScrubRunning(false), 3000);
+          }}>{scrubRunning ? 'Scrub…' : 'Scrub'}</button>
+          <button className="btn sm primary" onClick={async()=>{
+            if(!confirm('Eksportować pulę '+pool.name+'? Zostanie odmontowana.')) return;
+            const r = await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({command:'zpool export '+pool.name})});
+            const d = await r.json();
+            alert(d.ok ? 'Pula wyeksportowana' : 'Błąd: '+d.output);
+            if(d.ok) onBack();
+          }}>Eksportuj</button>
         </div>
       </div>
 
@@ -288,12 +334,30 @@ const PoolDetail = ({ pool, onBack }) => {
             <KV k="Stan"         v={<span className="badge ok"><span className="dot"/>ONLINE</span>}/>
             <KV k="Typ"          v={<span className="mono">{pool.type || 'ZFS'}</span>}/>
             <KV k="Suma kontrolna" v="SHA-256"/>
-            <KV k="Kompresja"    v={<span className="mono">lz4</span>}/>
-            <KV k="Deduplikacja" v={<span className="dim">wyłączona</span>}/>
             <hr className="div"/>
-            <div className="row" style={{justifyContent:'space-between'}}><span>Auto-migawki co godzinę</span><div className="toggle on"/></div>
-            <div className="row" style={{justifyContent:'space-between'}}><span>Replikacja na backup-cold</span><div className="toggle on"/></div>
-            <div className="row" style={{justifyContent:'space-between'}}><span>Szyfrowanie at-rest</span><div className="toggle"/></div>
+            <KV k="Kompresja"     v={<span className="mono">{poolProps.compression||'—'}</span>}/>
+            <KV k="Deduplikacja"  v={<span className="mono">{poolProps.dedup||'—'}</span>}/>
+            <KV k="Szyfrowanie"   v={<span className={poolProps.encryption&&poolProps.encryption!=='off'?'badge ok':'mono dim'}>{poolProps.encryption||'—'}</span>}/>
+            <hr className="div"/>
+            <div className="row" style={{justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontSize:'var(--fs-sm)'}}>Auto-migawki co godzinę</span>
+              <div className={'toggle'+(autoSnap?' on':'')} style={{cursor:'pointer'}} onClick={async()=>{
+                const enable = !autoSnap;
+                const cmd = enable
+                  ? 'echo "0 * * * * zfs snapshot '+pool.name+'@auto-$(date +\%Y\%m\%d\%H%M)" | crontab -'
+                  : 'crontab -l | grep -v "zfs snapshot.*'+pool.name+'" | crontab -';
+                await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+                  headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})});
+                setAutoSnap(enable);
+              }}/>
+            </div>
+            {scrubOutput && (
+              <div style={{fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',color:'var(--ok)',
+                padding:'6px 8px',background:'color-mix(in oklch,var(--ok) 8%,transparent)',
+                borderRadius:5,marginTop:4}}>
+                {scrubOutput}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -639,7 +703,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
         storeSet('MOUNTS', parsed);
       }).catch(()=>{});
     load();
-    const id = setInterval(load, 8000);
+    const id = setInterval(load, 20000);
     return () => clearInterval(id);
   }, []);
 

@@ -216,6 +216,327 @@ const TerminalDialog = ({ c, onClose }) => {
 
 
 
+// ── ContainerEditDialog — edycja działającego kontenera ─────────────────────
+const ContainerEditDialog = ({ c, onClose, onSaved }) => {
+  const [inspect,  setInspect]  = React.useState(null);
+  const [loading,  setLoading]  = React.useState(true);
+  const [saving,   setSaving]   = React.useState(false);
+  const [err,      setErr]      = React.useState('');
+  const [tab,      setTab]      = React.useState('env');
+
+  // Edytowalne pola
+  const [envVars,  setEnvVars]  = React.useState([]);
+  const [memory,   setMemory]   = React.useState('');
+  const [cpus,     setCpus]     = React.useState('');
+  const [restart,  setRestart]  = React.useState('');
+  const [mounts,   setMounts]   = React.useState([]); // {src, dst, mode}
+  const [networks, setNetworks] = React.useState([]); // nazwy sieci
+  const [allNets,  setAllNets]  = React.useState([]); // dostępne sieci
+
+  React.useEffect(() => {
+    fetch(`/api/docker/inspect/${c.id}`, {credentials:'include'})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        setInspect(d);
+// env parsowany niżej
+
+        setRestart(d.restart_policy || d.HostConfig?.RestartPolicy?.Name || 'no');
+        // Pamięć i CPU
+        const memBytes = d.memory_limit || d.HostConfig?.Memory || 0;
+        setMemory(memBytes ? Math.round(memBytes/1024/1024)+'m' : '');
+        const nc = d.nano_cpus || d.HostConfig?.NanoCpus || 0;
+        setCpus(nc ? (nc/1e9).toFixed(2) : '');
+        // Zmienne env — backend zwraca jako "env" (tablica stringów)
+        const envArr = d.env || d.Config?.Env || [];
+        const parsedEnv = envArr.map(e => {
+          const idx = e.indexOf('=');
+          return idx >= 0
+            ? { key: e.slice(0, idx), val: e.slice(idx+1) }
+            : { key: e, val: '' };
+        });
+        setEnvVars(parsedEnv);
+
+        // Wolumeny — backend zwraca "binds" (string src:dst:mode) lub "mounts"
+        const binds = d.binds || [];
+        const mnts = binds.length > 0
+          ? binds.map(b => {
+              const parts = b.split(':');
+              return { src: parts[0]||'', dst: parts[1]||'', mode: parts[2]||'rw' };
+            })
+          : (d.mounts || []).map(m => ({
+              src: m.Source || m.source || '',
+              dst: m.Destination || m.destination || '',
+              mode: m.Mode || m.mode || 'rw',
+            }));
+        setMounts(mnts);
+
+        // Sieci — backend zwraca "network_names"
+        const nets = d.network_names || Object.keys(d.NetworkSettings?.Networks || {});
+        setNetworks(nets);
+      })
+      .catch(e => setErr(e.message))
+      .finally(() => setLoading(false));
+
+    // Pobierz dostępne sieci Docker
+    fetch('/api/storage/exec-command', {
+      method:'POST', credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command: 'docker network ls --format "{{.Name}}"'}),
+    }).then(r=>r.ok?r.json():null)
+      .then(d=>{ if(d?.output) setAllNets(d.output.split('\n').filter(Boolean)); })
+      .catch(()=>{});
+  }, [c.id]);
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      // 1. docker update — limity zasobów i restart policy
+      const updateArgs = [];
+      if (memory)  updateArgs.push('--memory', memory);
+      if (cpus)    updateArgs.push('--cpus', cpus);
+      if (restart) updateArgs.push('--restart', restart);
+      updateArgs.push(c.id);
+
+      if (updateArgs.length > 1) {
+        const r1 = await fetch('/api/storage/exec-command', {
+          method:'POST', credentials:'include',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({command: 'docker update ' + updateArgs.join(' ')}),
+        });
+        const d1 = await r1.json();
+        if (!d1.ok) throw new Error('docker update: ' + d1.output);
+      }
+
+      // 2. Sprawdź czy potrzebna rekreacja (ENV, mounts, sieci)
+      const origEnv   = (inspect?.Config?.Env || []);
+      const newEnv    = envVars.map(e => e.key+'='+e.val);
+      const envChanged = JSON.stringify(origEnv.sort()) !== JSON.stringify(newEnv.sort());
+
+      const origMounts = (inspect?.HostConfig?.Binds || []);
+      const newMounts  = mounts.map(m => m.src+':'+m.dst+(m.mode?':'+m.mode:''));
+      const mntChanged = JSON.stringify(origMounts.sort()) !== JSON.stringify(newMounts.sort());
+
+      const origNets = Object.keys(inspect?.NetworkSettings?.Networks || {}).sort();
+      const netsChanged = JSON.stringify(origNets) !== JSON.stringify([...networks].sort());
+
+      if (envChanged || mntChanged || netsChanged) {
+        const envStr  = envVars.map(e => `-e "${e.key}=${e.val.replace(/"/g,'\"')}"`).join(' ');
+        const mntStr  = mounts.filter(m=>m.src&&m.dst).map(m => `-v "${m.src}:${m.dst}${m.mode?':'+m.mode:''}"`).join(' ');
+        const img     = inspect?.Config?.Image || c.image;
+        const name    = c.name.replace(/^\//, '');
+
+        // Dodaj nowe sieci, usuń stare
+        const addNets = networks.filter(n => !origNets.includes(n));
+        const rmNets  = origNets.filter(n => !networks.includes(n) && n !== 'bridge');
+
+        const cmds = [
+          `docker stop ${c.id}`,
+          `docker rename ${c.id} ${name}_bak_$(date +%s)`,
+          `docker run -d --name ${name} ${envStr} ${mntStr} ${img}`,
+          ...addNets.map(n => `docker network connect ${n} ${name}`),
+          ...rmNets.map(n  => `docker network disconnect ${n} ${name} 2>/dev/null || true`),
+        ].join(' && ');
+
+        const r3 = await fetch('/api/storage/exec-command', {
+          method:'POST', credentials:'include',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({command: cmds}),
+        });
+        const d3 = await r3.json();
+        if (!d3.ok) throw new Error('Rekreacja kontenera: ' + d3.output);
+      }
+
+      onSaved();
+    } catch(e) {
+      setErr(e.message);
+    } finally { setSaving(false); }
+  };
+
+  const inpSt = {background:'var(--bg-2)',border:'1px solid var(--line-strong)',
+    borderRadius:5,padding:'5px 8px',color:'var(--fg)',fontFamily:'var(--font-mono)',
+    fontSize:'var(--fs-xs)',outline:'none'};
+
+  const TABS = [
+    {id:'env',       label:'Zmienne ENV'},
+    {id:'mounts',    label:'Wolumeny'},
+    {id:'network',   label:'Sieć'},
+    {id:'resources', label:'Zasoby'},
+    {id:'restart',   label:'Restart policy'},
+  ];
+
+  return (
+    <Modal title={`Edytuj kontener · ${c.name}`} sub={c.image} onClose={onClose} width={640}
+      footer={<>
+        <button className="btn" onClick={onClose}>Anuluj</button>
+        <button className="btn primary" onClick={save} disabled={saving||loading}>
+          {saving ? 'Zapisywanie…' : 'Zastosuj i restartuj'}
+        </button>
+      </>}
+    >
+      {loading && <div style={{padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie konfiguracji…</div>}
+      {err && <div style={{padding:'8px 12px',background:'color-mix(in oklch,var(--err) 10%,transparent)',
+        borderRadius:6,color:'var(--err)',fontSize:'var(--fs-sm)',marginBottom:12}}>{err}</div>}
+
+      {!loading && (<>
+        {/* Tabs */}
+        <div style={{display:'flex',gap:4,borderBottom:'1px solid var(--line)',marginBottom:16}}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={()=>setTab(t.id)}
+              style={{padding:'6px 14px',background:'none',border:'none',cursor:'pointer',
+                color:tab===t.id?'var(--fg)':'var(--fg-dim)',
+                borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent',
+                fontSize:'var(--fs-sm)',marginBottom:-1}}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ENV */}
+        {tab === 'env' && (
+          <div>
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
+              <button className="btn sm" onClick={()=>setEnvVars(e=>[...e,{key:'',val:''}])}>
+                + Dodaj zmienną
+              </button>
+            </div>
+            <div style={{maxHeight:360,overflowY:'auto',display:'flex',flexDirection:'column',gap:6}}>
+              {envVars.map((e,i) => (
+                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:6,alignItems:'center'}}>
+                  <input style={{...inpSt,width:'100%'}} value={e.key} placeholder="KLUCZ"
+                    onChange={ev=>setEnvVars(arr=>arr.map((x,j)=>j===i?{...x,key:ev.target.value}:x))}/>
+                  <input style={{...inpSt,width:'100%'}} value={e.val} placeholder="wartość"
+                    onChange={ev=>setEnvVars(arr=>arr.map((x,j)=>j===i?{...x,val:ev.target.value}:x))}/>
+                  <button className="btn sm ghost" style={{color:'var(--err)'}}
+                    onClick={()=>setEnvVars(arr=>arr.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:10,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
+              ⚠️ Zmiana ENV wymaga rekrecji kontenera (stop → rm → run z nowymi zmiennymi)
+            </div>
+          </div>
+        )}
+
+        {/* WOLUMENY */}
+        {tab === 'mounts' && (
+          <div>
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
+              <button className="btn sm" onClick={()=>setMounts(m=>[...m,{src:'',dst:'',mode:'rw'}])}>
+                + Dodaj wolumen
+              </button>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:6,maxHeight:360,overflowY:'auto'}}>
+              {mounts.length === 0 && (
+                <div style={{color:'var(--fg-dim)',fontSize:'var(--fs-sm)',padding:'20px 0',textAlign:'center'}}>
+                  Brak punktów montowania
+                </div>
+              )}
+              {mounts.map((m,i) => (
+                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr 80px auto',gap:6,alignItems:'center'}}>
+                  <input style={{...inpSt,width:'100%'}} value={m.src} placeholder="Źródło (host)"
+                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,src:e.target.value}:x))}/>
+                  <input style={{...inpSt,width:'100%'}} value={m.dst} placeholder="Cel (kontener)"
+                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,dst:e.target.value}:x))}/>
+                  <select style={{...inpSt}} value={m.mode}
+                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,mode:e.target.value}:x))}>
+                    <option value="rw">rw</option>
+                    <option value="ro">ro</option>
+                  </select>
+                  <button className="btn sm ghost" style={{color:'var(--err)'}}
+                    onClick={()=>setMounts(arr=>arr.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:10,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
+              ⚠️ Zmiana wolumenów wymaga rekreacji kontenera
+            </div>
+          </div>
+        )}
+
+        {/* SIEĆ */}
+        {tab === 'network' && (
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            <div style={{fontSize:'var(--fs-sm)',color:'var(--fg-muted)',marginBottom:4}}>
+              Podłączone sieci Docker — zaznacz aktywne:
+            </div>
+            {allNets.map(net => (
+              <div key={net} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
+                borderRadius:7,border:'1px solid',cursor:'pointer',
+                borderColor:networks.includes(net)?'var(--accent)':'var(--line)',
+                background:networks.includes(net)?'color-mix(in oklch,var(--accent) 8%,transparent)':'var(--bg-2)'}}
+                onClick={()=>setNetworks(prev =>
+                  prev.includes(net) ? prev.filter(n=>n!==net) : [...prev, net]
+                )}>
+                <div style={{width:14,height:14,borderRadius:3,border:'2px solid',flexShrink:0,
+                  borderColor:networks.includes(net)?'var(--accent)':'var(--fg-dim)',
+                  background:networks.includes(net)?'var(--accent)':'transparent',
+                  display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  {networks.includes(net) && <span style={{color:'#fff',fontSize:10,lineHeight:1}}>✓</span>}
+                </div>
+                <span style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)'}}>{net}</span>
+              </div>
+            ))}
+            {allNets.length === 0 && (
+              <div style={{color:'var(--fg-dim)',fontSize:'var(--fs-sm)',padding:'20px 0',textAlign:'center'}}>
+                Brak dostępnych sieci
+              </div>
+            )}
+            <div style={{marginTop:8,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
+              ⚠️ Zmiana sieci wymaga rekreacji kontenera
+            </div>
+          </div>
+        )}
+
+        {/* RESOURCES */}
+        {tab === 'resources' && (
+          <div style={{display:'flex',flexDirection:'column',gap:14}}>
+            <div>
+              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:5}}>Limit pamięci RAM</div>
+              <input style={{...inpSt,width:200}} value={memory}
+                onChange={e=>setMemory(e.target.value)} placeholder="np. 512m, 2g (puste = bez limitu)"/>
+            </div>
+            <div>
+              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:5}}>Limit CPU</div>
+              <input style={{...inpSt,width:200}} value={cpus}
+                onChange={e=>setCpus(e.target.value)} placeholder="np. 0.5, 2.0 (puste = bez limitu)"/>
+            </div>
+            <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-muted)'}}>
+              Limity zasobów stosowane natychmiast przez <code>docker update</code> bez restartu.
+            </div>
+          </div>
+        )}
+
+        {/* RESTART */}
+        {tab === 'restart' && (
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            {[
+              {val:'no',             label:'no',             desc:'Nie restartuj automatycznie'},
+              {val:'always',         label:'always',         desc:'Zawsze restartuj (też po docker restart)'},
+              {val:'unless-stopped', label:'unless-stopped', desc:'Restartuj chyba że ręcznie zatrzymany'},
+              {val:'on-failure',     label:'on-failure',     desc:'Restartuj tylko gdy exit code ≠ 0'},
+            ].map(o => (
+              <div key={o.val} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
+                borderRadius:7,border:'1px solid',cursor:'pointer',
+                borderColor:restart===o.val?'var(--accent)':'var(--line)',
+                background:restart===o.val?'color-mix(in oklch,var(--accent) 8%,transparent)':'var(--bg-2)'}}
+                onClick={()=>setRestart(o.val)}>
+                <div style={{width:14,height:14,borderRadius:'50%',border:'2px solid',flexShrink:0,
+                  borderColor:restart===o.val?'var(--accent)':'var(--fg-dim)',
+                  background:restart===o.val?'var(--accent)':'transparent'}}/>
+                <div>
+                  <div style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)'}}>{o.label}</div>
+                  <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>{o.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </>)}
+    </Modal>
+  );
+};
+
 const InspectDialog = ({ c, onClose }) => {
   const Modal = window.Modal;
   const [data, setData]     = React.useState(null);
@@ -363,6 +684,7 @@ const MoreMenu = ({ c, onAction, onClose }) => {
     { label:'Restartuj',  icon:'restart', action:'restart', disabled: false },
     { label:'Pauza',      icon:'pause',   action:'pause',   disabled: c.state!=='running' },
     null,
+    { label:'Edytuj',     icon:'edit',    action:'edit',    disabled: false },
     { label:'Logi',       icon:'log',     action:'logs',    disabled: false },
     { label:'Terminal',   icon:'terminal',action:'shell',   disabled: c.state!=='running' },
     { label:'Inspekcja',  icon:'search',  action:'inspect', disabled: false },
@@ -588,6 +910,156 @@ const ComposeDialog = ({ stack, onClose, onDeploy }) => {
 };
 
 // ── ContCard ─────────────────────────────────────────────────────────────────
+// ── DockerLoadingSplash — z nowego szablonu ─────────────────────────────────
+const DOCKER_LOAD_STEPS = [
+  { text: 'Łączenie z Docker daemon…',        pct: 8  },
+  { text: 'Pobieranie listy kontenerów…',      pct: 22 },
+  { text: 'Odczyt metadanych obrazów…',        pct: 38 },
+  { text: 'Skanowanie wolumenów…',             pct: 52 },
+  { text: 'Sprawdzanie sieci Docker…',         pct: 65 },
+  { text: 'Wczytywanie statystyk CPU/RAM…',    pct: 78 },
+  { text: 'Ładowanie stosów Compose…',         pct: 90 },
+  { text: 'Gotowe.',                           pct: 100 },
+];
+
+const DockerLoadingSplash = ({ onDone }) => {
+  const [step, setStep] = React.useState(0);
+  const [pct, setPct]   = React.useState(0);
+  const [finished, setFinished] = React.useState(false);
+
+  React.useEffect(() => {
+    let s = 0;
+    const advance = () => {
+      if (s >= DOCKER_LOAD_STEPS.length) {
+        setFinished(true);
+        setTimeout(onDone, 600);
+        return;
+      }
+      setStep(s);
+      setPct(DOCKER_LOAD_STEPS[s].pct);
+      s++;
+      const delay = s === DOCKER_LOAD_STEPS.length ? 400 : 260 + Math.random() * 160;
+      setTimeout(advance, delay);
+    };
+    const tid = setTimeout(advance, 180);
+    return () => clearTimeout(tid);
+  }, []);
+
+  const current = DOCKER_LOAD_STEPS[Math.min(step, DOCKER_LOAD_STEPS.length - 1)];
+
+  return (
+    <div style={{
+      display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+      minHeight:420, gap:0,
+    }}>
+      {/* Docker whale SVG */}
+      <div style={{
+        width:80, height:80, borderRadius:20, marginBottom:28,
+        background:'oklch(0.18 0.04 245)',
+        border:'1px solid oklch(0.55 0.2 245 / 0.35)',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        boxShadow:'0 0 40px oklch(0.55 0.2 245 / 0.15)',
+        position:'relative',
+      }}>
+        <svg width="46" height="38" viewBox="0 0 46 38" fill="none">
+          <rect x="4"  y="18" width="30" height="14" rx="5" fill="oklch(0.72 0.18 245)"/>
+          <rect x="8"  y="10" width="7"  height="10" rx="2" fill="oklch(0.72 0.18 245)"/>
+          <rect x="17" y="6"  width="7"  height="14" rx="2" fill="oklch(0.72 0.18 245)"/>
+          <rect x="26" y="10" width="7"  height="10" rx="2" fill="oklch(0.72 0.18 245)"/>
+          <rect x="8"  y="14" width="25" height="2"  rx="1" fill="oklch(0.55 0.18 245)"/>
+          <path d="M34 25 Q42 22 40 32 Q36 36 34 32Z" fill="oklch(0.72 0.18 245)"/>
+          <circle cx="10" cy="23" r="1.5" fill="white" opacity="0.8"/>
+        </svg>
+        {!finished && (
+          <div style={{
+            position:'absolute', inset:-6, borderRadius:26,
+            border:'1px solid oklch(0.55 0.2 245 / 0.4)',
+            animation:'docker-pulse 1.6s ease-out infinite',
+          }}/>
+        )}
+      </div>
+
+      <div style={{fontSize:18, fontWeight:600, color:'var(--fg)', marginBottom:6}}>
+        {finished ? 'Docker gotowy' : 'Ładowanie Docker…'}
+      </div>
+      <div style={{
+        fontSize:'var(--fs-sm)', color:'var(--fg-dim)', marginBottom:28,
+        fontFamily:'var(--font-mono)', minHeight:20, transition:'opacity 0.2s',
+      }}>
+        {current.text}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{width:320, height:5, background:'var(--bg-2)', borderRadius:3, overflow:'hidden', marginBottom:10}}>
+        <div style={{
+          height:'100%', borderRadius:3,
+          width: pct + '%',
+          background: finished ? 'var(--ok)' : 'linear-gradient(90deg, oklch(0.55 0.2 245), oklch(0.72 0.18 245))',
+          transition:'width 0.28s cubic-bezier(0.4,0,0.2,1), background 0.4s',
+          boxShadow: finished ? 'none' : '0 0 10px oklch(0.65 0.2 245 / 0.6)',
+        }}/>
+      </div>
+
+      {/* Step dots */}
+      <div style={{display:'flex', gap:6, marginBottom:28}}>
+        {DOCKER_LOAD_STEPS.map((_, i) => (
+          <div key={i} style={{
+            width:  i <= step ? 18 : 6,
+            height: 6, borderRadius:3,
+            background: i < step ? 'var(--ok)' : i === step ? 'oklch(0.72 0.18 245)' : 'var(--bg-2)',
+            transition:'width 0.25s, background 0.25s',
+          }}/>
+        ))}
+      </div>
+
+      <div style={{fontSize:'var(--fs-xs)', color:'var(--fg-muted)', fontFamily:'var(--font-mono)'}}>
+        {pct}% — kontenerów: {window.storeGet ? (window.storeGet('CONTAINERS')||[]).length : 0}
+      </div>
+
+      <style>{`
+        @keyframes docker-pulse {
+          0%   { opacity:0.8; transform:scale(1); }
+          100% { opacity:0;   transform:scale(1.5); }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+// ── ContSkeleton — skeleton karty podczas ładowania ─────────────────────────
+const ContSkeleton = () => (
+  <div className="cont-card" style={{opacity:0.5}}>
+    <div className="row" style={{justifyContent:'space-between'}}>
+      <div className="row gap-md">
+        <div className="cont-icon" style={{background:'var(--bg-3)',color:'transparent'}}>?</div>
+        <div>
+          <div style={{width:100,height:12,background:'var(--bg-3)',borderRadius:4,marginBottom:6}}/>
+          <div style={{width:140,height:10,background:'var(--bg-3)',borderRadius:4}}/>
+        </div>
+      </div>
+      <div style={{width:60,height:20,background:'var(--bg-3)',borderRadius:4}}/>
+    </div>
+    <div className="grid" style={{gridTemplateColumns:'1fr 1fr',gap:8,marginTop:12}}>
+      {[0,1].map(i=>(
+        <div key={i}>
+          <div style={{width:30,height:9,background:'var(--bg-3)',borderRadius:3,marginBottom:6}}/>
+          <div style={{width:50,height:13,background:'var(--bg-3)',borderRadius:3,marginBottom:6}}/>
+          <div className="bar"><i style={{width:'0%'}}/></div>
+        </div>
+      ))}
+    </div>
+    <div className="row" style={{justifyContent:'space-between',marginTop:10}}>
+      <div style={{width:80,height:10,background:'var(--bg-3)',borderRadius:3}}/>
+      <div style={{width:50,height:10,background:'var(--bg-3)',borderRadius:3}}/>
+    </div>
+    <div className="row gap-sm" style={{borderTop:'1px solid var(--line)',paddingTop:10,marginTop:10}}>
+      {[80,70,55].map((w,i)=>(
+        <div key={i} style={{width:w,height:26,background:'var(--bg-3)',borderRadius:5}}/>
+      ))}
+    </div>
+  </div>
+);
+
 const ContCard = ({c, onAction, moreFor, setMoreFor}) => (
   <div className="cont-card">
     <div className="row" style={{justifyContent:'space-between'}}>
@@ -637,12 +1109,13 @@ const ContCard = ({c, onAction, moreFor, setMoreFor}) => (
 );
 
 // ── Docker: tab Kontenery ─────────────────────────────────────────────────────
-const DockerContainers = ({ containers, setContainers }) => {
+const DockerContainers = ({ containers, setContainers, loading }) => {
   const [filter, setFilter] = React.useState('all');
   const [view,   setView]   = React.useState('grid');
   const [logsFor, setLogsFor]   = React.useState(null);
   const [termFor, setTermFor]   = React.useState(null);
   const [inspectFor, setInspectFor] = React.useState(null);
+  const [editFor,    setEditFor]    = React.useState(null);
   const [moreFor, setMoreFor]   = React.useState(null);
   const [showNew, setShowNew]   = React.useState(false);
 
@@ -651,6 +1124,7 @@ const DockerContainers = ({ containers, setContainers }) => {
     if (action === 'logs')   { setLogsFor(containers.find(c=>c.id===id)); return; }
     if (action === 'shell')   { setTermFor(containers.find(c=>c.id===id)); return; }
     if (action === 'inspect') { setInspectFor(containers.find(c=>c.id===id)); return; }
+    if (action === 'edit')    { setEditFor(containers.find(c=>c.id===id)); return; }
     if (action === 'remove') {
       if (!confirm(`Usunąć kontener ${id}?`)) return;
       await fetch(`/services/docker/container/${encodeURIComponent(id)}/remove`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
@@ -749,6 +1223,7 @@ const DockerContainers = ({ containers, setContainers }) => {
       {logsFor    && <LogsDialog    c={logsFor}    onClose={()=>setLogsFor(null)}/>}
       {termFor    && <TerminalDialog c={termFor}    onClose={()=>setTermFor(null)}/>}
       {inspectFor && <InspectDialog  c={inspectFor} onClose={()=>setInspectFor(null)}/>}
+      {editFor    && <ContainerEditDialog c={editFor} onClose={()=>setEditFor(null)} onSaved={()=>{setEditFor(null);loadContainers();}}/>}
 
       <div className="grid grid-4">
         <Mini2 label="WSZYSTKIE"  v={counts.all}     sub="kontenerów"/>
@@ -774,9 +1249,13 @@ const DockerContainers = ({ containers, setContainers }) => {
         </div>
       </div>
 
-      {filtered.length === 0 && (
+      {loading && containers.length === 0 && (
+        <DockerLoadingSplash />
+      )}
+
+      {!loading && filtered.length === 0 && (
         <div className="card" style={{padding:40,textAlign:'center',color:'var(--fg-dim)'}}>
-          {containers.length === 0 ? 'Ładowanie kontenerów…' : 'Brak kontenerów spełniających kryteria'}
+          Brak kontenerów spełniających kryteria
         </div>
       )}
 
@@ -1172,12 +1651,22 @@ const DockerCompose = () => {
 const Docker = () => {
   const CONTAINERS = useStore('CONTAINERS');
   const [containers, setContainers] = React.useState(CONTAINERS || []);
-  const [dockerTab, setDockerTab] = React.useState('containers');
+  const [dockerTab,  setDockerTab]  = React.useState('containers');
+  const [loadingCont, setLoadingCont] = React.useState(!CONTAINERS || CONTAINERS.length === 0);
 
   // Synchronizuj z globalnym store
   React.useEffect(() => {
-    if (CONTAINERS && CONTAINERS.length > 0) setContainers(CONTAINERS);
+    if (CONTAINERS && CONTAINERS.length > 0) {
+      setContainers(CONTAINERS);
+      setLoadingCont(false);
+    }
   }, [CONTAINERS]);
+
+  // Timeout — jeśli po 8s nadal brak danych, zakończ loading
+  React.useEffect(() => {
+    const t = setTimeout(() => setLoadingCont(false), 8000);
+    return () => clearTimeout(t);
+  }, []);
 
   const TABS = [
     {id:'containers', label:'Kontenery'},
@@ -1191,7 +1680,7 @@ const Docker = () => {
       <div className="segmented">
         {TABS.map(t=><button key={t.id} className={dockerTab===t.id?'active':''} onClick={()=>setDockerTab(t.id)}>{t.label}</button>)}
       </div>
-      {dockerTab==='containers' && <DockerContainers containers={CONTAINERS} setContainers={c=>storeSet('CONTAINERS',c)}/>}
+      {dockerTab==='containers' && <DockerContainers containers={CONTAINERS} setContainers={c=>storeSet('CONTAINERS',c)} loading={loadingCont}/>}
       {dockerTab==='images'     && <DockerImages/>}
       {dockerTab==='networks'   && <DockerNetworks/>}
       {dockerTab==='volumes'    && <DockerVolumes/>}
