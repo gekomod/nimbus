@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"net/http"
+	"net/url"
 	"nimbus/internal/sys"
 	"strings"
 	"sync"
@@ -350,31 +351,56 @@ func (s *Server) handleDockerCompose(w http.ResponseWriter, r *http.Request) {
 
 		// Sprawdź status przez docker compose ps (z --project-name)
 		// Nazwa projektu = nazwa katalogu (tak jak docker compose domyślnie)
-		psOut, _ := runCmd("docker", "compose", "-f", file, "--project-name", name, "ps", "--format", "json")
+		// Sprawdź status — 3 metody
 		status := "stopped"
-		if psOut == "" {
-			// Fallback — sprawdź przez docker ps czy kontenery z tą nazwą działają
-			psOut2, _ := runCmd("docker", "ps", "--format", "{{.Names}}	{{.Status}}")
-			running := 0
-			for _, line := range strings.Split(psOut2, "") {
-				line = strings.ToLower(line)
-				if strings.Contains(line, strings.ToLower(name)) && strings.Contains(line, "up") {
-					running++
-				}
-			}
-			if running > 0 {
-				if len(services) == 0 || running >= len(services) {
-					status = "running"
-				} else {
-					status = "partial"
-				}
-			}
-		} else if strings.Contains(psOut, `"running"`) || strings.Contains(psOut, `"Up"`) || strings.Contains(psOut, "running") {
-			runningCount := strings.Count(psOut, `"running"`) + strings.Count(psOut, `"Up"`)
+
+		// 1. docker compose ps z nazwą projektu
+		psOut, _ := runCmd("docker", "compose", "-f", file, "--project-name", name, "ps", "--format", "json")
+		if strings.Contains(psOut, `"running"`) || strings.Contains(psOut, "running") {
+			runningCount := strings.Count(psOut, `"running"`)
 			if runningCount >= len(services) || len(services) == 0 {
 				status = "running"
 			} else {
 				status = "partial"
+			}
+		}
+
+		// 2. Fallback — sprawdź przez docker ps wg nazwy projektu i nazw serwisów
+		if status == "stopped" {
+			psOut2, _ := runCmd("docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Labels}}")
+			running := 0
+
+			// Zbierz kandydatów — kontenery których nazwa zawiera nazwę projektu LUB serwisu
+			candidates := append(services, name)
+			for _, line := range strings.Split(psOut2, "\n") {
+				lower := strings.ToLower(line)
+				if !strings.Contains(lower, "\tup") { continue }
+				for _, cand := range candidates {
+					if strings.Contains(lower, strings.ToLower(cand)) {
+						running++
+						break
+					}
+				}
+			}
+
+			// Sprawdź też przez label com.docker.compose.project
+			psLabel, _ := runCmd("docker", "ps",
+				"--filter", "label=com.docker.compose.project="+name,
+				"--format", "{{.Names}}")
+			labelCount := 0
+			for _, l := range strings.Split(strings.TrimSpace(psLabel), "\n") {
+				if strings.TrimSpace(l) != "" { labelCount++ }
+			}
+
+			total := running
+			if labelCount > total { total = labelCount }
+
+			if total > 0 {
+				if len(services) == 0 || total >= len(services) {
+					status = "running"
+				} else {
+					status = "partial"
+				}
 			}
 		}
 
@@ -481,7 +507,11 @@ func (s *Server) handleDockerComposeItem(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Dekoduj URL — pełna ścieżka może być zakodowana (%2F zamiast /)
 	filename := suffix
+	if decoded, err := url.QueryUnescape(suffix); err == nil {
+		filename = decoded
+	}
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, map[string]string{"filename": filename, "content": readFileStr(filename)})
@@ -496,6 +526,23 @@ func (s *Server) handleDockerComposeItem(w http.ResponseWriter, r *http.Request)
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleDockerComposeFile — pobiera zawartość pliku compose po ścieżce
+// GET /api/docker/compose-file?path=/opt/stacks/jellyfin/docker-compose.yml
+func (s *Server) handleDockerComposeFile(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		jsonErr(w, "brak parametru path", http.StatusBadRequest)
+		return
+	}
+	// Walidacja — tylko pliki compose
+	if !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".yaml") {
+		jsonErr(w, "niedozwolony typ pliku", http.StatusForbidden)
+		return
+	}
+	content := readFileStr(path)
+	jsonOK(w, map[string]string{"content": content, "path": path})
 }
 
 func (s *Server) handleDockerComposeStream(w http.ResponseWriter, r *http.Request) {

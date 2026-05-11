@@ -173,6 +173,23 @@ func (s *Server) routes() {
 	a("/network/speedtest/install", s.handleSpeedtestInstall)
 	a("/network/speedtest/servers", s.handleSpeedtestServers)
 	a("/network/speedtest/quick", s.handleSpeedtestQuick)
+	a("/api/modules", s.handleModules)
+
+	// KVM / libvirt
+	a("/api/kvm/status",    s.handleKVMStatus)
+	a("/api/kvm/vms",       s.handleKVMList)
+	a("/api/kvm/action",    s.handleKVMAction)
+	a("/api/kvm/create",    s.handleKVMCreate)
+	a("/api/kvm/snapshots", s.handleKVMSnapshots)
+	a("/api/kvm/install",   s.handleKVMInstall)
+	a("/api/kvm/isos",      s.handleKVMISOs)
+	a("/api/kvm/config",    s.handleKVMConfig)
+	a("/api/kvm/novnc-diag", s.handleKVMNoVNCDiag)
+	a("/api/kvm/iso-download", s.handleKVMISODownload)
+	a("/api/kvm/vnc-proxy", s.handleKVMVNCProxy)
+	a("/api/kvm/networks",  s.handleKVMNetworks)
+	a("/api/kvm/delete",    s.handleKVMDelete)
+
 	// Fail2Ban
 	a("/api/system/fail2ban-status", s.handleFail2BanStatus)
 
@@ -430,6 +447,7 @@ func (s *Server) routes() {
 
 	// dashboard — jeden endpoint zamiast 14
 	a("/api/dashboard", s.handleDashboard)
+	a("/api/docker/compose-file", s.handleDockerComposeFile)
 
 	// proxy routes management — nimbus built-in reverse proxy
 	a("/api/proxy/routes",  s.handleProxyRoutes)
@@ -485,6 +503,9 @@ func (s *Server) routes() {
 
 	// service status helper
 	a("/services/status/", s.handleServiceStatusHelper)
+
+	// noVNC — serwuj pliki z katalogu noVNC na dysku
+	s.mux.HandleFunc("/novnc/", s.handleNoVNC)
 
 	// static — must be last
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -616,6 +637,32 @@ func (s *Server) handleCheckAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleNoVNC(w http.ResponseWriter, r *http.Request) {
+	// Znajdź katalog noVNC na dysku
+	novncDir := ""
+	for _, p := range []string{"/usr/share/novnc", "/opt/novnc", "/usr/local/share/novnc"} {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			novncDir = p
+			break
+		}
+	}
+	// Sprawdź też konfigurację
+	if novncDir == "" {
+		cfg := loadKVMConfig()
+		if cfg.NoVNCPath != "" {
+			if info, err := os.Stat(cfg.NoVNCPath); err == nil && info.IsDir() {
+				novncDir = cfg.NoVNCPath
+			}
+		}
+	}
+	if novncDir == "" {
+		http.Error(w, "noVNC nie jest zainstalowane. Uruchom: apt install novnc", http.StatusNotFound)
+		return
+	}
+	// Usuń prefix /novnc z URL i serwuj z katalogu noVNC
+	http.StripPrefix("/novnc/", http.FileServer(http.Dir(novncDir))).ServeHTTP(w, r)
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	if p == "/" { p = "/index.html" }
@@ -658,4 +705,36 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleServiceStatusHelper(w http.ResponseWriter, r *http.Request) {
 	svc := pathSuffix(r, "/services/status/")
 	jsonOK(w, map[string]any{"service": svc, "active": serviceActive(svc), "enabled": serviceEnabled(svc)})
+}
+
+// handleModules — GET/POST /api/modules
+// Przechowuje stan modułów w /etc/nas-panel/modules.json
+func (s *Server) handleModules(w http.ResponseWriter, r *http.Request) {
+	const modulesPath = "/etc/nas-panel/modules.json"
+	switch r.Method {
+	case http.MethodGet:
+		data, err := os.ReadFile(modulesPath)
+		if err != nil {
+			jsonOK(w, map[string]any{"modules": map[string]bool{}})
+			return
+		}
+		var modules map[string]bool
+		json.Unmarshal(data, &modules)
+		jsonOK(w, map[string]any{"modules": modules})
+	case http.MethodPost:
+		var req map[string]bool
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonErr(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		os.MkdirAll("/etc/nas-panel", 0755)
+		data, _ := json.MarshalIndent(req, "", "  ")
+		if err := os.WriteFile(modulesPath, data, 0644); err != nil {
+			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]string{"status": "ok"})
+	default:
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }

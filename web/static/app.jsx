@@ -19,7 +19,9 @@ const SystemUpdates = window.SystemUpdates;
 const SystemTemps    = window.SystemTemps;
 const NetworkDetail  = window.NetworkDetail;
 const NfsServer = window.NfsServer;
-const Servers = window.Servers;
+const Servers         = window.Servers;
+const KVMScreen       = window.KVMScreen;
+const ModuleSettings  = window.ModuleSettings;
 
 // ── Login screen ──────────────────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -188,11 +190,28 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "font":    "plex"
 }/*EDITMODE-END*/;
 
+
+// Wrapper dodający zakładkę Moduły do istniejącego Settings
+const SettingsWithModules = () => {
+  const [tab, setTab] = React.useState('settings');
+  return (
+    <div className="col" style={{gap:'var(--gutter)'}}>
+      <div className="segmented">
+        <button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}>Ustawienia</button>
+        <button className={tab==='modules'?'active':''} onClick={()=>setTab('modules')}>🧩 Moduły</button>
+      </div>
+      {tab === 'settings' && <Settings/>}
+      {tab === 'modules'  && <ModuleSettings/>}
+    </div>
+  );
+};
+
 const SCREENS = {
   dashboard: { title: 'Pulpit',           sub: 'Przegląd całego systemu', comp: () => <Dashboard/>, crumbs: ['nimbus','Pulpit'] },
   disks:     { title: 'Dyski i pule',     sub: 'Magazyn ZFS · 12 dysków · 3 pule', comp: () => <Storage/>, crumbs: ['nimbus','Magazyn','Dyski i pule'] },
   files:     { title: 'Menedżer plików',    sub: 'Przeglądarka · upload · uprawnienia', comp: () => <FileManager/>, crumbs: ['nimbus','Magazyn','Menedżer plików'] },
   shares:    { title: 'Usługi plików',    sub: 'SMB · NFS · FTP · SSH · rsync', comp: () => <FileServices/>, crumbs: ['nimbus','Magazyn','Usługi plików'] },
+  kvm:       { title: 'Wirtualizacja KVM',   sub: 'QEMU/KVM · maszyny wirtualne', comp: () => <KVMScreen/>, crumbs: ['nimbus','Aplikacje','KVM'] },
   docker:    { title: 'Kontenery Docker', sub: '12 kontenerów · 34 obrazy', comp: () => <Docker/>, crumbs: ['nimbus','Aplikacje','Kontenery'] },
   media:     { title: 'Serwery mediów',   sub: 'Plex · Jellyfin · Navidrome', comp: () => <Media/>, crumbs: ['nimbus','Aplikacje','Media'] },
   nfs:       { title: 'NFS Server',       sub: 'Serwer NFS v4 · klient · montowanie', comp: () => <NfsServer/>, crumbs: ['nimbus','Aplikacje','NFS Server'] },
@@ -213,7 +232,7 @@ const SCREENS = {
   users:     { title: 'Użytkownicy',      sub: 'Konta · grupy · uprawnienia · 2FA', comp: () => <Users/>, crumbs: ['nimbus','Administracja','Użytkownicy'] },
   updates:   { title: 'Aktualizacje systemu', sub: 'apt · 12 pakietów dostępnych · 5 security', comp: () => <SystemUpdates/>, crumbs: ['nimbus','Administracja','Aktualizacje'] },
   packages:  { title: 'Menedżer pakietów',    sub: 'apt · dpkg · zainstalowane · wyszukiwanie · zależności', comp: () => <PackageManager/>, crumbs: ['nimbus','Administracja','Pakiety'] },
-  settings:  { title: 'Ustawienia',       sub: 'System · backup · alerty · UPS', comp: () => <Settings/>, crumbs: ['nimbus','Administracja','Ustawienia'] },
+  settings:  { title: 'Ustawienia',       sub: 'System · backup · alerty · UPS · moduły', comp: () => <SettingsWithModules/>, crumbs: ['nimbus','Administracja','Ustawienia'] },
 };
 
 const AppInner = ({ user, onLogout }) => {

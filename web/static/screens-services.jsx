@@ -1547,6 +1547,7 @@ const DockerCompose = () => {
       .then(data => {
         if (!data) return;
         const list = Array.isArray(data.stacks) ? data.stacks : [];
+        console.log('[compose] stacks from API:', list);
         setStacks(list.map(s=>({
           name:     s.name || '—',
           file:     s.file || s.path || '—',
@@ -1558,6 +1559,29 @@ const DockerCompose = () => {
       })
       .catch(() => setStacks([]));
   }, []);
+
+  // Pobierz zawartość pliku compose gdy użytkownik klika Edytuj
+  const openEdit = async (stack) => {
+    // Walidacja — stack.file musi być prawdziwą ścieżką
+    const filePath = stack.file;
+    if (!filePath || filePath === '—' || !filePath.startsWith('/')) {
+      // Brak ścieżki — otwórz dialog bez zawartości
+      setEditStack(stack);
+      return;
+    }
+    try {
+      const url = '/api/docker/compose-file?path=' + encodeURIComponent(filePath);
+      const r = await fetch(url, {credentials:'include'});
+      if (r.ok) {
+        const d = await r.json();
+        setEditStack({...stack, yaml: d.content || ''});
+        return;
+      }
+    } catch(e) {
+      console.error('openEdit error:', e);
+    }
+    setEditStack(stack);
+  };
 
   const deploy = (data) => {
     setStacks(ss=>{
@@ -1630,7 +1654,7 @@ const DockerCompose = () => {
                     <td className="mono dim">{s.updated}</td>
                     <td>
                       <div className="row gap-sm">
-                        <button className="btn sm" onClick={()=>setEditStack(s)}><Icon name="edit" size={11}/> Edit</button>
+                        <button className="btn sm" onClick={()=>openEdit(s)}><Icon name="edit" size={11}/> Edit</button>
                         <button className="btn sm" onClick={()=>toggleStack(s.name)}>
                           {s.status==='running'?<><Icon name="stop" size={11}/> Down</>:<><Icon name="play" size={11}/> Up</>}
                         </button>
@@ -1674,6 +1698,7 @@ const Docker = () => {
     {id:'networks',   label:'Sieci'},
     {id:'volumes',    label:'Wolumeny'},
     {id:'compose',    label:'Compose'},
+    {id:'topology',   label:'Topology'},
   ];
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
@@ -1685,6 +1710,7 @@ const Docker = () => {
       {dockerTab==='networks'   && <DockerNetworks/>}
       {dockerTab==='volumes'    && <DockerVolumes/>}
       {dockerTab==='compose'    && <DockerCompose/>}
+      {dockerTab==='topology'   && window.DockerTopology && React.createElement(window.DockerTopology)}
     </div>
   );
 };

@@ -39,8 +39,9 @@ window.NAV = [
     { id: "backup",  label: "Kopie zapasowe",  icon: "download", badgeAlert: "1" },
   ]},
   { group: "Aplikacje", items: [
-    { id: "docker",  label: "Kontenery",     icon: "docker",    badge: "12" },
-    { id: "media",   label: "Serwery mediów", icon: "media" },
+    { id: "docker",   label: "Kontenery",      icon: "docker",   badge: "12" },
+    { id: "kvm",      label: "Wirtualizacja",   icon: "settings" },
+    { id: "media",    label: "Serwery mediów",  icon: "media" },
     { id: "nfs",     label: "NFS Server",    icon: "share" },
     { id: "ssh_svc", label: "SSH / SFTP",    icon: "terminal" },
     { id: "samba",   label: "Samba / SMB",   icon: "network" },
@@ -68,6 +69,19 @@ window.NAV = [
     { id: "settings",label: "Ustawienia",          icon: "settings" },
   ]},
 ];
+
+// Subskrypcja zmian modułów → przebuduj NAV w sidebar
+window._onModuleChange = (fn) => {
+  // Trick: force sidebar re-render przez custom event
+  const handler = () => fn({});
+  window.addEventListener('nimbus_modules_changed', handler);
+  return () => window.removeEventListener('nimbus_modules_changed', handler);
+};
+window.setModuleEnabled = (id, enabled) => {
+  if (window._origSetModuleEnabled) window._origSetModuleEnabled(id, enabled);
+  window.dispatchEvent(new Event('nimbus_modules_changed'));
+};
+
 
 // ─── Fetch helper ──────────────────────────────────────────────────────────
 // ── Session interceptor ──────────────────────────────────────────────────────
