@@ -203,6 +203,48 @@ func (s *Server) routes() {
 	a("/api/temps/install",      s.handleTempsInstall)
 	a("/api/fans/control",       s.handleFanControl)
 	a("/api/fans/auto",          s.handleFanAuto)
+	a("/api/fans/auto/status",   s.handleFanAutoStatus)
+	a("/api/fans/config",        s.handleFanConfig)
+	a("/api/fans/debug",         s.handleFanDebug)
+
+	// Sprzęt
+	a("/api/hardware",           s.handleHardware)
+	a("/api/hardware/install",   s.handleHardwareInstall)
+
+	// Poczta
+	a("/api/mail/status",          s.handleMailStatus)
+	a("/api/mail/queue",           s.handleMailQueue)
+	a("/api/mail/queue/flush",     s.handleMailQueueFlush)
+	a("/api/mail/queue/action",    s.handleMailQueueAction)
+	a("/api/mail/queue/detail/",   s.handleMailQueueDetail)
+	a("/api/mail/domains",         s.handleMailDomains)
+	a("/api/mail/domains/",        s.handleMailDomainDelete)
+	a("/api/mail/accounts",        s.handleMailAccounts)
+	a("/api/mail/accounts/",       s.handleMailAccountDelete)
+	a("/api/mail/service",         s.handleMailService)
+	a("/api/mail/config",          s.handleMailConfig)
+	a("/api/mail/install",         s.handleMailInstall)
+	a("/api/mail/postfix/config",   s.handlePostfixConfig)
+	a("/api/mail/postfix/sasl",     s.handlePostfixSASL)
+	a("/api/mail/postfix/profile",  s.handlePostfixApplyProfile)
+	a("/api/mail/postfix/diag",     s.handlePostfixDiag)
+	a("/api/mail/postfix/fix",      s.handlePostfixFix)
+	a("/api/mail/dns-diag",         s.handleMailDNSDiag)
+	a("/api/mail/aliases",          s.handleMailAlias)
+	a("/api/mail/accounts/debug",    s.handleMailAccountsDebug)
+	a("/api/mail/accounts/password",  s.handleMailAccountPassword)
+	a("/api/mail/dovecot/setup",       s.handleDovecotSetupPassdb)
+
+	// Webmail IMAP
+	a("/api/webmail/login",    s.handleWebmailLogin)
+	a("/api/webmail/messages", s.handleWebmailMessages)
+	a("/api/webmail/message",  s.handleWebmailMessage)
+	a("/api/webmail/counts",   s.handleWebmailCounts)
+	a("/api/webmail/send",     s.handleWebmailSend)
+	a("/api/webmail/delete",   s.handleWebmailDelete)
+	a("/api/webmail/move",     s.handleWebmailMove)
+	a("/api/webmail/diag",     s.handleWebmailDiag)
+	a("/api/webmail/debug",    s.handleWebmailDebug)
 
 	// DHCP
 	a("/api/network/dhcp/leases",  s.handleDHCPLeases)

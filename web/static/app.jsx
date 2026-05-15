@@ -22,6 +22,10 @@ const NfsServer = window.NfsServer;
 const Servers         = window.Servers;
 const KVMScreen       = window.KVMScreen;
 const ModuleSettings  = window.ModuleSettings;
+const HardwareInventory = window.HardwareInventory;
+const MailServer        = window.MailServer;
+const Webmail           = window.Webmail;
+const CommandPalette    = window.CommandPalette;
 
 // ── Login screen ──────────────────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -233,12 +237,27 @@ const SCREENS = {
   updates:   { title: 'Aktualizacje systemu', sub: 'apt · 12 pakietów dostępnych · 5 security', comp: () => <SystemUpdates/>, crumbs: ['nimbus','Administracja','Aktualizacje'] },
   packages:  { title: 'Menedżer pakietów',    sub: 'apt · dpkg · zainstalowane · wyszukiwanie · zależności', comp: () => <PackageManager/>, crumbs: ['nimbus','Administracja','Pakiety'] },
   settings:  { title: 'Ustawienia',       sub: 'System · backup · alerty · UPS · moduły', comp: () => <SettingsWithModules/>, crumbs: ['nimbus','Administracja','Ustawienia'] },
+  hardware:  { title: 'Sprzęt',           sub: 'CPU · RAM · PCIe · USB · karty sieciowe · BIOS', comp: () => <HardwareInventory/>, crumbs: ['nimbus','System','Sprzęt'] },
+  mail:      { title: 'Serwer poczty',    sub: 'Postfix · Dovecot · kolejka · spam · konta',      comp: () => <MailServer/>,       crumbs: ['nimbus','Aplikacje','Mail'] },
+  webmail:   { title: 'Webmail',          sub: 'Klient pocztowy w przeglądarce · IMAP',            comp: () => <Webmail/>,          crumbs: ['nimbus','Aplikacje','Webmail'] },
 };
 
 const AppInner = ({ user, onLogout }) => {
   const initial = (location.hash && SCREENS[location.hash.slice(1)]) ? location.hash.slice(1) : 'dashboard';
-  const [active, setActive] = React.useState(initial);
-  const [tweaks, setTweak]  = useTweaks(TWEAK_DEFAULTS);
+  const [active, setActive]       = React.useState(initial);
+  const [tweaks, setTweak]        = useTweaks(TWEAK_DEFAULTS);
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   React.useEffect(() => {
     const h = () => { const id = location.hash.slice(1); if (SCREENS[id]) setActive(id); };
@@ -255,11 +274,12 @@ const AppInner = ({ user, onLogout }) => {
   }, [tweaks]);
 
   const nav = id => {
+    if (!SCREENS[id]) return;
     setActive(id);
     location.hash = id;
     window.__onScreenChange && window.__onScreenChange(id);
   };
-  const screen = SCREENS[active];
+  const screen = SCREENS[active] || SCREENS['dashboard'];
 
   return (
     <>
@@ -292,6 +312,13 @@ const AppInner = ({ user, onLogout }) => {
           </div>
         </div>
       </div>
+      {paletteOpen && (
+        <CommandPalette
+          onNav={(screen) => { if (SCREENS[screen]) setActive(screen); }}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+
       <TweaksPanel title="Tweaks">
         <TweakSection label="Wygląd"/>
         <TweakRadio label="Motyw"      value={tweaks.theme}   options={[{value:'dark',label:'Ciemny'},{value:'light',label:'Jasny'}]}                                                                    onChange={v=>setTweak('theme',v)}/>

@@ -36,7 +36,6 @@ window.NAV = [
     { id: "disks", label: "Dyski i pule", icon: "disk" },
     { id: "shares", label: "Usługi plików", icon: "share", badge: "4" },
     { id: "files",   label: "Menedżer plików", icon: "folder" },
-    { id: "backup",  label: "Kopie zapasowe",  icon: "download", badgeAlert: "1" },
   ]},
   { group: "Aplikacje", items: [
     { id: "docker",   label: "Kontenery",      icon: "docker",   badge: "12" },
@@ -46,7 +45,9 @@ window.NAV = [
     { id: "ssh_svc", label: "SSH / SFTP",    icon: "terminal" },
     { id: "samba",   label: "Samba / SMB",   icon: "network" },
     { id: "ftp_svc", label: "FTP / FTPS",    icon: "upload" },
-    { id: "webdav",  label: "WebDAV",        icon: "globe" },
+    { id: "webdav",  label: "WebDAV",        icon: "globe"  },
+    { id: "mail",    label: "Serwer poczty",  icon: "bell"     },
+    { id: "webmail", label: "Webmail",          icon: "bell"     },
   ]},
   { group: "Sieć", items: [
     { id: "network",    label: "Sieć",           icon: "network" },
@@ -59,6 +60,7 @@ window.NAV = [
     { id: "smart",     label: "S.M.A.R.T.",       icon: "thermometer", badgeAlert: "2" },
     { id: "temps",     label: "Temperatury",       icon: "thermometer" },
     { id: "terminal", label: "Terminal", icon: "terminal" },
+    { id: "hardware",  label: "Sprzęt",          icon: "cpu"      },
   ]},
   { group: "Administracja", items: [
     { id: "cron",    label: "Harmonogram",        icon: "clock",  badge: "8" },

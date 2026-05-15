@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -113,6 +114,75 @@ func saveNotifConfig(cfg NotifConfig) error {
 }
 
 // ─── Channels ────────────────────────────────────────────────────────────────
+
+
+// sendEmail wysyła e-mail przez dostępne narzędzie:
+// 1. sendmail (Postfix), 2. mail/mailx (mailutils), 3. SMTP przez curl
+func sendEmail(to, subject, body string) error {
+	// Buduj wiadomość RFC 2822 z poprawnym From
+	from := resolvePostfixFrom()
+	msg := fmt.Sprintf(
+		"From: NimbusNAS <%s>\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n",
+		from, to, subject, body,
+	)
+
+	// Metoda 1: sendmail (Postfix) - -v żeby dostać verbose output
+	for _, bin := range []string{"/usr/sbin/sendmail", "/usr/lib/sendmail", "/usr/bin/sendmail"} {
+		if _, err := os.Stat(bin); err == nil {
+			cmd := exec.Command(bin, "-t", "-oi", "-v")
+			cmd.Stdin = strings.NewReader(msg)
+			out, err := cmd.CombinedOutput()
+			outStr := strings.TrimSpace(string(out))
+			// sendmail zwraca 0 nawet gdy wiadomość trafia do kolejki
+			// Sprawdź czy nie ma błędu konfiguracji
+			if err != nil {
+				return fmt.Errorf("sendmail: %s", outStr)
+			}
+			// Sprawdź znane błędy w output
+			if strings.Contains(outStr, "relay access denied") ||
+				strings.Contains(outStr, "Connection refused") ||
+				strings.Contains(outStr, "not a valid RFC") {
+				return fmt.Errorf("postfix error: %s", outStr)
+			}
+			return nil
+		}
+	}
+
+	// Metoda 2: mail / mailx
+	for _, bin := range []string{"/usr/bin/mail", "/usr/bin/mailx", "/bin/mail"} {
+		if _, err := os.Stat(bin); err == nil {
+			cmd := exec.Command(bin, "-s", subject, "-r", from, to)
+			cmd.Stdin = strings.NewReader(body)
+			if out, err := cmd.CombinedOutput(); err == nil {
+				return nil
+			} else {
+				return fmt.Errorf("mail: %s", strings.TrimSpace(string(out)))
+			}
+		}
+	}
+
+	return fmt.Errorf("brak sendmail/mailutils — sprawdź czy Postfix jest zainstalowany")
+}
+
+// resolvePostfixFrom — pobiera prawidłowy adres nadawcy z konfiguracji Postfix
+func resolvePostfixFrom() string {
+	// Spróbuj pobrać myorigin z postconf
+	if out, err := exec.Command("postconf", "-h", "myorigin").Output(); err == nil {
+		origin := strings.TrimSpace(string(out))
+		// Ignoruj zmienne niezastąpione ($myhostname itp.)
+		if origin != "" && !strings.HasPrefix(origin, "$") && strings.Contains(origin, ".") {
+			return "nimbus@" + origin
+		}
+	}
+	// Fallback: hostname systemu
+	if out, err := exec.Command("hostname", "-f").Output(); err == nil {
+		h := strings.TrimSpace(string(out))
+		if strings.Contains(h, ".") {
+			return "nimbus@" + h
+		}
+	}
+	return "nimbus@localhost"
+}
 
 func (s *Server) handleNotifChannels(w http.ResponseWriter, r *http.Request) {
 	cfg := loadNotifConfig()
@@ -262,11 +332,8 @@ func testNotifChannel(ch NotifChannel) (bool, string) {
 	switch ch.Type {
 
 	case "email":
-		// sendmail / mail (jeśli zainstalowane)
-		_, err := runCmd("bash", "-c",
-			fmt.Sprintf(`echo "%s" | mail -s "[NimbusNAS] Test" %s`, msg, ch.Target))
-		if err != nil {
-			return false, "mail exit error — sprawdź czy sendmail/postfix jest zainstalowany"
+		if err := sendEmail(ch.Target, "[NimbusNAS] Test powiadomienia", msg); err != nil {
+			return false, err.Error()
 		}
 		return true, ""
 
@@ -574,9 +641,11 @@ func sendNotifChannel(ch NotifChannel, msg string) (bool, string) {
 		return err == nil, out
 
 	case "email":
-		_, err := runCmd("bash", "-c",
-			fmt.Sprintf(`echo %q | mail -s %q %s`, msg, ch.Name, ch.Target))
-		return err == nil, ""
+		err := sendEmail(ch.Target, "[NimbusNAS] "+ch.Name, msg)
+		if err != nil {
+			return false, err.Error()
+		}
+		return true, ""
 
 	case "pushover":
 		if ch.UserKey == "" || ch.APIToken == "" { return false, "brak kluczy" }

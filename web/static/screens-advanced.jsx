@@ -1191,6 +1191,13 @@ const Notifications = () => {
                         <div style={{marginTop:3,fontSize:11,color:c.lastTest?.startsWith('OK')?'var(--ok)':c.lastTest?.startsWith('FAIL')?'var(--err)':'var(--fg-dim)'}}>
                           ↳ {c.lastTest||'—'}
                         </div>
+                        {c.testError && (
+                          <div style={{marginTop:3,fontSize:10,color:'var(--err)',fontFamily:'var(--font-mono)',
+                            background:'color-mix(in oklch,var(--err) 6%,transparent)',
+                            padding:'3px 6px',borderRadius:4,wordBreak:'break-all'}}>
+                            {c.testError}
+                          </div>
+                        )}
                       </div>
                       <div className="row gap-sm" style={{flexShrink:0}}>
                         <div className={"toggle "+(c.enabled?'on':'')} onClick={()=>toggleChannel(c.id)}/>
