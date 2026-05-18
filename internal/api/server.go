@@ -207,6 +207,13 @@ func (s *Server) routes() {
 	a("/api/fans/config",        s.handleFanConfig)
 	a("/api/fans/debug",         s.handleFanDebug)
 
+	// UPS
+	a("/api/ups/status",  s.handleUPSStatus)
+	a("/api/ups/info",    s.handleUPSDetails)
+	a("/api/ups/command", s.handleUPSCommand)
+	a("/api/ups/config",  s.handleUPSConfig)
+	a("/api/ups/ports",   s.handleUPSPorts)
+
 	// Sprzęt
 	a("/api/hardware",           s.handleHardware)
 	a("/api/hardware/install",   s.handleHardwareInstall)

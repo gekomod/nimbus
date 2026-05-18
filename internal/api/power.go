@@ -84,28 +84,15 @@ func (s *Server) handleEnergyRate(w http.ResponseWriter, r *http.Request) {
 // ── UPS ──────────────────────────────────────────────────────────────────────
 
 func (s *Server) handleUPSStatus(w http.ResponseWriter, r *http.Request) {
-	out, err := runCmd("upsc", "ups")
-	installed := err == nil || !strings.Contains(err.Error(), "executable file not found")
-	jsonOK(w, map[string]any{"installed": installed, "raw": out})
+	upsStatusHandler(w, r)
 }
 
 func (s *Server) handleUPSDetails(w http.ResponseWriter, r *http.Request) {
-	out, _ := runCmd("upsc", "ups@localhost")
-	jsonOK(w, map[string]any{"raw": out})
+	upsInfoHandler(w, r)
 }
 
 func (s *Server) handleUPSConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		jsonOK(w, map[string]string{"config": readFileStr("/etc/nut/ups.conf")})
-	case http.MethodPost:
-		var req struct{ Config string `json:"config"` }
-		json.NewDecoder(r.Body).Decode(&req)
-		writeFile("/etc/nut/ups.conf", req.Config)
-		jsonOK(w, map[string]string{"status": "ok"})
-	default:
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
+	upsConfigHandler(w, r)
 }
 
 func (s *Server) handleUPSConfigNUT(w http.ResponseWriter, r *http.Request) {
@@ -141,9 +128,7 @@ func (s *Server) handleUPSServiceRestart(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleUPSTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
-	out, err := runCmd("upsrw", "-s", "test.battery.start.quick=1", "ups@localhost")
-	jsonOK(w, map[string]any{"ok": err == nil, "output": out})
+	upsCommandHandler(w, r)
 }
 
 // ── Wake-on-LAN ──────────────────────────────────────────────────────────────

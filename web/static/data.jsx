@@ -61,6 +61,7 @@ window.NAV = [
     { id: "temps",     label: "Temperatury",       icon: "thermometer" },
     { id: "terminal", label: "Terminal", icon: "terminal" },
     { id: "hardware",  label: "Sprzęt",          icon: "cpu"      },
+    { id: "ups",       label: "UPS",              icon: "thermometer" },
   ]},
   { group: "Administracja", items: [
     { id: "cron",    label: "Harmonogram",        icon: "clock",  badge: "8" },

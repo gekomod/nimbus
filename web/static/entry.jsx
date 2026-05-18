@@ -22,6 +22,7 @@ import './screens-advanced.jsx';
 import './screens-temps.jsx';
 import './screens-hardware.jsx';
 import './screens-mail.jsx';
+import './screens-ups.jsx';
 import './screens-webmail.jsx';
 import './command-palette.jsx';
 import './screens-kvm.jsx';

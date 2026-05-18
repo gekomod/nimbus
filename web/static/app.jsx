@@ -24,6 +24,7 @@ const KVMScreen       = window.KVMScreen;
 const ModuleSettings  = window.ModuleSettings;
 const HardwareInventory = window.HardwareInventory;
 const MailServer        = window.MailServer;
+const UPSScreen         = window.UPSScreen;
 const Webmail           = window.Webmail;
 const CommandPalette    = window.CommandPalette;
 
@@ -239,6 +240,7 @@ const SCREENS = {
   settings:  { title: 'Ustawienia',       sub: 'System · backup · alerty · UPS · moduły', comp: () => <SettingsWithModules/>, crumbs: ['nimbus','Administracja','Ustawienia'] },
   hardware:  { title: 'Sprzęt',           sub: 'CPU · RAM · PCIe · USB · karty sieciowe · BIOS', comp: () => <HardwareInventory/>, crumbs: ['nimbus','System','Sprzęt'] },
   mail:      { title: 'Serwer poczty',    sub: 'Postfix · Dovecot · kolejka · spam · konta',      comp: () => <MailServer/>,       crumbs: ['nimbus','Aplikacje','Mail'] },
+  ups:       { title: 'UPS',              sub: 'ViewPower · Megatec Q1 · bateria · obciążenie',     comp: () => <UPSScreen/>,        crumbs: ['nimbus','System','UPS'] },
   webmail:   { title: 'Webmail',          sub: 'Klient pocztowy w przeglądarce · IMAP',            comp: () => <Webmail/>,          crumbs: ['nimbus','Aplikacje','Webmail'] },
 };
 
