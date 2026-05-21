@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"net/http"
 	"net/url"
 	"nimbus/internal/sys"
@@ -303,11 +304,38 @@ func (s *Server) handleDockerVolumeItem(w http.ResponseWriter, r *http.Request) 
 		runCmd("mkdir", "-p", strings.TrimSpace(mp)+"/"+req.Path)
 		jsonOK(w, map[string]string{"status": "ok"})
 	case action == "delete":
-		runCmd("docker", "volume", "rm", name)
+		out2, err2 := runCmd("docker", "volume", "rm", name)
+		if err2 != nil {
+			jsonErr(w, "Nie można usunąć: "+strings.TrimSpace(out2), http.StatusConflict)
+			return
+		}
 		jsonOK(w, map[string]string{"status": "ok"})
 	case r.Method == http.MethodDelete:
-		runCmd("docker", "volume", "rm", name)
-		jsonOK(w, map[string]string{"status": "ok"})
+		// Sprawdź czy force=true
+		force := r.URL.Query().Get("force") == "true"
+		var out string
+		var err error
+		if force {
+			// Znajdź kontenery używające tego woluminu i usuń je najpierw
+			contOut, _ := runCmd("docker", "ps", "-a", "--filter", "volume="+name, "--format", "{{.ID}}")
+			for _, cid := range strings.Fields(contOut) {
+				runCmd("docker", "rm", "-f", cid)
+			}
+			out, err = runCmd("docker", "volume", "rm", name)
+		} else {
+			out, err = runCmd("docker", "volume", "rm", name)
+		}
+		if err != nil {
+			// Wyciągnij ID kontenerów z błędu i pokaż czytelnie
+			msg := strings.TrimSpace(out)
+			if strings.Contains(msg, "volume is in use") {
+				jsonErr(w, "Wolumin jest używany przez zatrzymany kontener. Użyj przycisku 'Wymuś usunięcie'.", http.StatusConflict)
+			} else {
+				jsonErr(w, msg, http.StatusConflict)
+			}
+			return
+		}
+		jsonOK(w, map[string]string{"status": "ok", "name": name})
 	default:
 		jsonOK(w, map[string]string{"status": "ok"})
 	}
@@ -508,9 +536,22 @@ func (s *Server) handleDockerComposeItem(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Dekoduj URL — pełna ścieżka może być zakodowana (%2F zamiast /)
+	// Odkoduj ścieżkę — suffix może być:
+	// 1. /opt/stacks/... (Go odkodował %2F → /)  → trzeba dodać /
+	// 2. opt/stacks/...  (bez wiodącego /)        → trzeba dodać /
+	// 3. zakodowany %2Fopt%2F...                  → QueryUnescape
 	filename := suffix
 	if decoded, err := url.QueryUnescape(suffix); err == nil {
 		filename = decoded
+	}
+	// Upewnij się że ścieżka zaczyna od /
+	if filename != "" && filename[0] != '/' {
+		filename = "/" + filename
+	}
+	// Bezpieczeństwo — tylko pliki compose
+	if !strings.HasSuffix(filename, ".yml") && !strings.HasSuffix(filename, ".yaml") {
+		jsonErr(w, "nieprawidłowa ścieżka compose: "+filename, http.StatusBadRequest)
+		return
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -521,8 +562,16 @@ func (s *Server) handleDockerComposeItem(w http.ResponseWriter, r *http.Request)
 		writeFile(filename, req.Content)
 		jsonOK(w, map[string]string{"status": "ok"})
 	case http.MethodDelete:
-		out, _ := runCmd("docker", "compose", "-f", filename, "down")
-		jsonOK(w, map[string]any{"status": "ok", "output": out})
+		// 1. docker compose down — zatrzymaj i usuń kontenery
+		out, err := runCmd("docker", "compose", "-f", filename, "down", "--remove-orphans", "-v")
+		if err != nil {
+			// Spróbuj bez -v
+			out, _ = runCmd("docker", "compose", "-f", filename, "down", "--remove-orphans")
+		}
+		// 2. Usuń katalog stosu
+		dir := filepath.Dir(filename)
+		os.RemoveAll(dir)
+		jsonOK(w, map[string]any{"status": "ok", "output": out, "removed_dir": dir})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

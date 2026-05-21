@@ -186,6 +186,7 @@ func (s *Server) routes() {
 	a("/api/kvm/config",    s.handleKVMConfig)
 	a("/api/kvm/novnc-diag", s.handleKVMNoVNCDiag)
 	a("/api/kvm/iso-download", s.handleKVMISODownload)
+	a("/api/kvm/vnc-config",  s.handleKVMVNCConfig)
 	a("/api/kvm/vnc-proxy", s.handleKVMVNCProxy)
 	a("/api/kvm/networks",  s.handleKVMNetworks)
 	a("/api/kvm/delete",    s.handleKVMDelete)

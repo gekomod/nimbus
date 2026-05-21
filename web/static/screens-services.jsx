@@ -216,700 +216,48 @@ const TerminalDialog = ({ c, onClose }) => {
 
 
 
-// ── ContainerEditDialog — edycja działającego kontenera ─────────────────────
-const ContainerEditDialog = ({ c, onClose, onSaved }) => {
-  const [inspect,  setInspect]  = React.useState(null);
-  const [loading,  setLoading]  = React.useState(true);
-  const [saving,   setSaving]   = React.useState(false);
-  const [err,      setErr]      = React.useState('');
-  const [tab,      setTab]      = React.useState('env');
+// ── ConfirmDialog — modal zamiast window.confirm() ──────────────────────────
+// Użycie: const [confirmEl, confirmFn] = useConfirm();
+// W JSX: {confirmEl}
+// W handlerze: if (!await confirmFn('Tytuł', 'Opis', true)) return;
+const useConfirm = () => {
+  const [state, setState] = React.useState(null);
+  const resolve = React.useRef(null);
 
-  // Edytowalne pola
-  const [envVars,  setEnvVars]  = React.useState([]);
-  const [memory,   setMemory]   = React.useState('');
-  const [cpus,     setCpus]     = React.useState('');
-  const [restart,  setRestart]  = React.useState('');
-  const [mounts,   setMounts]   = React.useState([]); // {src, dst, mode}
-  const [networks, setNetworks] = React.useState([]); // nazwy sieci
-  const [allNets,  setAllNets]  = React.useState([]); // dostępne sieci
+  const confirm = React.useCallback((title, msg='', danger=false) =>
+    new Promise(r => { resolve.current = r; setState({title, msg, danger}); }), []);
 
-  React.useEffect(() => {
-    fetch(`/api/docker/inspect/${c.id}`, {credentials:'include'})
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (!d) return;
-        setInspect(d);
-// env parsowany niżej
-
-        setRestart(d.restart_policy || d.HostConfig?.RestartPolicy?.Name || 'no');
-        // Pamięć i CPU
-        const memBytes = d.memory_limit || d.HostConfig?.Memory || 0;
-        setMemory(memBytes ? Math.round(memBytes/1024/1024)+'m' : '');
-        const nc = d.nano_cpus || d.HostConfig?.NanoCpus || 0;
-        setCpus(nc ? (nc/1e9).toFixed(2) : '');
-        // Zmienne env — backend zwraca jako "env" (tablica stringów)
-        const envArr = d.env || d.Config?.Env || [];
-        const parsedEnv = envArr.map(e => {
-          const idx = e.indexOf('=');
-          return idx >= 0
-            ? { key: e.slice(0, idx), val: e.slice(idx+1) }
-            : { key: e, val: '' };
-        });
-        setEnvVars(parsedEnv);
-
-        // Wolumeny — backend zwraca "binds" (string src:dst:mode) lub "mounts"
-        const binds = d.binds || [];
-        const mnts = binds.length > 0
-          ? binds.map(b => {
-              const parts = b.split(':');
-              return { src: parts[0]||'', dst: parts[1]||'', mode: parts[2]||'rw' };
-            })
-          : (d.mounts || []).map(m => ({
-              src: m.Source || m.source || '',
-              dst: m.Destination || m.destination || '',
-              mode: m.Mode || m.mode || 'rw',
-            }));
-        setMounts(mnts);
-
-        // Sieci — backend zwraca "network_names"
-        const nets = d.network_names || Object.keys(d.NetworkSettings?.Networks || {});
-        setNetworks(nets);
-      })
-      .catch(e => setErr(e.message))
-      .finally(() => setLoading(false));
-
-    // Pobierz dostępne sieci Docker
-    fetch('/api/storage/exec-command', {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({command: 'docker network ls --format "{{.Name}}"'}),
-    }).then(r=>r.ok?r.json():null)
-      .then(d=>{ if(d?.output) setAllNets(d.output.split('\n').filter(Boolean)); })
-      .catch(()=>{});
-  }, [c.id]);
-
-  const save = async () => {
-    setSaving(true); setErr('');
-    try {
-      // 1. docker update — limity zasobów i restart policy
-      const updateArgs = [];
-      if (memory)  updateArgs.push('--memory', memory);
-      if (cpus)    updateArgs.push('--cpus', cpus);
-      if (restart) updateArgs.push('--restart', restart);
-      updateArgs.push(c.id);
-
-      if (updateArgs.length > 1) {
-        const r1 = await fetch('/api/storage/exec-command', {
-          method:'POST', credentials:'include',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({command: 'docker update ' + updateArgs.join(' ')}),
-        });
-        const d1 = await r1.json();
-        if (!d1.ok) throw new Error('docker update: ' + d1.output);
-      }
-
-      // 2. Sprawdź czy potrzebna rekreacja (ENV, mounts, sieci)
-      const origEnv   = (inspect?.Config?.Env || []);
-      const newEnv    = envVars.map(e => e.key+'='+e.val);
-      const envChanged = JSON.stringify(origEnv.sort()) !== JSON.stringify(newEnv.sort());
-
-      const origMounts = (inspect?.HostConfig?.Binds || []);
-      const newMounts  = mounts.map(m => m.src+':'+m.dst+(m.mode?':'+m.mode:''));
-      const mntChanged = JSON.stringify(origMounts.sort()) !== JSON.stringify(newMounts.sort());
-
-      const origNets = Object.keys(inspect?.NetworkSettings?.Networks || {}).sort();
-      const netsChanged = JSON.stringify(origNets) !== JSON.stringify([...networks].sort());
-
-      if (envChanged || mntChanged || netsChanged) {
-        const envStr  = envVars.map(e => `-e "${e.key}=${e.val.replace(/"/g,'\"')}"`).join(' ');
-        const mntStr  = mounts.filter(m=>m.src&&m.dst).map(m => `-v "${m.src}:${m.dst}${m.mode?':'+m.mode:''}"`).join(' ');
-        const img     = inspect?.Config?.Image || c.image;
-        const name    = c.name.replace(/^\//, '');
-
-        // Dodaj nowe sieci, usuń stare
-        const addNets = networks.filter(n => !origNets.includes(n));
-        const rmNets  = origNets.filter(n => !networks.includes(n) && n !== 'bridge');
-
-        const cmds = [
-          `docker stop ${c.id}`,
-          `docker rename ${c.id} ${name}_bak_$(date +%s)`,
-          `docker run -d --name ${name} ${envStr} ${mntStr} ${img}`,
-          ...addNets.map(n => `docker network connect ${n} ${name}`),
-          ...rmNets.map(n  => `docker network disconnect ${n} ${name} 2>/dev/null || true`),
-        ].join(' && ');
-
-        const r3 = await fetch('/api/storage/exec-command', {
-          method:'POST', credentials:'include',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({command: cmds}),
-        });
-        const d3 = await r3.json();
-        if (!d3.ok) throw new Error('Rekreacja kontenera: ' + d3.output);
-      }
-
-      onSaved();
-    } catch(e) {
-      setErr(e.message);
-    } finally { setSaving(false); }
+  const handle = (result) => {
+    setState(null);
+    resolve.current && resolve.current(result);
   };
 
-  const inpSt = {background:'var(--bg-2)',border:'1px solid var(--line-strong)',
-    borderRadius:5,padding:'5px 8px',color:'var(--fg)',fontFamily:'var(--font-mono)',
-    fontSize:'var(--fs-xs)',outline:'none'};
-
-  const TABS = [
-    {id:'env',       label:'Zmienne ENV'},
-    {id:'mounts',    label:'Wolumeny'},
-    {id:'network',   label:'Sieć'},
-    {id:'resources', label:'Zasoby'},
-    {id:'restart',   label:'Restart policy'},
-  ];
-
-  return (
-    <Modal title={`Edytuj kontener · ${c.name}`} sub={c.image} onClose={onClose} width={640}
-      footer={<>
-        <button className="btn" onClick={onClose}>Anuluj</button>
-        <button className="btn primary" onClick={save} disabled={saving||loading}>
-          {saving ? 'Zapisywanie…' : 'Zastosuj i restartuj'}
-        </button>
-      </>}
-    >
-      {loading && <div style={{padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie konfiguracji…</div>}
-      {err && <div style={{padding:'8px 12px',background:'color-mix(in oklch,var(--err) 10%,transparent)',
-        borderRadius:6,color:'var(--err)',fontSize:'var(--fs-sm)',marginBottom:12}}>{err}</div>}
-
-      {!loading && (<>
-        {/* Tabs */}
-        <div style={{display:'flex',gap:4,borderBottom:'1px solid var(--line)',marginBottom:16}}>
-          {TABS.map(t => (
-            <button key={t.id} onClick={()=>setTab(t.id)}
-              style={{padding:'6px 14px',background:'none',border:'none',cursor:'pointer',
-                color:tab===t.id?'var(--fg)':'var(--fg-dim)',
-                borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent',
-                fontSize:'var(--fs-sm)',marginBottom:-1}}>
-              {t.label}
-            </button>
-          ))}
+  const el = state ? (
+    <div style={{position:'fixed',inset:0,zIndex:2000,display:'flex',alignItems:'center',
+      justifyContent:'center',background:'rgba(0,0,0,0.6)',backdropFilter:'blur(4px)'}}
+      onClick={()=>handle(false)}>
+      <div style={{background:'var(--bg-1)',border:'1px solid var(--line-strong)',borderRadius:12,
+        width:400,maxWidth:'90vw',boxShadow:'0 24px 64px rgba(0,0,0,0.4)',overflow:'hidden'}}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{padding:'22px 22px 12px'}}>
+          <div style={{fontWeight:600,fontSize:'var(--fs-md)',color:state.danger?'var(--err)':'var(--fg)',marginBottom:6}}>
+            {state.title}
+          </div>
+          {state.msg && <div style={{fontSize:'var(--fs-sm)',color:'var(--fg-dim)',lineHeight:1.6}}>{state.msg}</div>}
         </div>
-
-        {/* ENV */}
-        {tab === 'env' && (
-          <div>
-            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
-              <button className="btn sm" onClick={()=>setEnvVars(e=>[...e,{key:'',val:''}])}>
-                + Dodaj zmienną
-              </button>
-            </div>
-            <div style={{maxHeight:360,overflowY:'auto',display:'flex',flexDirection:'column',gap:6}}>
-              {envVars.map((e,i) => (
-                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:6,alignItems:'center'}}>
-                  <input style={{...inpSt,width:'100%'}} value={e.key} placeholder="KLUCZ"
-                    onChange={ev=>setEnvVars(arr=>arr.map((x,j)=>j===i?{...x,key:ev.target.value}:x))}/>
-                  <input style={{...inpSt,width:'100%'}} value={e.val} placeholder="wartość"
-                    onChange={ev=>setEnvVars(arr=>arr.map((x,j)=>j===i?{...x,val:ev.target.value}:x))}/>
-                  <button className="btn sm ghost" style={{color:'var(--err)'}}
-                    onClick={()=>setEnvVars(arr=>arr.filter((_,j)=>j!==i))}>✕</button>
-                </div>
-              ))}
-            </div>
-            <div style={{marginTop:10,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
-              ⚠️ Zmiana ENV wymaga rekrecji kontenera (stop → rm → run z nowymi zmiennymi)
-            </div>
-          </div>
-        )}
-
-        {/* WOLUMENY */}
-        {tab === 'mounts' && (
-          <div>
-            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
-              <button className="btn sm" onClick={()=>setMounts(m=>[...m,{src:'',dst:'',mode:'rw'}])}>
-                + Dodaj wolumen
-              </button>
-            </div>
-            <div style={{display:'flex',flexDirection:'column',gap:6,maxHeight:360,overflowY:'auto'}}>
-              {mounts.length === 0 && (
-                <div style={{color:'var(--fg-dim)',fontSize:'var(--fs-sm)',padding:'20px 0',textAlign:'center'}}>
-                  Brak punktów montowania
-                </div>
-              )}
-              {mounts.map((m,i) => (
-                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr 80px auto',gap:6,alignItems:'center'}}>
-                  <input style={{...inpSt,width:'100%'}} value={m.src} placeholder="Źródło (host)"
-                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,src:e.target.value}:x))}/>
-                  <input style={{...inpSt,width:'100%'}} value={m.dst} placeholder="Cel (kontener)"
-                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,dst:e.target.value}:x))}/>
-                  <select style={{...inpSt}} value={m.mode}
-                    onChange={e=>setMounts(arr=>arr.map((x,j)=>j===i?{...x,mode:e.target.value}:x))}>
-                    <option value="rw">rw</option>
-                    <option value="ro">ro</option>
-                  </select>
-                  <button className="btn sm ghost" style={{color:'var(--err)'}}
-                    onClick={()=>setMounts(arr=>arr.filter((_,j)=>j!==i))}>✕</button>
-                </div>
-              ))}
-            </div>
-            <div style={{marginTop:10,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
-              ⚠️ Zmiana wolumenów wymaga rekreacji kontenera
-            </div>
-          </div>
-        )}
-
-        {/* SIEĆ */}
-        {tab === 'network' && (
-          <div style={{display:'flex',flexDirection:'column',gap:8}}>
-            <div style={{fontSize:'var(--fs-sm)',color:'var(--fg-muted)',marginBottom:4}}>
-              Podłączone sieci Docker — zaznacz aktywne:
-            </div>
-            {allNets.map(net => (
-              <div key={net} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
-                borderRadius:7,border:'1px solid',cursor:'pointer',
-                borderColor:networks.includes(net)?'var(--accent)':'var(--line)',
-                background:networks.includes(net)?'color-mix(in oklch,var(--accent) 8%,transparent)':'var(--bg-2)'}}
-                onClick={()=>setNetworks(prev =>
-                  prev.includes(net) ? prev.filter(n=>n!==net) : [...prev, net]
-                )}>
-                <div style={{width:14,height:14,borderRadius:3,border:'2px solid',flexShrink:0,
-                  borderColor:networks.includes(net)?'var(--accent)':'var(--fg-dim)',
-                  background:networks.includes(net)?'var(--accent)':'transparent',
-                  display:'flex',alignItems:'center',justifyContent:'center'}}>
-                  {networks.includes(net) && <span style={{color:'#fff',fontSize:10,lineHeight:1}}>✓</span>}
-                </div>
-                <span style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)'}}>{net}</span>
-              </div>
-            ))}
-            {allNets.length === 0 && (
-              <div style={{color:'var(--fg-dim)',fontSize:'var(--fs-sm)',padding:'20px 0',textAlign:'center'}}>
-                Brak dostępnych sieci
-              </div>
-            )}
-            <div style={{marginTop:8,fontSize:'var(--fs-xs)',color:'var(--err)'}}>
-              ⚠️ Zmiana sieci wymaga rekreacji kontenera
-            </div>
-          </div>
-        )}
-
-        {/* RESOURCES */}
-        {tab === 'resources' && (
-          <div style={{display:'flex',flexDirection:'column',gap:14}}>
-            <div>
-              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:5}}>Limit pamięci RAM</div>
-              <input style={{...inpSt,width:200}} value={memory}
-                onChange={e=>setMemory(e.target.value)} placeholder="np. 512m, 2g (puste = bez limitu)"/>
-            </div>
-            <div>
-              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:5}}>Limit CPU</div>
-              <input style={{...inpSt,width:200}} value={cpus}
-                onChange={e=>setCpus(e.target.value)} placeholder="np. 0.5, 2.0 (puste = bez limitu)"/>
-            </div>
-            <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-muted)'}}>
-              Limity zasobów stosowane natychmiast przez <code>docker update</code> bez restartu.
-            </div>
-          </div>
-        )}
-
-        {/* RESTART */}
-        {tab === 'restart' && (
-          <div style={{display:'flex',flexDirection:'column',gap:10}}>
-            {[
-              {val:'no',             label:'no',             desc:'Nie restartuj automatycznie'},
-              {val:'always',         label:'always',         desc:'Zawsze restartuj (też po docker restart)'},
-              {val:'unless-stopped', label:'unless-stopped', desc:'Restartuj chyba że ręcznie zatrzymany'},
-              {val:'on-failure',     label:'on-failure',     desc:'Restartuj tylko gdy exit code ≠ 0'},
-            ].map(o => (
-              <div key={o.val} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
-                borderRadius:7,border:'1px solid',cursor:'pointer',
-                borderColor:restart===o.val?'var(--accent)':'var(--line)',
-                background:restart===o.val?'color-mix(in oklch,var(--accent) 8%,transparent)':'var(--bg-2)'}}
-                onClick={()=>setRestart(o.val)}>
-                <div style={{width:14,height:14,borderRadius:'50%',border:'2px solid',flexShrink:0,
-                  borderColor:restart===o.val?'var(--accent)':'var(--fg-dim)',
-                  background:restart===o.val?'var(--accent)':'transparent'}}/>
-                <div>
-                  <div style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)'}}>{o.label}</div>
-                  <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>{o.desc}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </>)}
-    </Modal>
-  );
-};
-
-const InspectDialog = ({ c, onClose }) => {
-  const Modal = window.Modal;
-  const [data, setData]     = React.useState(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError]   = React.useState('');
-  const [tab, setTab]       = React.useState('general');
-
-  React.useEffect(() => {
-    fetch(`/api/docker/inspect/${c.id}`, {credentials:'include'})
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-      .then(d => { setData(d); setLoading(false); })
-      .catch(e => {
-        // Fallback z danych lokalnych gdy Docker API niedostępny
-        setData({
-          id:      c.id,
-          name:    c.name,
-          image:   c.image,
-          state:   c.state,
-          ports:   typeof c.ports === 'string' ? [c.ports] : (c.ports || []),
-          env:     [],
-          mounts:  [],
-          labels:  {},
-          network: {},
-          _error:  e.message,
-        });
-        setLoading(false);
-      });
-  }, [c.id]);
-
-  const rows = data ? [
-    { k:'ID',            v: (data.id||'').slice(0,12) },
-    { k:'Nazwa',         v: data.name },
-    { k:'Obraz',         v: data.image },
-    { k:'Stan',          v: data.state || data.status },
-    { k:'PID',           v: data.pid ? String(data.pid) : '—' },
-    { k:'Restart',       v: data.restart_policy || '—' },
-    { k:'Porty',         v: (data.ports||[]).join(', ') || data.ports_str || '—' },
-    { k:'IP',            v: data.network?.ip || '—' },
-    { k:'Gateway',       v: data.network?.gateway || '—' },
-    { k:'MAC',           v: data.network?.mac || '—' },
-    { k:'Utworzono',     v: data.created ? new Date(data.created).toLocaleString('pl') : '—' },
-    { k:'Limit RAM',     v: data.memory_limit > 0 ? Math.round(data.memory_limit/1024/1024)+' MB' : 'brak limitu' },
-  ] : [];
-
-  return (
-    <Modal title={`Inspekcja · ${c.name}`} sub={`docker inspect ${c.id}`} onClose={onClose} width={680}
-      footer={<div className="row gap-sm" style={{marginLeft:'auto'}}>
-        <button className="btn sm primary" onClick={onClose}>Zamknij</button>
-      </div>}
-    >
-      {loading ? (
-        <div style={{padding:32,textAlign:'center',color:'var(--fg-dim)'}}>
-          <span className="dot pulse" style={{display:'inline-block',marginRight:8}}/>Ładowanie…
-        </div>
-      ) : (
-        <div className="col" style={{gap:14}}>
-          <div className="segmented">
-            <button className={tab==='general'?'active':''} onClick={()=>setTab('general')}>Ogólne</button>
-            <button className={tab==='env'?'active':''} onClick={()=>setTab('env')}>ENV ({(data?.env||[]).length})</button>
-            <button className={tab==='mounts'?'active':''} onClick={()=>setTab('mounts')}>Woluminy ({(data?.mounts||[]).length})</button>
-            <button className={tab==='labels'?'active':''} onClick={()=>setTab('labels')}>Labels</button>
-            <button className={tab==='raw'?'active':''} onClick={()=>setTab('raw')}>JSON</button>
-          </div>
-
-          {tab==='general' && (
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:1,background:'var(--line)',borderRadius:7,overflow:'hidden',border:'1px solid var(--line)'}}>
-              {rows.map(({k,v}) => (
-                <div key={k} style={{display:'flex',gap:12,padding:'8px 12px',background:'var(--bg-1)',alignItems:'baseline'}}>
-                  <span style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',minWidth:70,flexShrink:0,textTransform:'uppercase',letterSpacing:'.05em'}}>{k}</span>
-                  <span className="mono" style={{fontSize:'var(--fs-xs)',wordBreak:'break-all'}}>{v}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {tab==='env' && (
-            <div style={{background:'oklch(0.12 0.01 260)',borderRadius:8,padding:'12px 14px',fontFamily:'var(--font-mono)',fontSize:12,lineHeight:1.8,maxHeight:320,overflowY:'auto'}}>
-              {(data?.env || []).length === 0
-                ? <span style={{color:'var(--fg-dim)'}}>Brak zmiennych środowiskowych.</span>
-                : (data?.env || []).map((e,i) => {
-                    const [k,...rest] = e.split('=');
-                    return (
-                      <div key={i}>
-                        <span style={{color:'oklch(0.65 0.18 145)'}}>{k}</span>
-                        <span style={{color:'var(--fg-dim)'}}>{'='}</span>
-                        <span style={{color:'oklch(0.78 0.08 60)'}}>{rest.join('=')}</span>
-                      </div>
-                    );
-                  })
-              }
-            </div>
-          )}
-
-          {tab==='mounts' && (
-            (data?.mounts || []).length === 0
-              ? <div style={{padding:20,textAlign:'center',color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Brak zamontowanych woluminów.</div>
-              : <table className="table">
-                  <thead><tr><th>Typ</th><th>Źródło</th><th>Cel</th><th>Tryb</th></tr></thead>
-                  <tbody>
-                    {(data?.mounts||[]).map((m,i)=>(
-                      <tr key={i}>
-                        <td><span className="chip">{m.type||'bind'}</span></td>
-                        <td className="mono" style={{fontSize:'var(--fs-xs)'}}>{m.source||'—'}</td>
-                        <td className="mono" style={{fontSize:'var(--fs-xs)'}}>{m.destination||'—'}</td>
-                        <td className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{m.mode||'rw'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-          )}
-
-          {tab==='labels' && (
-            Object.keys(data?.labels||{}).length === 0
-              ? <div style={{padding:20,textAlign:'center',color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Brak etykiet.</div>
-              : <table className="table">
-                  <thead><tr><th>Etykieta</th><th>Wartość</th></tr></thead>
-                  <tbody>
-                    {Object.entries(data?.labels||{}).map(([k,v])=>(
-                      <tr key={k}>
-                        <td className="mono" style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>{k}</td>
-                        <td className="mono" style={{fontSize:'var(--fs-xs)'}}>{v}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-          )}
-
-          {tab==='raw' && (
-            <pre style={{background:'oklch(0.12 0.01 260)',borderRadius:8,padding:'12px 14px',
-              fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,color:'oklch(0.78 0.06 260)',
-              maxHeight:360,overflowY:'auto',whiteSpace:'pre-wrap',wordBreak:'break-all',margin:0}}>
-              {JSON.stringify(data?.raw || data, null, 2)}
-            </pre>
-          )}
-        </div>
-      )}
-    </Modal>
-  );
-};
-
-const MoreMenu = ({ c, onAction, onClose }) => {
-  const options = [
-    { label:'Uruchom',    icon:'play',    action:'start',   disabled: c.state==='running' },
-    { label:'Zatrzymaj',  icon:'stop',    action:'stop',    disabled: c.state==='stopped' },
-    { label:'Restartuj',  icon:'restart', action:'restart', disabled: false },
-    { label:'Pauza',      icon:'pause',   action:'pause',   disabled: c.state!=='running' },
-    null,
-    { label:'Edytuj',     icon:'edit',    action:'edit',    disabled: false },
-    { label:'Logi',       icon:'log',     action:'logs',    disabled: false },
-    { label:'Terminal',   icon:'terminal',action:'shell',   disabled: c.state!=='running' },
-    { label:'Inspekcja',  icon:'search',  action:'inspect', disabled: false },
-    null,
-    { label:'Usuń',       icon:'trash',   action:'remove',  disabled: c.state==='running', danger:true },
-  ];
-  React.useEffect(() => {
-    const close = () => onClose();
-    setTimeout(() => window.addEventListener('click', close), 0);
-    return () => window.removeEventListener('click', close);
-  }, []);
-  return (
-    <div style={{position:'absolute',right:0,top:'100%',zIndex:500,background:'var(--bg-1)',
-      border:'1px solid var(--line-strong)',borderRadius:8,padding:4,minWidth:160,
-      boxShadow:'0 8px 24px rgba(0,0,0,0.4)'}}>
-      {options.map((o,i) => o===null
-        ? <div key={i} style={{height:1,background:'var(--line)',margin:'4px 0'}}/>
-        : <button key={i} disabled={o.disabled}
-            onClick={e=>{e.stopPropagation();onAction(c.id,o.action);onClose();}}
-            style={{display:'flex',alignItems:'center',gap:8,width:'100%',padding:'7px 10px',
-              background:'none',border:'none',borderRadius:5,cursor:o.disabled?'default':'pointer',
-              color: o.danger?'var(--err)':o.disabled?'var(--fg-dim)':'var(--fg)',
-              fontSize:'var(--fs-sm)',textAlign:'left',opacity:o.disabled?0.4:1}}
-            onMouseEnter={e=>{if(!o.disabled)e.currentTarget.style.background='var(--bg-2)'}}
-            onMouseLeave={e=>{e.currentTarget.style.background='none'}}>
-            <Icon name={o.icon} size={13}/>{o.label}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',padding:'12px 22px',borderTop:'1px solid var(--line)'}}>
+          <button className="btn" onClick={()=>handle(false)}>Anuluj</button>
+          <button className={'btn '+(state.danger?'danger':'primary')} onClick={()=>handle(true)}>
+            {state.danger?'Usuń':'Potwierdź'}
           </button>
-      )}
+        </div>
+      </div>
     </div>
-  );
+  ) : null;
+
+  return [el, confirm];
 };
 
-const NewContainerDialog = ({ onClose, onAdd }) => {
-  const [form, setForm] = React.useState({
-    name:'', image:'nginx:alpine', ports:'8080:80', volumes:'', env:'TZ=Europe/Warsaw', restart:'unless-stopped', network:'bridge'
-  });
-  const set = (k,v) => setForm(f=>({...f,[k]:v}));
-  const inpSt = {background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:5,
-    padding:'6px 10px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none',width:'100%'};
-  const submit = () => {
-    fetch('/services/docker/container/create', {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(form),
-    }).then(r => r.ok ? r.json() : null).then(() => { onAdd(form); onClose(); }).catch(()=>{onAdd(form);onClose();});
-  };
-  return (
-    <Modal title="Nowy kontener" sub="docker run …" onClose={onClose} width={680}
-      footer={<div className="row gap-sm" style={{marginLeft:'auto'}}>
-        <button className="btn sm" onClick={onClose}>Anuluj</button>
-        <button className="btn sm primary" onClick={submit}>
-          <Icon name="play" size={11}/> Uruchom kontener
-        </button>
-      </div>}
-    >
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-        <div>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Obraz</div>
-          <input style={inpSt} value={form.image} onChange={e=>set('image',e.target.value)} placeholder="nginx:alpine"/>
-        </div>
-        <div>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Nazwa kontenera</div>
-          <input style={inpSt} value={form.name} onChange={e=>set('name',e.target.value)} placeholder="myapp"/>
-        </div>
-        <div>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Porty (host:kontener)</div>
-          <input style={inpSt} value={form.ports} onChange={e=>set('ports',e.target.value)} placeholder="8080:80"/>
-        </div>
-        <div>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Restart</div>
-          <select style={inpSt} value={form.restart} onChange={e=>set('restart',e.target.value)}>
-            <option value="no">no</option>
-            <option value="always">always</option>
-            <option value="unless-stopped">unless-stopped</option>
-            <option value="on-failure">on-failure</option>
-          </select>
-        </div>
-        <div style={{gridColumn:'1/-1'}}>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Wolumeny (host:kontener)</div>
-          <input style={inpSt} value={form.volumes} onChange={e=>set('volumes',e.target.value)} placeholder="/mnt/data:/data"/>
-        </div>
-        <div style={{gridColumn:'1/-1'}}>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Zmienne środowiskowe (jedna na linię)</div>
-          <textarea style={{...inpSt,height:70,resize:'vertical',lineHeight:1.6}} value={form.env} onChange={e=>set('env',e.target.value)}/>
-        </div>
-        <div style={{gridColumn:'1/-1',background:'var(--bg-2)',borderRadius:6,padding:'8px 12px',fontFamily:'var(--font-mono)',fontSize:10,color:'var(--fg-dim)',lineHeight:1.7}}>
-          <div>docker run \</div>
-          {form.name && <div>&nbsp;&nbsp;--name {form.name} \</div>}
-          {form.ports && <div>&nbsp;&nbsp;-p {form.ports} \</div>}
-          {form.volumes && <div>&nbsp;&nbsp;-v {form.volumes} \</div>}
-          <div>&nbsp;&nbsp;--restart {form.restart} \</div>
-          <div>&nbsp;&nbsp;<span style={{color:'var(--accent)'}}>{form.image||'nginx:alpine'}</span></div>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// ── Compose templates ────────────────────────────────────────────────────────
-const COMPOSE_TEMPLATES = [
-  { id:'blank', label:'Pusty',         icon:'plus',     desc:'Zacznij od zera',
-    yaml:`services:\n  app:\n    image: nginx:alpine\n    container_name: app\n    restart: unless-stopped\n    ports:\n      - "8080:80"\n    environment:\n      - TZ=Europe/Warsaw\n` },
-
-  { id:'nginx', label:'Nginx',         icon:'globe',    desc:'Reverse proxy / serwer www',
-    yaml:`services:\n  nginx:\n    image: nginx:alpine\n    container_name: nginx\n    restart: unless-stopped\n    ports:\n      - "80:80"\n      - "443:443"\n    volumes:\n      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro\n      - ./html:/usr/share/nginx/html:ro\n    environment:\n      - TZ=Europe/Warsaw\n` },
-
-  { id:'nextcloud', label:'Nextcloud',  icon:'share',    desc:'Własna chmura plików',
-    yaml:`services:\n  nextcloud:\n    image: nextcloud:latest\n    container_name: nextcloud\n    restart: unless-stopped\n    ports:\n      - "8080:80"\n    volumes:\n      - nextcloud_data:/var/www/html\n    environment:\n      - NEXTCLOUD_ADMIN_USER=admin\n      - NEXTCLOUD_ADMIN_PASSWORD=changeme\n      - TZ=Europe/Warsaw\n  db:\n    image: mariadb:latest\n    container_name: nextcloud-db\n    restart: unless-stopped\n    volumes:\n      - db_data:/var/lib/mysql\n    environment:\n      - MYSQL_ROOT_PASSWORD=rootpass\n      - MYSQL_DATABASE=nextcloud\n      - MYSQL_USER=nextcloud\n      - MYSQL_PASSWORD=ncpass\n\nvolumes:\n  nextcloud_data:\n  db_data:\n` },
-
-  { id:'jellyfin', label:'Jellyfin',    icon:'media',    desc:'Serwer multimediów',
-    yaml:`services:\n  jellyfin:\n    image: jellyfin/jellyfin:latest\n    container_name: jellyfin\n    restart: unless-stopped\n    ports:\n      - "8096:8096"\n    volumes:\n      - ./config:/config\n      - /mnt/media:/media:ro\n    environment:\n      - TZ=Europe/Warsaw\n      - JELLYFIN_PublishedServerUrl=http://localhost:8096\n` },
-
-  { id:'portainer', label:'Portainer',  icon:'settings', desc:'Zarządzanie Dockerem przez UI',
-    yaml:`services:\n  portainer:\n    image: portainer/portainer-ce:latest\n    container_name: portainer\n    restart: unless-stopped\n    ports:\n      - "9000:9000"\n      - "9443:9443"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - portainer_data:/data\n\nvolumes:\n  portainer_data:\n` },
-
-  { id:'grafana', label:'Grafana',      icon:'dashboard', desc:'Wykresy i monitoring',
-    yaml:`services:\n  grafana:\n    image: grafana/grafana:latest\n    container_name: grafana\n    restart: unless-stopped\n    ports:\n      - "3000:3000"\n    volumes:\n      - grafana_data:/var/lib/grafana\n    environment:\n      - GF_SECURITY_ADMIN_PASSWORD=admin\n      - TZ=Europe/Warsaw\n  prometheus:\n    image: prom/prometheus:latest\n    container_name: prometheus\n    restart: unless-stopped\n    ports:\n      - "9090:9090"\n    volumes:\n      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro\n      - prometheus_data:/prometheus\n\nvolumes:\n  grafana_data:\n  prometheus_data:\n` },
-
-  { id:'vaultwarden', label:'Vaultwarden', icon:'key',   desc:'Własny menedżer haseł',
-    yaml:`services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    container_name: vaultwarden\n    restart: unless-stopped\n    ports:\n      - "8082:80"\n    volumes:\n      - vw_data:/data\n    environment:\n      - WEBSOCKET_ENABLED=true\n      - TZ=Europe/Warsaw\n\nvolumes:\n  vw_data:\n` },
-
-  { id:'uptime-kuma', label:'Uptime Kuma', icon:'ok',   desc:'Monitoring dostępności',
-    yaml:`services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:latest\n    container_name: uptime-kuma\n    restart: unless-stopped\n    ports:\n      - "3001:3001"\n    volumes:\n      - uptime_data:/app/data\n      - /var/run/docker.sock:/var/run/docker.sock\n\nvolumes:\n  uptime_data:\n` },
-];
-
-const ComposeDialog = ({ stack, onClose, onDeploy }) => {
-  const Modal = window.Modal;
-  const [phase, setPhase]     = React.useState(stack ? 'edit' : 'pick');  // 'pick' | 'edit'
-  const [yaml, setYaml]       = React.useState(stack?.yaml || stack?.content || '');
-  const [name, setName]       = React.useState(stack?.name || '');
-  const [busy, setBusy]       = React.useState(false);
-  const [log,  setLog]        = React.useState('');
-
-  const inpSt = {background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:5,
-    padding:'6px 10px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none',width:'100%'};
-
-  const pickTemplate = (tpl) => {
-    setYaml(tpl.yaml.replace(/\\n/g,'\n'));
-    if (!name) setName(tpl.id === 'blank' ? '' : tpl.id);
-    setPhase('edit');
-  };
-
-  const deploy = async (andUp) => {
-    if (!name.trim()) { alert('Podaj nazwę stosu.'); return; }
-    setBusy(true); setLog('');
-    try {
-      const r = await fetch('/api/docker/compose/create', {
-        method: 'POST', credentials: 'include',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name: name.trim(), content: yaml, deploy: andUp }),
-      });
-      let d;
-      try { d = await r.json(); } catch(pe) { setLog('[BŁĄD] Serwer zwrócił nieprawidłowy JSON: ' + await r.text()); setBusy(false); return; }
-      if (!r.ok) { setLog('[BŁĄD] ' + (d?.error || JSON.stringify(d))); setBusy(false); return; }
-      // Sukces
-      setLog((andUp ? '[OK] Zapisano i uruchomiono → ' : '[OK] Zapisano → ') + (d.file || '/opt/stacks/' + name.trim() + '/docker-compose.yml'));
-      onDeploy({ name: d.name || name.trim(), file: d.file, status: andUp ? 'running' : 'stopped' });
-      setTimeout(onClose, 1500);
-    } catch(e) { setLog('[BŁĄD] ' + e.message); }
-    setBusy(false);
-  };
-
-  // ── Faza 1: wybór szablonu ────────────────────────────────────────────────
-  if (phase === 'pick') return (
-    <Modal title="Nowy stos Compose" sub="Wybierz szablon lub zacznij od zera" onClose={onClose} width={680}
-      footer={<div className="row gap-sm" style={{marginLeft:'auto'}}>
-        <button className="btn sm" onClick={onClose}>Anuluj</button>
-      </div>}
-    >
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10}}>
-        {COMPOSE_TEMPLATES.map(tpl => (
-          <div key={tpl.id} onClick={()=>pickTemplate(tpl)}
-            style={{padding:'14px 10px',borderRadius:8,border:'1px solid var(--line-strong)',
-              background:'var(--bg-2)',cursor:'pointer',textAlign:'center',transition:'all .12s'}}
-            onMouseEnter={e=>{e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.background='oklch(0.55 0.2 260 / 0.08)';}}
-            onMouseLeave={e=>{e.currentTarget.style.borderColor='var(--line-strong)';e.currentTarget.style.background='var(--bg-2)';}}>
-            <Icon name={tpl.icon} size={22} style={{color:'var(--accent)',display:'block',margin:'0 auto 8px'}}/>
-            <div style={{fontWeight:600,fontSize:'var(--fs-sm)',marginBottom:3}}>{tpl.label}</div>
-            <div style={{fontSize:10,color:'var(--fg-dim)',lineHeight:1.4}}>{tpl.desc}</div>
-          </div>
-        ))}
-      </div>
-    </Modal>
-  );
-
-  // ── Faza 2: edytor YAML ───────────────────────────────────────────────────
-  return (
-    <Modal title={stack ? `Compose · ${stack.name}` : `Nowy stos · ${name || '…'}`}
-      sub={stack?.file || '/opt/stacks/<nazwa>/docker-compose.yml'}
-      onClose={onClose} width={820}
-      footer={<div className="row gap-sm" style={{width:'100%',alignItems:'center'}}>
-        {!stack && <button className="btn sm" onClick={()=>setPhase('pick')}><Icon name="close" size={11}/> Szablony</button>}
-        <div style={{flex:1}}/>
-        <button className="btn sm" onClick={onClose}>Anuluj</button>
-        <button className="btn sm" onClick={()=>deploy(false)} disabled={busy}>
-          <Icon name="download" size={11}/> Zapisz
-        </button>
-        <button className="btn sm primary" onClick={()=>deploy(true)} disabled={busy}>
-          {busy ? <><span className="dot pulse" style={{marginRight:6}}/>Deploying…</> : <><Icon name="play" size={11}/> Deploy</>}
-        </button>
-      </div>}
-    >
-      <div style={{display:'flex',gap:12,marginBottom:12,alignItems:'flex-end'}}>
-        <div style={{flex:'0 0 260px'}}>
-          <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>Nazwa stosu</div>
-          <input style={inpSt} value={name} onChange={e=>setName(e.target.value)} placeholder="np. media-stack, nextcloud"/>
-        </div>
-        <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>
-          → /opt/stacks/{name||'<nazwa>'}/docker-compose.yml
-        </div>
-      </div>
-      <textarea value={yaml} onChange={e=>setYaml(e.target.value)} spellCheck={false}
-        style={{...inpSt,height:360,resize:'vertical',lineHeight:1.65,fontSize:12,tabSize:2}}/>
-      {log && (
-        <div style={{marginTop:10,padding:'8px 12px',background:'var(--bg)',borderRadius:5,
-          fontFamily:'var(--font-mono)',fontSize:11,color:log.includes('BŁĄD')?'var(--err)':'var(--ok)',
-          maxHeight:100,overflowY:'auto',whiteSpace:'pre-wrap'}}>
-          {log}
-        </div>
-      )}
-    </Modal>
-  );
-};
-
-// ── ContCard ─────────────────────────────────────────────────────────────────
 // ── DockerLoadingSplash — z nowego szablonu ─────────────────────────────────
 const DOCKER_LOAD_STEPS = [
   { text: 'Łączenie z Docker daemon…',        pct: 8  },
@@ -952,7 +300,6 @@ const DockerLoadingSplash = ({ onDone }) => {
       display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
       minHeight:420, gap:0,
     }}>
-      {/* Docker whale SVG */}
       <div style={{
         width:80, height:80, borderRadius:20, marginBottom:28,
         background:'oklch(0.18 0.04 245)',
@@ -978,7 +325,6 @@ const DockerLoadingSplash = ({ onDone }) => {
           }}/>
         )}
       </div>
-
       <div style={{fontSize:18, fontWeight:600, color:'var(--fg)', marginBottom:6}}>
         {finished ? 'Docker gotowy' : 'Ładowanie Docker…'}
       </div>
@@ -988,8 +334,6 @@ const DockerLoadingSplash = ({ onDone }) => {
       }}>
         {current.text}
       </div>
-
-      {/* Progress bar */}
       <div style={{width:320, height:5, background:'var(--bg-2)', borderRadius:3, overflow:'hidden', marginBottom:10}}>
         <div style={{
           height:'100%', borderRadius:3,
@@ -999,8 +343,6 @@ const DockerLoadingSplash = ({ onDone }) => {
           boxShadow: finished ? 'none' : '0 0 10px oklch(0.65 0.2 245 / 0.6)',
         }}/>
       </div>
-
-      {/* Step dots */}
       <div style={{display:'flex', gap:6, marginBottom:28}}>
         {DOCKER_LOAD_STEPS.map((_, i) => (
           <div key={i} style={{
@@ -1011,11 +353,9 @@ const DockerLoadingSplash = ({ onDone }) => {
           }}/>
         ))}
       </div>
-
       <div style={{fontSize:'var(--fs-xs)', color:'var(--fg-muted)', fontFamily:'var(--font-mono)'}}>
         {pct}% — kontenerów: {window.storeGet ? (window.storeGet('CONTAINERS')||[]).length : 0}
       </div>
-
       <style>{`
         @keyframes docker-pulse {
           0%   { opacity:0.8; transform:scale(1); }
@@ -1023,6 +363,380 @@ const DockerLoadingSplash = ({ onDone }) => {
         }
       `}</style>
     </div>
+  );
+};
+
+// ── ContainerEditDialog — edycja działającego kontenera ─────────────────────
+// Zasada: edytuj TYLKO to co użytkownik zmienił.
+// docker update → restart/memory/cpus (bez restartu kontenera)
+// docker stop + rm + run → tylko gdy ENV lub mounts się zmieniły (porty zawsze z oryginału)
+const ContainerEditDialog = ({ c, onClose, onSaved }) => {
+  const [inspect,  setInspect]  = React.useState(null);
+  const [loading,  setLoading]  = React.useState(true);
+  const [saving,   setSaving]   = React.useState(false);
+  const [err,      setErr]      = React.useState('');
+  const [tab,      setTab]      = React.useState('resources');
+
+  const [envVars,  setEnvVars]  = React.useState([]);
+  const [memory,   setMemory]   = React.useState('');
+  const [cpus,     setCpus]     = React.useState('');
+  const [restart,  setRestart]  = React.useState('no');
+  const [mounts,   setMounts]   = React.useState([]);
+  const [networks, setNetworks] = React.useState([]);
+  const [allNets,  setAllNets]  = React.useState([]);
+
+  React.useEffect(() => {
+    fetch(`/api/docker/inspect/${c.id}`, {credentials:'include'})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) { setErr('Nie można pobrać danych kontenera'); return; }
+        setInspect(d);
+
+        // Restart policy
+        setRestart(d.restart_policy || d.HostConfig?.RestartPolicy?.Name || 'no');
+
+        // Memory
+        const memBytes = d.memory_limit || d.HostConfig?.Memory || 0;
+        setMemory(memBytes > 0 ? Math.round(memBytes/1024/1024)+'m' : '');
+
+        // CPUs
+        const nc = d.nano_cpus || d.HostConfig?.NanoCpus || 0;
+        setCpus(nc > 0 ? (nc/1e9).toFixed(2) : '');
+
+        // ENV
+        const envArr = d.env || d.Config?.Env || [];
+        setEnvVars(envArr.map(e => {
+          const idx = e.indexOf('=');
+          return idx >= 0 ? {key:e.slice(0,idx), val:e.slice(idx+1)} : {key:e, val:''};
+        }));
+
+        // Mounts
+        const binds = d.binds || d.HostConfig?.Binds || [];
+        if (binds.length > 0) {
+          setMounts(binds.map(b => {
+            const p = b.split(':');
+            return {src:p[0]||'', dst:p[1]||'', mode:p[2]||'rw'};
+          }));
+        } else {
+          setMounts((d.mounts||[]).map(m => ({
+            src: m.Source||m.source||'',
+            dst: m.Destination||m.destination||'',
+            mode: m.Mode||m.mode||'rw',
+          })));
+        }
+
+        // Networks
+        const nets = d.network_names || Object.keys(d.NetworkSettings?.Networks || {});
+        setNetworks(nets);
+      })
+      .catch(e => setErr(e.message))
+      .finally(() => setLoading(false));
+
+    // Dostępne sieci
+    fetch('/api/docker/networks', {credentials:'include'})
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{ if(d?.networks) setAllNets(d.networks.map(n=>n.name||n.Name).filter(Boolean)); })
+      .catch(()=>{});
+  }, [c.id]);
+
+  const dockerExec = async (cmd) => {
+    const r = await fetch('/api/storage/exec-command', {
+      method:'POST', credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command: cmd}),
+    });
+    const d = await r.json();
+    if (d.ok === false || d.error) throw new Error(d.output || d.error || 'Błąd wykonania');
+    return d;
+  };
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      // ── 1. docker update — tylko zasoby i restart, BEZ restartu kontenera ──
+      const updArgs = [];
+      if (memory)  updArgs.push('--memory', memory);
+      if (cpus)    updArgs.push('--cpus', cpus);
+      if (restart) updArgs.push('--restart', restart);
+
+      if (updArgs.length > 0) {
+        await dockerExec(`docker update ${updArgs.join(' ')} ${c.id}`);
+      }
+
+      // ── 2. Sprawdź czy zmieniły się ENV lub mounts ──
+      const origEnv  = (inspect?.Config?.Env || inspect?.env || []).slice().sort();
+      const currEnv  = envVars.filter(e=>e.key).map(e=>e.key+'='+e.val).sort();
+      const envChanged = JSON.stringify(origEnv) !== JSON.stringify(currEnv);
+
+      const origBinds = (inspect?.HostConfig?.Binds || inspect?.binds || []).slice().sort();
+      const currBinds = mounts.filter(m=>m.src&&m.dst).map(m=>m.src+':'+m.dst+(m.mode&&m.mode!=='rw'?':'+m.mode:'')).sort();
+      const mntChanged = JSON.stringify(origBinds) !== JSON.stringify(currBinds);
+
+      // ── 3. Jeśli ENV/mounts zmienione: stop → rm → run (z oryginalnymi portami) ──
+      if (envChanged || mntChanged) {
+        const name = c.name.replace(/^\//, '');
+        const img  = inspect?.Config?.Image || inspect?.image || c.image;
+
+        // Porty — ZAWSZE z oryginału, nie dotykamy
+        const portBindings = inspect?.HostConfig?.PortBindings || {};
+        const portArgs = Object.entries(portBindings)
+          .flatMap(([containerPort, binds]) =>
+            (binds||[]).map(b => {
+              const host = b.HostIp && b.HostIp !== '0.0.0.0' && b.HostIp !== ''
+                ? `${b.HostIp}:${b.HostPort}` : b.HostPort;
+              return `-p ${host}:${containerPort}`;
+            })
+          ).join(' ');
+
+        // Restart z formularza
+        const rstArg = restart ? `--restart ${restart}` : '';
+
+        // Memory/CPU
+        const memArg = memory ? `--memory ${memory}` : '';
+        const cpuArg = cpus   ? `--cpus ${cpus}` : '';
+
+        // ENV
+        const envArgs = envVars.filter(e=>e.key)
+          .map(e=>`-e ${JSON.stringify(e.key+'='+e.val)}`)
+          .join(' ');
+
+        // Mounts
+        const mntArgs = mounts.filter(m=>m.src&&m.dst)
+          .map(m=>`-v ${JSON.stringify(m.src+':'+m.dst+(m.mode&&m.mode!=='rw'?':'+m.mode:''))}`)
+          .join(' ');
+
+        // Sieci — pierwsza do docker run, reszta przez network connect
+        const origNets = Object.keys(inspect?.NetworkSettings?.Networks || {});
+        const addNets  = networks.filter(n=>!origNets.includes(n));
+        const rmNets   = origNets.filter(n=>!networks.includes(n) && n !== 'bridge');
+        const firstNet = networks[0] ? `--network ${networks[0]}` : '';
+
+        await dockerExec(`docker stop ${c.id}`);
+        await dockerExec(`docker rm ${c.id}`);
+        await dockerExec(`docker run -d --name ${name} ${rstArg} ${memArg} ${cpuArg} ${portArgs} ${firstNet} ${envArgs} ${mntArgs} ${img}`);
+
+        for (const n of addNets.slice(1)) {
+          await dockerExec(`docker network connect ${n} ${name}`).catch(()=>{});
+        }
+        for (const n of rmNets) {
+          await dockerExec(`docker network disconnect ${n} ${name}`).catch(()=>{});
+        }
+      }
+
+      // ── 4. Sieci — bez rekreacji kontenera (jeśli tylko sieci się zmieniły) ──
+      if (!envChanged && !mntChanged) {
+        const origNets = Object.keys(inspect?.NetworkSettings?.Networks || {});
+        const addNets  = networks.filter(n=>!origNets.includes(n));
+        const rmNets   = origNets.filter(n=>!networks.includes(n) && n !== 'bridge');
+        for (const n of addNets) {
+          await dockerExec(`docker network connect ${n} ${c.id}`).catch(()=>{});
+        }
+        for (const n of rmNets) {
+          await dockerExec(`docker network disconnect ${n} ${c.id}`).catch(()=>{});
+        }
+      }
+
+      onSaved();
+    } catch(e) {
+      setErr(e.message);
+    } finally { setSaving(false); }
+  };
+
+  const inpSt = {
+    background:'var(--bg-2)', border:'1px solid var(--line-strong)',
+    borderRadius:5, padding:'5px 8px', color:'var(--fg)',
+    fontFamily:'var(--font-mono)', fontSize:'var(--fs-xs)', outline:'none',
+  };
+
+  const TABS = [
+    {id:'resources', label:'Zasoby'},
+    {id:'restart',   label:'Restart'},
+    {id:'env',       label:'ENV'},
+    {id:'mounts',    label:'Wolumeny'},
+    {id:'network',   label:'Sieć'},
+  ];
+
+  return (
+    <Modal title={`Edytuj · ${c.name}`} sub={`${c.image} · ${c.id?.slice(0,12)}`} onClose={onClose} width={640}
+      footer={<>
+        <button className="btn" onClick={onClose}>Anuluj</button>
+        <button className="btn primary" onClick={save} disabled={saving||loading}>
+          {saving ? 'Zapisywanie…' : 'Zapisz'}
+        </button>
+      </>}
+    >
+      {loading && <div style={{padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie…</div>}
+      {err && (
+        <div style={{padding:'8px 12px',background:'color-mix(in oklch,var(--err) 10%,transparent)',
+          borderRadius:6,color:'var(--err)',fontSize:'var(--fs-sm)',marginBottom:12}}>
+          {err}
+        </div>
+      )}
+
+      {!loading && (<>
+        {/* Info o portach */}
+        {inspect?.HostConfig?.PortBindings && Object.keys(inspect.HostConfig.PortBindings).length > 0 && (
+          <div style={{padding:'6px 10px',background:'color-mix(in oklch,var(--accent) 8%,transparent)',
+            borderRadius:6,fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:12,
+            fontFamily:'var(--font-mono)'}}>
+            🔒 Porty zachowane z oryginału (nie edytowalne): {
+              Object.entries(inspect.HostConfig.PortBindings)
+                .flatMap(([cp,b])=>(b||[]).map(x=>`${x.HostPort}→${cp}`)).join('  ')
+            }
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{display:'flex',gap:4,borderBottom:'1px solid var(--line)',marginBottom:16}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)}
+              style={{padding:'6px 14px',background:'none',border:'none',cursor:'pointer',
+                color:tab===t.id?'var(--fg)':'var(--fg-dim)',
+                borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent',
+                fontSize:'var(--fs-sm)',marginBottom:-1}}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ZASOBY */}
+        {tab==='resources' && (
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+            <div>
+              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>
+                Pamięć (np. 512m, 2g) — puste = brak limitu
+              </div>
+              <input style={{...inpSt,width:'100%'}} value={memory}
+                onChange={e=>setMemory(e.target.value)} placeholder="512m"/>
+            </div>
+            <div>
+              <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:4}}>
+                CPU (np. 0.5, 2) — puste = brak limitu
+              </div>
+              <input style={{...inpSt,width:'100%'}} value={cpus}
+                onChange={e=>setCpus(e.target.value)} placeholder="0.5"/>
+            </div>
+            <div style={{gridColumn:'1/-1',fontSize:'var(--fs-xs)',color:'var(--fg-dim)',
+              padding:'8px 10px',background:'var(--bg-2)',borderRadius:6}}>
+              ✅ docker update — nie restartuje kontenera
+            </div>
+          </div>
+        )}
+
+        {/* RESTART */}
+        {tab==='restart' && (
+          <div>
+            <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:8}}>Polityka restartu</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+              {['no','always','unless-stopped','on-failure'].map(v=>(
+                <button key={v} onClick={()=>setRestart(v)}
+                  style={{padding:'8px 4px',borderRadius:6,border:'1px solid',cursor:'pointer',
+                    fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',
+                    borderColor:restart===v?'var(--accent)':'var(--line-strong)',
+                    background:restart===v?'color-mix(in oklch,var(--accent) 12%,var(--bg-2))':'var(--bg-2)',
+                    color:restart===v?'var(--accent)':'var(--fg)'}}>
+                  {v}
+                </button>
+              ))}
+            </div>
+            <div style={{marginTop:10,fontSize:'var(--fs-xs)',color:'var(--fg-dim)',
+              padding:'8px 10px',background:'var(--bg-2)',borderRadius:6}}>
+              ✅ docker update — nie restartuje kontenera
+            </div>
+          </div>
+        )}
+
+        {/* ENV */}
+        {tab==='env' && (
+          <div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+              <span style={{fontSize:'var(--fs-xs)',color:'var(--warn)'}}>
+                ⚠ Zmiana ENV wymaga restartu kontenera (stop → rm → run)
+              </span>
+              <button className="btn sm" onClick={()=>setEnvVars(e=>[...e,{key:'',val:''}])}>
+                + Dodaj zmienną
+              </button>
+            </div>
+            <div style={{maxHeight:340,overflowY:'auto',display:'flex',flexDirection:'column',gap:6}}>
+              {envVars.map((e,i)=>(
+                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:6,alignItems:'center'}}>
+                  <input style={{...inpSt,width:'100%'}} value={e.key} placeholder="KLUCZ"
+                    onChange={ev=>setEnvVars(a=>a.map((x,j)=>j===i?{...x,key:ev.target.value}:x))}/>
+                  <input style={{...inpSt,width:'100%'}} value={e.val} placeholder="wartość"
+                    onChange={ev=>setEnvVars(a=>a.map((x,j)=>j===i?{...x,val:ev.target.value}:x))}/>
+                  <button className="btn sm ghost" style={{color:'var(--err)'}}
+                    onClick={()=>setEnvVars(a=>a.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+              {envVars.length===0 && (
+                <div style={{textAlign:'center',padding:16,color:'var(--fg-dim)'}}>Brak zmiennych ENV</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* MOUNTS */}
+        {tab==='mounts' && (
+          <div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+              <span style={{fontSize:'var(--fs-xs)',color:'var(--warn)'}}>
+                ⚠ Zmiana wolumenów wymaga restartu kontenera
+              </span>
+              <button className="btn sm" onClick={()=>setMounts(m=>[...m,{src:'',dst:'',mode:'rw'}])}>
+                + Dodaj wolumin
+              </button>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              {mounts.map((m,i)=>(
+                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr 80px auto',gap:6,alignItems:'center'}}>
+                  <input style={{...inpSt,width:'100%'}} value={m.src} placeholder="/host/path"
+                    onChange={ev=>setMounts(a=>a.map((x,j)=>j===i?{...x,src:ev.target.value}:x))}/>
+                  <input style={{...inpSt,width:'100%'}} value={m.dst} placeholder="/container/path"
+                    onChange={ev=>setMounts(a=>a.map((x,j)=>j===i?{...x,dst:ev.target.value}:x))}/>
+                  <select style={{...inpSt}} value={m.mode}
+                    onChange={ev=>setMounts(a=>a.map((x,j)=>j===i?{...x,mode:ev.target.value}:x))}>
+                    <option value="rw">rw</option>
+                    <option value="ro">ro</option>
+                  </select>
+                  <button className="btn sm ghost" style={{color:'var(--err)'}}
+                    onClick={()=>setMounts(a=>a.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+              {mounts.length===0 && (
+                <div style={{textAlign:'center',padding:16,color:'var(--fg-dim)'}}>Brak wolumenów</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* NETWORK */}
+        {tab==='network' && (
+          <div>
+            <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginBottom:8}}>
+              Aktywne sieci kontenera (bridge zawsze zachowany)
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              {allNets.filter(n=>n!=='none'&&n!=='host').map(n=>(
+                <label key={n} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
+                  background:networks.includes(n)?'color-mix(in oklch,var(--accent) 8%,var(--bg-2))':'var(--bg-2)',
+                  borderRadius:6,border:'1px solid',cursor:'pointer',
+                  borderColor:networks.includes(n)?'color-mix(in oklch,var(--accent) 35%,var(--line))':'var(--line)'}}>
+                  <input type="checkbox" checked={networks.includes(n)}
+                    onChange={()=>setNetworks(ns=>ns.includes(n)?ns.filter(x=>x!==n):[...ns,n])}/>
+                  <span className="mono" style={{fontSize:'var(--fs-sm)'}}>{n}</span>
+                  {n==='bridge'&&<span style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>(domyślna)</span>}
+                </label>
+              ))}
+              {allNets.length===0 && (
+                <div style={{textAlign:'center',padding:16,color:'var(--fg-dim)'}}>
+                  Ładowanie sieci…
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </>)}
+    </Modal>
   );
 };
 
@@ -1110,6 +824,7 @@ const ContCard = ({c, onAction, moreFor, setMoreFor}) => (
 
 // ── Docker: tab Kontenery ─────────────────────────────────────────────────────
 const DockerContainers = ({ containers, setContainers, loading }) => {
+  const [confirmEl, confirmFn] = useConfirm();
   const [filter, setFilter] = React.useState('all');
   const [view,   setView]   = React.useState('grid');
   const [logsFor, setLogsFor]   = React.useState(null);
@@ -1126,8 +841,13 @@ const DockerContainers = ({ containers, setContainers, loading }) => {
     if (action === 'inspect') { setInspectFor(containers.find(c=>c.id===id)); return; }
     if (action === 'edit')    { setEditFor(containers.find(c=>c.id===id)); return; }
     if (action === 'remove') {
-      if (!confirm(`Usunąć kontener ${id}?`)) return;
-      await fetch(`/services/docker/container/${encodeURIComponent(id)}/remove`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+      if (!await confirmFn(`Usunąć kontener?`, `Kontener ${id} zostanie trwale usunięty.`, true)) return;
+      const rmOut = await fetch(`/services/docker/container/${encodeURIComponent(id)}?force=true`,{method:'DELETE',credentials:'include'}).catch(()=>null);
+      if(!rmOut || !rmOut.ok) {
+        window.toast?.error('Błąd usuwania kontenera — sprawdź logi');
+        return;
+      }
+      window.toast?.success('Kontener usunięty');
       setContainers(cs=>cs.filter(c=>c.id!==id));
       return;
     }
@@ -1219,6 +939,7 @@ const DockerContainers = ({ containers, setContainers, loading }) => {
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
+      {confirmEl}
       {showNew && <NewContainerDialog onClose={()=>setShowNew(false)} onAdd={addContainer}/>}
       {logsFor    && <LogsDialog    c={logsFor}    onClose={()=>setLogsFor(null)}/>}
       {termFor    && <TerminalDialog c={termFor}    onClose={()=>setTermFor(null)}/>}
@@ -1308,6 +1029,7 @@ const DockerContainers = ({ containers, setContainers, loading }) => {
 
 // ── Docker: tab Obrazy ────────────────────────────────────────────────────────
 const DockerImages = () => {
+  const [confirmEl, confirmFn] = useConfirm();
   const [images, setImages] = React.useState([]);
   const [pullImg, setPullImg] = React.useState('');
   const [pulling, setPulling] = React.useState(false);
@@ -1356,19 +1078,33 @@ const DockerImages = () => {
     });
   };
 
-  const removeImage = (id) => {
-    fetch('/services/docker/images/remove', {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({id}),
-    }).catch(()=>{});
+  const removeImage = async (id, tag) => {
+    if (!await confirmFn(`Usunąć obraz?`, `${tag || id} zostanie trwale usunięty.`, true)) return;
     setImages(imgs=>imgs.filter(im=>im.id!==id));
+    try {
+      const r = await fetch('/services/docker/images/remove', {
+        method:'DELETE', credentials:'include',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({Image: id, Force: false}),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(()=>({}));
+        window.toast?.error('Błąd usuwania obrazu: ' + (d.error || r.status));
+        loadImages();
+      } else {
+        window.toast?.success('Obraz usunięty: ' + (tag || id));
+      }
+    } catch(e) {
+      window.toast?.error('Błąd: ' + e.message);
+      loadImages();
+    }
   };
 
   const inpSt = {background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:5,
     padding:'5px 10px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none'};
   return (
     <div className="card">
+      {confirmEl}
       <div className="card-head">
         <div><div className="card-title">Obrazy Docker</div><div className="card-sub">{images.length} obrazów</div></div>
         <div className="card-actions">
@@ -1393,7 +1129,7 @@ const DockerImages = () => {
                   <td className="dim">{im.created}</td>
                   <td>{im.used?<span className="badge ok">tak</span>:<span className="badge dim">nie</span>}</td>
                   <td>
-                    <button className="icon-btn" onClick={()=>removeImage(im.id)}><Icon name="trash" size={13}/></button>
+                    <button className="icon-btn" onClick={()=>removeImage(im.id, im.repo+':'+(im.tag||'latest'))}><Icon name="trash" size={13}/></button>
                   </td>
                 </tr>
               ))}
@@ -1463,6 +1199,7 @@ const DockerNetworks = () => {
 
 // ── Docker: tab Wolumeny ──────────────────────────────────────────────────────
 const DockerVolumes = () => {
+  const [confirmEl, confirmFn] = useConfirm();
   const [vols, setVols] = React.useState([]);
 
   React.useEffect(() => {
@@ -1484,13 +1221,14 @@ const DockerVolumes = () => {
 
   const orphaned = vols.filter(v=>v.containers.length===0);
 
-  const pruneOrphaned = () => {
+  const pruneOrphaned = async () => {
     fetch('/services/docker/volumes/prune', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
     setVols(vs=>vs.filter(v=>v.containers.length>0));
   };
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
+      {confirmEl}
       {orphaned.length>0 && (
         <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',
           background:'oklch(0.78 0.15 75 / 0.08)',border:'1px solid oklch(0.78 0.15 75 / 0.25)',
@@ -1520,9 +1258,31 @@ const DockerVolumes = () => {
                     <td className="mono">{v.size}</td>
                     <td className="mono dim">{(v.containers||[]).join(', ')||'—'}</td>
                     <td>
-                      <button className="icon-btn" onClick={()=>{
-                        fetch('/services/docker/volumes/'+encodeURIComponent(v.name),{method:'DELETE',credentials:'include'}).catch(()=>{});
-                        setVols(vs=>vs.filter((_,j)=>j!==i));
+                      <button className="icon-btn" onClick={async()=>{
+                        if(!await confirmFn(`Usunąć wolumin "${v.name}"?`, `Tej operacji nie można cofnąć.`, true)) return;
+                        const doDelete = async (force=false) => {
+                          const url = '/services/docker/volumes/'+encodeURIComponent(v.name)+(force?'?force=true':'');
+                          const rr = await fetch(url,{method:'DELETE',credentials:'include'}).catch(()=>null);
+                          if(!rr || !rr.ok) {
+                            const d = await rr?.json().catch(()=>({}));
+                            const errMsg = d?.error||'Błąd usuwania woluminu';
+                            if(!force && rr?.status===409) {
+                              // Pokaż opcję wymuszonego usunięcia
+                              const ok = await confirmFn(
+                                'Wolumin używany przez kontener',
+                                errMsg+' Czy wymusić usunięcie? Zatrzymane kontenery zostaną usunięte.',
+                                true
+                              );
+                              if(ok) await doDelete(true);
+                            } else {
+                              window.toast?.error(errMsg);
+                            }
+                          } else {
+                            setVols(vs=>vs.filter((_,j)=>j!==i));
+                            window.toast?.success('Wolumin usunięty: '+v.name);
+                          }
+                        };
+                        await doDelete(false);
                       }}><Icon name="trash" size={13}/></button>
                     </td>
                   </tr>
@@ -1537,6 +1297,7 @@ const DockerVolumes = () => {
 
 // ── Docker: tab Compose ───────────────────────────────────────────────────────
 const DockerCompose = () => {
+  const [confirmEl, confirmFn] = useConfirm();
   const [stacks, setStacks] = React.useState([]);
   const [showNew, setShowNew] = React.useState(false);
   const [editStack, setEditStack] = React.useState(null);
@@ -1610,7 +1371,7 @@ const DockerCompose = () => {
     }, 2000);
   };
 
-  const toggleStack = (name) => {
+  const toggleStack = async (name) => {
     const s = stacks.find(s=>s.name===name);
     const action = s?.status==='running' ? 'down' : 'up';
     fetch(`/services/docker/compose/${encodeURIComponent(name)}`, {
@@ -1622,6 +1383,7 @@ const DockerCompose = () => {
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
+      {confirmEl}
       {showNew    && <ComposeDialog onClose={()=>setShowNew(false)} onDeploy={deploy}/>}
       {editStack  && <ComposeDialog stack={editStack} onClose={()=>setEditStack(null)} onDeploy={deploy}/>}
       <div className="card">
@@ -1658,7 +1420,21 @@ const DockerCompose = () => {
                         <button className="btn sm" onClick={()=>toggleStack(s.name)}>
                           {s.status==='running'?<><Icon name="stop" size={11}/> Down</>:<><Icon name="play" size={11}/> Up</>}
                         </button>
-                        <button className="icon-btn" onClick={()=>setStacks(ss=>ss.filter((_,j)=>j!==i))}><Icon name="trash" size={13}/></button>
+                        <button className="icon-btn" onClick={async()=>{
+                          if(!await confirmFn(`Usunąć stos "${s.name}"?`, `docker compose down + usunięcie katalogu ${s.file}`, true)) return;
+                          try {
+                            const r = await fetch('/services/docker/compose/'+encodeURIComponent(s.file||s.name),{method:'DELETE',credentials:'include'});
+                            if(!r.ok) {
+                              const d = await r.json().catch(()=>({}));
+                              window.toast?.error('Błąd: '+(d.error||r.status));
+                            } else {
+                              setStacks(ss=>ss.filter((_,j)=>j!==i));
+                              window.toast?.success('Stos usunięty: '+s.name);
+                            }
+                          } catch(e) {
+                            window.toast?.error('Błąd: '+e.message);
+                          }
+                        }}><Icon name="trash" size={13}/></button>
                       </div>
                     </td>
                   </tr>
@@ -1958,7 +1734,7 @@ const DynamicDNS = () => {
   };
 
   const deleteEntry = async (id) => {
-    if (!confirm('Usunąć ten wpis?')) return;
+    if (!await confirmFn('Usunąć wpis?', 'Tej operacji nie można cofnąć.', true)) return;
     await fetch(`/network/dynamic-dns/${id}`,{method:'DELETE',credentials:'include'});
     setEntries(es=>es.filter(e=>e.id!==id));
   };
@@ -3036,7 +2812,7 @@ const FileServices = () => {
                       } else if (url) {
                         window.location.hash = url;
                       } else {
-                        alert(`Strona konfiguracji dla ${s.name} będzie dostępna wkrótce`);
+                        window.toast?.info(`Strona konfiguracji dla ${s.name} będzie dostępna wkrótce`);
                       }
                     }}
                     disabled={isLoading}
@@ -3247,6 +3023,17 @@ const Media = () => {
   }, []);
 
   // Pobierz wszystkie strumienie z wszystkich serwerów
+
+// Wykryj typ serwera mediów na podstawie id lub name
+const detectMediaType = (server) => {
+  const s = (server.id + ' ' + server.name).toLowerCase();
+  if (s.includes('jellyfin')) return 'jellyfin';
+  if (s.includes('plex'))     return 'plex';
+  if (s.includes('emby'))     return 'emby';
+  if (s.includes('navidrome') || s.includes('navi')) return 'navidrome';
+  return server.id?.toLowerCase() || '';
+};
+
 const fetchAllStreams = async () => {
   const allStreamsData = [];
   let totalBitrate = 0;
@@ -3256,23 +3043,28 @@ const fetchAllStreams = async () => {
     
     try {
       let url = '';
-      if (server.id === 'jellyfin') {
+      if (detectMediaType(server) === 'jellyfin') {
         url = `${server.url}/Sessions?api_key=${server.api_key}`;
-      } else if (server.id === 'plex') {
+      } else if (detectMediaType(server) === 'plex') {
         url = `${server.url}/status/sessions?X-Plex-Token=${server.api_key}`;
-      } else if (server.id === 'emby') {
+      } else if (detectMediaType(server) === 'emby') {
         url = `${server.url}/emby/Sessions?api_key=${server.api_key}`;
       } else {
         continue;
       }
       
-      const res = await fetch(url);
-      if (!res.ok) continue;
+      // Użyj oryginalnego fetch (przed interceptorem) dla zewnętrznych URL
+      const fetchFn = window._origFetch || window.fetch;
+      const res = await fetchFn(url);
+      if (!res.ok) {
+        console.warn(`[media] ${server.name} → ${res.status} ${url}`);
+        continue;
+      }
       
       const data = await res.json();
       
 
-if (server.id === 'jellyfin' && Array.isArray(data)) {
+if (detectMediaType(server) === 'jellyfin' && Array.isArray(data)) {
   for (const s of data) {
     if (s.NowPlayingItem) {
       const item = s.NowPlayingItem;
@@ -3338,7 +3130,7 @@ if (server.id === 'jellyfin' && Array.isArray(data)) {
       });
     }
   }
-} else if (server.id === 'plex' && data.MediaContainer?.Metadata) {
+} else if (detectMediaType(server) === 'plex' && data.MediaContainer?.Metadata) {
         for (const s of data.MediaContainer.Metadata) {
           const media = s.Media?.[0];
           let bitrate = media?.bitrate ? media.bitrate * 1000 : 0;
@@ -3488,7 +3280,7 @@ if (server.id === 'jellyfin' && Array.isArray(data)) {
   // Dodaj nowy serwer
   const addNewServer = async () => {
     if (!newServer.id || !newServer.name) {
-      alert('Wypełnij ID i Nazwę');
+      window.toast?.error('Wypełnij ID i Nazwę');
       return;
     }
     const server = {
@@ -3508,7 +3300,7 @@ if (server.id === 'jellyfin' && Array.isArray(data)) {
 
   // Usuń serwer
   const removeServer = async (id) => {
-    if (!confirm(`Usunąć serwer ${id}?`)) return;
+    if (!await confirmFn('Usunąć serwer ${id}?', '', true)) return;
     const updated = servers.filter(s => s.id !== id);
     setServers(updated);
     await saveMediaConfig(updated);
@@ -3538,33 +3330,33 @@ if (server.id === 'jellyfin' && Array.isArray(data)) {
   
   const fetchLibraries = async (server) => {
   if (!server.api_key) {
-    alert('Brak klucza API - najpierw skonfiguruj klucz API w edycji');
+    window.toast?.error('Brak klucza API - najpierw skonfiguruj klucz API w edycji');
     return;
   }
   
   try {
     let url = '';
-    if (server.id === 'jellyfin') {
+    if (detectMediaType(server) === 'jellyfin') {
       url = `${server.url}/Library/VirtualFolders?api_key=${server.api_key}`;
-    } else if (server.id === 'plex') {
+    } else if (detectMediaType(server) === 'plex') {
       url = `${server.url}/library/sections?X-Plex-Token=${server.api_key}`;
-    } else if (server.id === 'emby') {
+    } else if (detectMediaType(server) === 'emby') {
       url = `${server.url}/emby/Library/VirtualFolders?api_key=${server.api_key}`;
     } else {
-      alert(`Pobieranie bibliotek dla ${server.name} nie jest obsługiwane`);
+      window.toast?.error(`Nieznany typ serwera: ${server.id} — ustaw id na: jellyfin, plex, emby lub navidrome`); return;
       return;
     }
     
     const res = await fetch(url);
     if (!res.ok) {
-      alert(`Błąd pobierania bibliotek: ${res.status}`);
+      window.toast?.error(`Błąd pobierania bibliotek: ${res.status}`); return;
       return;
     }
     
     const data = await res.json();
     let libraries = [];
     
-    if (server.id === 'plex' && data.MediaContainer?.Directory) {
+    if (detectMediaType(server) === 'plex' && data.MediaContainer?.Directory) {
       libraries = data.MediaContainer.Directory.map(d => ({ 
         id: d.key, 
         name: d.title, 
@@ -3584,27 +3376,27 @@ if (server.id === 'jellyfin' && Array.isArray(data)) {
     );
     setServers(updatedServers);
     await saveMediaConfig(updatedServers);
-    alert(`Pobrano ${libraries.length} bibliotek dla ${server.name}`);
+    window.toast?.success(`Pobrano ${libraries.length} bibliotek · ${server.name}`);
     
   } catch (e) {
-    alert('Błąd: ' + e.message);
+    window.toast?.error('Błąd: ' + e.message);
   }
 };
 
 // Odśwież bibliotekę
 const refreshLibrary = async (server, libraryId) => {
   if (!server.api_key) {
-    alert('Brak klucza API');
+    window.toast?.error('Brak klucza API');
     return;
   }
   
   try {
     let url = '';
-    if (server.id === 'jellyfin') {
+    if (detectMediaType(server) === 'jellyfin') {
       url = `${server.url}/Library/Refresh?api_key=${server.api_key}`;
-    } else if (server.id === 'plex') {
+    } else if (detectMediaType(server) === 'plex') {
       url = `${server.url}/library/sections/${libraryId}/refresh?X-Plex-Token=${server.api_key}`;
-    } else if (server.id === 'emby') {
+    } else if (detectMediaType(server) === 'emby') {
       url = `${server.url}/emby/Library/Refresh?api_key=${server.api_key}`;
     } else {
       return;
@@ -3612,12 +3404,12 @@ const refreshLibrary = async (server, libraryId) => {
     
     const res = await fetch(url, { method: 'POST' });
     if (res.ok) {
-      alert('Odświeżanie biblioteki rozpoczęte');
+      window.toast?.error('Odświeżanie biblioteki rozpoczęte');
     } else {
-      alert('Błąd: ' + res.status);
+      window.toast?.error('Błąd HTTP: ' + res.status);
     }
   } catch (e) {
-    alert('Błąd: ' + e.message);
+    window.toast?.error('Błąd: ' + e.message);
   }
 };
 
@@ -4243,7 +4035,7 @@ const NetworkProxy = () => {
   };
 
   const deleteRoute = async (id) => {
-    if (!confirm('Usunąć tę trasę?')) return;
+    if (!await confirmFn('Usunąć trasę?', 'Tej operacji nie można cofnąć.', true)) return;
     await fetch(`/api/proxy/routes/${id}`, {method:'DELETE', credentials:'include'});
     flash('Trasa usunięta'); load();
   };

@@ -841,6 +841,156 @@ func (s *Server) handleKVMVNCProxy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+
+// handleKVMVNCConfig — konfiguruje VNC dla VM (listen address, hasło, port)
+func (s *Server) handleKVMVNCConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Zwróć aktualną konfigurację VNC dla podanej VM
+		vm := r.URL.Query().Get("vm")
+		if vm == "" { jsonErr(w, "vm required", 400); return }
+
+		xmlOut, err := runCmd("virsh", "dumpxml", vm)
+		if err != nil { jsonErr(w, "virsh dumpxml: "+err.Error(), 500); return }
+
+		// Parsuj VNC z XML
+		reVNC   := regexp.MustCompile(`type='vnc'[^>]*port='(-?\d+)'[^>]*listen='([^']*)'`)
+		rePass  := regexp.MustCompile(`type='vnc'[^>]*passwd='([^']*)'`)
+		reAddr  := regexp.MustCompile(`<listen[^>]*address='([^']*)'`)
+
+		vncPort := "5900"
+		vncListen := "127.0.0.1"
+		vncPasswd := ""
+
+		if m := reVNC.FindStringSubmatch(xmlOut); m != nil {
+			if m[1] != "-1" { vncPort = m[1] } else { vncPort = "auto" }
+			vncListen = m[2]
+		}
+		if m := reAddr.FindStringSubmatch(xmlOut); m != nil {
+			vncListen = m[1]
+		}
+		if m := rePass.FindStringSubmatch(xmlOut); m != nil {
+			vncPasswd = m[1]
+		}
+
+		// Sprawdź czy VM działa i pobierz aktualny port
+		actualPort := ""
+		if vncOut, err := runCmd("virsh", "vncdisplay", vm); err == nil {
+			parts := strings.Split(strings.TrimSpace(vncOut), ":")
+			if len(parts) > 1 {
+				display, _ := strconv.Atoi(parts[len(parts)-1])
+				actualPort = strconv.Itoa(5900 + display)
+			}
+		}
+
+		jsonOK(w, map[string]any{
+			"vm":           vm,
+			"vnc_port":     vncPort,
+			"actual_port":  actualPort,
+			"vnc_listen":   vncListen,
+			"vnc_passwd":   vncPasswd != "",
+			"remote_ready": vncListen == "0.0.0.0" || (vncListen != "127.0.0.1" && vncListen != ""),
+		})
+
+	case http.MethodPost:
+		var req struct {
+			VM        string `json:"vm"`
+			Listen    string `json:"listen"`    // "0.0.0.0" lub "127.0.0.1"
+			Password  string `json:"password"`  // "" = brak hasła
+			SetPasswd bool   `json:"set_passwd"` // true = ustaw hasło
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.VM == "" { jsonErr(w, "vm required", 400); return }
+		if req.Listen == "" { req.Listen = "127.0.0.1" }
+
+		// Zmień listen address przez virsh qemu-monitor-command (działa na żywej VM)
+		// Albo przez edycję XML i redefine
+		xmlOut, err := runCmd("virsh", "dumpxml", req.VM)
+		if err != nil { jsonErr(w, "virsh dumpxml: "+err.Error(), 500); return }
+
+		// Podmień listen address w XML
+		// <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
+		//   <listen type='address' address='127.0.0.1'/>
+		var newXML string
+		// Podmień listen= w graphics
+		reGraphics := regexp.MustCompile(`(type='vnc'[^>]*)listen='[^']*'`)
+		newXML = reGraphics.ReplaceAllString(xmlOut,
+			"${1}listen='"+req.Listen+"'")
+		// Podmień address w listen element
+		reListenEl := regexp.MustCompile(`(<listen[^>]*address=')([^']*)('[^>]*/>)`)
+		newXML = reListenEl.ReplaceAllString(newXML, "${1}"+req.Listen+"${3}")
+
+		// Jeśli nie było listen elementu — dodaj go
+		if !strings.Contains(newXML, "<listen") {
+			newXML = strings.Replace(newXML,
+				"<graphics type='vnc'",
+				"<graphics type='vnc'",
+				1)
+		}
+
+		// Ustaw hasło VNC jeśli podane
+		if req.SetPasswd {
+			if req.Password != "" {
+				reGfx := regexp.MustCompile(`(type='vnc'[^>]*)>`)
+				newXML = reGfx.ReplaceAllString(newXML,
+					"${1} passwd='"+req.Password+"'>")
+			} else {
+				// Usuń hasło
+				rePass := regexp.MustCompile(`\s*passwd='[^']*'`)
+				newXML = rePass.ReplaceAllString(newXML, "")
+			}
+		}
+
+		// Zapisz tymczasowo XML i zdefiniuj ponownie
+		tmpFile := fmt.Sprintf("/tmp/nimbus-vm-%s.xml", req.VM)
+		if err := os.WriteFile(tmpFile, []byte(newXML), 0644); err != nil {
+			jsonErr(w, "zapis XML: "+err.Error(), 500); return
+		}
+		defer os.Remove(tmpFile)
+
+		// virsh define — aktualizuje konfigurację (wchodzi w życie po restarcie VM)
+		out, err := runCmd("virsh", "define", tmpFile)
+		if err != nil { jsonErr(w, "virsh define: "+out, 500); return }
+
+		// Dla działającej VM — zmień na żywo przez qemu-monitor
+		vmState, _ := runCmd("virsh", "domstate", req.VM)
+		if strings.Contains(vmState, "running") {
+			// Zmień listen address na żywo (QEMU monitor)
+			monCmd := fmt.Sprintf(
+				`{"execute":"change","arguments":{"device":"vnc","target":"%s:0"}}`,
+				req.Listen)
+			runCmd("virsh", "qemu-monitor-command", req.VM, "--hmp",
+				fmt.Sprintf("change vnc %s:0", req.Listen))
+			_ = monCmd
+		}
+
+		// Pobierz aktualny port VNC
+		actualPort := 0
+		if vncOut, err := runCmd("virsh", "vncdisplay", req.VM); err == nil {
+			parts := strings.Split(strings.TrimSpace(vncOut), ":")
+			if len(parts) > 1 {
+				display, _ := strconv.Atoi(parts[len(parts)-1])
+				actualPort = 5900 + display
+			}
+		}
+
+		// Pobierz IP serwera
+		hostIP := strings.Split(r.Host, ":")[0]
+
+		jsonOK(w, map[string]any{
+			"status":        "ok",
+			"listen":        req.Listen,
+			"vnc_port":      actualPort,
+			"direct_vnc":    fmt.Sprintf("%s:%d", hostIP, actualPort),
+			"remote_ready":  req.Listen == "0.0.0.0",
+			"note":          "Zmiany listen address wejdą w życie po restarcie VM. Na żywej VM zmieniono przez QEMU monitor.",
+		})
+
+	default:
+		jsonErr(w, "method not allowed", 405)
+	}
+}
+
 func (s *Server) handleKVMInstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)

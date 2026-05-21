@@ -22,8 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --port)     PORT="$2"; shift 2 ;;
-        --update)   UPDATE=1; shift ;;
+        --port)       PORT="$2"; shift 2 ;;
+        --update)     UPDATE=1; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
         -h|--help)
             echo "Użycie: sudo bash install.sh [opcje]"
@@ -43,7 +43,7 @@ DATA_DIR="/var/lib/nimbus"
 # ── Nagłówek ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║  ${BOLD}Nimbus NAS Panel${NC}${CYAN}                                          ║${NC}"
+echo -e "${CYAN}║  ${BOLD}Nimbus NAS Panel${NC}${CYAN}  v3.5                                    ║${NC}"
 if [ "$UPDATE" = "1" ]; then
 echo -e "${CYAN}║  Tryb: Aktualizacja                                          ║${NC}"
 else
@@ -70,7 +70,7 @@ info "Architektura: $ARCH"
     warn "Architektura $ARCH może nie być obsługiwana"
 
 # ── Zależności systemowe ───────────────────────────────────────────────────────
-step "Instalacja zależności"
+step "Instalacja zależności systemowych"
 
 if command -v apt-get &>/dev/null; then
     apt-get update -qq
@@ -78,14 +78,39 @@ if command -v apt-get &>/dev/null; then
         libpam0g \
         smartmontools \
         hdparm \
-        lsblk \
+        util-linux \
         curl \
         gzip \
         2>/dev/null || true
-    ok "Pakiety zainstalowane"
+    ok "Pakiety podstawowe zainstalowane"
 else
-    warn "apt-get niedostępny — sprawdź ręcznie: libpam0g, smartmontools"
+    warn "apt-get niedostępny — sprawdź ręcznie zależności"
 fi
+
+# ── Opcjonalne komponenty ──────────────────────────────────────────────────────
+step "Sprawdzanie opcjonalnych komponentów"
+
+check_optional() {
+    local pkg="$1" cmd="$2" desc="$3"
+    if command -v "$cmd" &>/dev/null; then
+        ok "$desc — dostępny"
+    else
+        warn "$desc — niedostępny (apt install $pkg)"
+    fi
+}
+
+check_optional "zfsutils-linux"     "zfs"          "ZFS"
+check_optional "docker.io"          "docker"       "Docker"
+check_optional "libvirt-daemon"     "virsh"        "KVM/libvirt"
+check_optional "nut"                "upsc"         "NUT (UPS)"
+check_optional "clamav-daemon"      "clamd"        "ClamAV"
+check_optional "nfs-kernel-server"  "exportfs"     "NFS Server"
+check_optional "samba"              "smbd"         "Samba"
+check_optional "postfix"            "postfix"      "Postfix (SMTP)"
+check_optional "dovecot-core"       "dovecot"      "Dovecot (IMAP)"
+check_optional "wireguard-tools"    "wg"           "WireGuard"
+check_optional "ufw"                "ufw"          "UFW Firewall"
+check_optional "novnc"              "websockify"   "noVNC (KVM console)"
 
 # ── Go — instalacja jeśli brak ────────────────────────────────────────────────
 install_go() {
@@ -110,9 +135,7 @@ if [ "$SKIP_BUILD" = "0" ]; then
     if ! command -v go &>/dev/null; then
         install_go
     else
-        GO_MIN="1.22"
-        GO_CUR=$(go version | awk '{print $3}' | sed 's/go//')
-        info "Go: $GO_CUR"
+        info "Go: $(go version | awk '{print $3}')"
         ok "Go dostępne"
     fi
 fi
@@ -137,7 +160,6 @@ install_esbuild() {
     else
         ESBUILD_ARCH="linux-x64"
     fi
-    ESBUILD_URL="https://registry.npmjs.org/@esbuild/${ESBUILD_ARCH}/-/${ESBUILD_ARCH}-$(curl -fsSL https://registry.npmjs.org/esbuild/latest | grep '"version"' | head -1 | grep -o '[0-9.]*').tgz"
     curl -fsSL "https://github.com/evanw/esbuild/releases/latest/download/esbuild-${ESBUILD_ARCH}.zip" \
         -o /tmp/esbuild.zip
     unzip -q /tmp/esbuild.zip -d /tmp/esbuild-bin
@@ -159,7 +181,6 @@ fi
 if [ "$SKIP_BUILD" = "0" ]; then
     step "Budowanie Nimbus"
 
-    # Sprawdź czy mamy źródła
     if [ ! -f "$SCRIPT_DIR/go.mod" ]; then
         die "Nie znaleziono go.mod — uruchom install.sh z katalogu źródłowego"
     fi
@@ -174,8 +195,7 @@ if [ "$SKIP_BUILD" = "0" ]; then
     make go
     ok "Binarka nimbus gotowa"
 else
-    # Tryb skip-build — sprawdź czy binarka i bundle istnieją
-    [ -f "$SCRIPT_DIR/nimbus" ]           || die "Brak binarki 'nimbus' — uruchom make all"
+    [ -f "$SCRIPT_DIR/nimbus" ]               || die "Brak binarki 'nimbus' — uruchom make all"
     [ -f "$SCRIPT_DIR/web/static/bundle.js" ] || die "Brak bundle.js — uruchom make js"
     ok "Używam gotowych plików (--skip-build)"
 fi
@@ -193,6 +213,8 @@ if [ "$UPDATE" = "1" ] && [ -d "$CONFIG_DIR" ]; then
     BACKUP_DIR="/var/backups/nimbus-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     cp -r "$CONFIG_DIR" "$BACKUP_DIR/" 2>/dev/null || true
+    # Zachowaj też dane
+    [ -d "$DATA_DIR" ] && cp -r "$DATA_DIR" "$BACKUP_DIR/" 2>/dev/null || true
     ok "Backup: $BACKUP_DIR"
 fi
 
@@ -201,7 +223,10 @@ step "Tworzenie katalogów"
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$DATA_DIR"
-chmod 750 "$CONFIG_DIR"  # hasła, klucze SSH itd.
+mkdir -p "$DATA_DIR/quarantine"   # ClamAV kwarantanna
+mkdir -p "/var/lib/clamav/quarantine" 2>/dev/null || true
+chmod 750 "$CONFIG_DIR"
+chmod 700 "$DATA_DIR/quarantine" 2>/dev/null || true
 ok "Katalogi gotowe"
 
 # ── Kopiowanie plików ─────────────────────────────────────────────────────────
@@ -209,7 +234,6 @@ step "Instalacja plików"
 cp "$SCRIPT_DIR/nimbus" "$NIMBUS_BIN"
 chmod 755 "$NIMBUS_BIN"
 
-# Statyka — usuń stare pliki, skopiuj nowe
 rm -rf "$INSTALL_DIR/web"
 cp -r "$SCRIPT_DIR/web" "$INSTALL_DIR/"
 
@@ -219,10 +243,42 @@ rm -f "$INSTALL_DIR/web/static/live.go"
 
 ok "Pliki zainstalowane w $INSTALL_DIR"
 
+# ── NUT — uprawnienia ─────────────────────────────────────────────────────────
+if command -v upsc &>/dev/null; then
+    step "Konfiguracja NUT (UPS)"
+    # Utwórz regułę udev dla UPS ViewPower (Cypress 0665)
+    cat > /etc/udev/rules.d/90-nimbus-ups.rules << 'UDEV'
+SUBSYSTEM=="usb", ATTR{idVendor}=="0665", MODE="0666", GROUP="nut"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0665", MODE="0666", GROUP="nut"
+UDEV
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+    ok "NUT udev rules skonfigurowane"
+fi
+
+# ── ClamAV — uprawnienia ──────────────────────────────────────────────────────
+if command -v clamd &>/dev/null || command -v clamscan &>/dev/null; then
+    step "Konfiguracja ClamAV"
+    mkdir -p /var/lib/clamav/quarantine
+    chown -R clamav:clamav /var/lib/clamav/quarantine 2>/dev/null || true
+    chmod 755 /var/lib/clamav/quarantine
+    ok "ClamAV katalogi skonfigurowane"
+fi
+
+# ── KVM/libvirt — uprawnienia ─────────────────────────────────────────────────
+if command -v virsh &>/dev/null; then
+    step "Konfiguracja KVM"
+    # Sprawdź czy libvirtd działa
+    if ! systemctl is-active --quiet libvirtd 2>/dev/null; then
+        systemctl enable --now libvirtd 2>/dev/null || warn "Nie można uruchomić libvirtd"
+    else
+        ok "libvirtd aktywny"
+    fi
+fi
+
 # ── Systemd service ───────────────────────────────────────────────────────────
 step "Konfiguracja systemd"
 
-# Odczytaj istniejący port jeśli aktualizacja
 if [ "$UPDATE" = "1" ] && [ -f /etc/systemd/system/nimbus.service ]; then
     EXISTING_PORT=$(grep "ExecStart=" /etc/systemd/system/nimbus.service \
         | grep -o '\-port [0-9]*' | awk '{print $2}')
@@ -234,12 +290,10 @@ fi
 
 cat > /etc/systemd/system/nimbus.service << EOF
 [Unit]
-Description=Nimbus NAS Panel
+Description=Nimbus NAS Panel v3.5
 Documentation=https://github.com/gekomod/nimbus
-After=network-online.target zfs-mount.service
+After=network-online.target
 Wants=network-online.target
-# Uruchom po NFS jeśli używasz
-# After=network-online.target nfs-client.target
 
 [Service]
 Type=simple
@@ -256,11 +310,6 @@ SyslogIdentifier=nimbus
 LimitNOFILE=65536
 LimitNPROC=4096
 
-# Zmienne środowiskowe (odkomentuj i ustaw jeśli potrzebne)
-# Environment=NAS_WEB_ADMIN_USER=admin
-# Environment=NAS_WEB_ADMIN_PASS=haslo
-# Environment=NAS_WEB_ADMIN_URL=http://127.0.0.1:80
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -271,12 +320,9 @@ ok "Systemd skonfigurowany (port: $PORT)"
 
 # ── Uprawnienia ───────────────────────────────────────────────────────────────
 step "Ustawienia uprawnień"
-
-# Plik haseł CUPS / PAM
 chmod 750 "$NIMBUS_BIN"
 chown root:root "$NIMBUS_BIN"
 chown -R root:root "$INSTALL_DIR/web"
-
 ok "Uprawnienia ustawione"
 
 # ── Uruchomienie ──────────────────────────────────────────────────────────────
@@ -308,14 +354,16 @@ printf  "${GREEN}║  Panel:%-54s║${NC}\n" "  $URL"
 echo -e "${GREEN}║  Logi:     journalctl -fu nimbus                             ║${NC}"
 echo -e "${GREEN}║  Restart:  systemctl restart nimbus                          ║${NC}"
 echo -e "${GREEN}║  Status:   systemctl status nimbus                           ║${NC}"
-echo -e "${GREEN}║  Goroutiny: ${URL}/debug/goroutines                         ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  Konfiguracja: $CONFIG_DIR/                        ║${NC}"
 echo -e "${GREEN}║  Dane:         $DATA_DIR/                         ║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║  Moduły opcjonalne (zainstaluj jeśli potrzebne):             ║${NC}"
+echo -e "${GREEN}║   apt install nut clamav-daemon libvirt-daemon-system qemu   ║${NC}"
+echo -e "${GREEN}║   apt install postfix dovecot-core novnc websockify           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Pokaż hasło jeśli świeża instalacja
 if [ "$UPDATE" = "0" ]; then
     ADMIN_PASS=$(journalctl -u nimbus -n 50 --no-pager 2>/dev/null \
         | grep -i "hasło\|password\|admin" | tail -1 || true)

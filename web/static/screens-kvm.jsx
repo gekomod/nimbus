@@ -13,7 +13,9 @@ const kvmApi = {
   networks:  ()         => fetch('/api/kvm/networks',  {credentials:'include'}).then(r=>r.json()),
   config:    ()         => fetch('/api/kvm/config',    {credentials:'include'}).then(r=>r.json()),
   saveConfig:(cfg)      => fetch('/api/kvm/config',    {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}),
-  vncProxy:  (vm)       => fetch('/api/kvm/vnc-proxy', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({vm})}).then(r=>r.json()),
+  vncProxy:     (vm)    => fetch('/api/kvm/vnc-proxy', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({vm})}).then(r=>r.json()),
+  vncConfig:    (vm)    => fetch('/api/kvm/vnc-config?vm='+encodeURIComponent(vm), {credentials:'include'}).then(r=>r.json()),
+  vncSetConfig: (body)  => fetch('/api/kvm/vnc-config', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()),
   delete:    (vm, removeDisks) => fetch('/api/kvm/delete', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({vm,remove_disks:removeDisks})}),
   isoDownload: (url, filename) => fetch('/api/kvm/iso-download', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,filename})}),
   isoDownloads: ()       => fetch('/api/kvm/iso-download', {credentials:'include'}).then(r=>r.json()),
@@ -42,6 +44,153 @@ const CPUVirtBadge = ({ cpuVirt }) => {
         </div>
       </div>
     </div>
+  );
+};
+
+
+// ── VncRemoteDialog — konfiguracja zdalnego dostępu VNC ─────────────────────
+const VncRemoteDialog = ({ vm, onClose }) => {
+  const [cfg,     setCfg]    = React.useState(null);
+  const [loading, setLoad]   = React.useState(true);
+  const [saving,  setSaving] = React.useState(false);
+  const [listen,  setListen] = React.useState('127.0.0.1');
+  const [usePass, setUsePass]= React.useState(false);
+  const [passwd,  setPasswd] = React.useState('');
+  const [result,  setResult] = React.useState(null);
+
+  React.useEffect(() => {
+    kvmApi.vncConfig(vm.name || vm.id).then(d => {
+      setCfg(d);
+      setListen(d.vnc_listen || '127.0.0.1');
+      setLoad(false);
+    }).catch(() => setLoad(false));
+  }, []);
+
+  const apply = async () => {
+    setSaving(true);
+    try {
+      const d = await kvmApi.vncSetConfig({
+        vm: vm.name || vm.id,
+        listen, set_passwd: usePass, password: passwd,
+      });
+      setResult(d);
+      setCfg(prev => ({...prev, vnc_listen: listen, remote_ready: listen === '0.0.0.0'}));
+      window.toast?.success('Konfiguracja VNC zaktualizowana');
+    } catch(e) {
+      window.toast?.error('Błąd: ' + e.message);
+    } finally { setSaving(false); }
+  };
+
+  const inp = {
+    background:'var(--bg-2)', border:'1px solid var(--line-strong)', borderRadius:5,
+    padding:'6px 10px', color:'var(--fg)', fontFamily:'var(--font-mono)',
+    fontSize:'var(--fs-sm)', outline:'none', width:'100%',
+  };
+
+  return (
+    <Modal title={`Zdalny VNC · ${vm.name}`} sub="Konfiguracja połączenia przez klienta VNC"
+      onClose={onClose} width={560}
+      footer={<>
+        <button className="btn" onClick={onClose}>Zamknij</button>
+        <button className="btn primary" onClick={apply} disabled={saving||loading}>
+          {saving ? 'Stosowanie…' : 'Zastosuj konfigurację'}
+        </button>
+      </>}>
+      {loading ? (
+        <div style={{padding:32, textAlign:'center', color:'var(--fg-dim)'}}>
+          Ładowanie konfiguracji VNC…
+        </div>
+      ) : (<>
+        {/* Status */}
+        <div style={{display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:20}}>
+          {[
+            ['Port VNC',  cfg?.actual_port || cfg?.vnc_port || '—'],
+            ['Listen',    cfg?.vnc_listen || '127.0.0.1'],
+            ['Status',    cfg?.remote_ready ? '✅ Zdalny' : '⚠ Lokalny'],
+          ].map(([l,v]) => (
+            <div key={l} style={{background:'var(--bg-2)', borderRadius:8, padding:'10px 12px', border:'1px solid var(--line)'}}>
+              <div style={{fontSize:10, color:'var(--fg-dim)', marginBottom:4, textTransform:'uppercase', letterSpacing:'.06em'}}>{l}</div>
+              <div className="mono" style={{fontWeight:600}}>{v}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Listen address */}
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:'var(--fs-sm)', fontWeight:600, marginBottom:8}}>Adres nasłuchiwania VNC</div>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8}}>
+            {[
+              ['127.0.0.1', '🔒 Tylko lokalnie', 'Bezpieczne · użyj SSH tunnel do zdalnego dostępu'],
+              ['0.0.0.0',   '🌐 Wszystkie interfejsy', 'Dostęp z sieci lokalnej · zalecane hasło VNC'],
+            ].map(([val, label, desc]) => (
+              <div key={val} onClick={() => setListen(val)} style={{
+                padding:'12px 14px', borderRadius:8, cursor:'pointer',
+                border:`1px solid ${listen===val ? 'var(--accent)' : 'var(--line-strong)'}`,
+                background: listen===val ? 'color-mix(in oklch,var(--accent) 10%,var(--bg-2))' : 'var(--bg-2)',
+              }}>
+                <div style={{fontWeight:600, fontSize:'var(--fs-sm)', color:listen===val?'var(--accent)':'var(--fg)', marginBottom:2}}>{label}</div>
+                <div className="mono" style={{fontSize:'var(--fs-xs)', color:'var(--fg-dim)', marginBottom:4}}>{val}</div>
+                <div style={{fontSize:'var(--fs-xs)', color:'var(--fg-muted)', lineHeight:1.4}}>{desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Hasło VNC */}
+        <div style={{marginBottom:16, padding:'12px 14px', background:'var(--bg-2)', borderRadius:8, border:'1px solid var(--line)'}}>
+          <div style={{display:'flex', alignItems:'center', gap:10, marginBottom: usePass ? 10 : 0}}>
+            <div className={"toggle " + (usePass ? 'on' : '')} onClick={() => setUsePass(!usePass)}/>
+            <div>
+              <div style={{fontWeight:600, fontSize:'var(--fs-sm)'}}>Hasło VNC</div>
+              <div style={{fontSize:'var(--fs-xs)', color:'var(--fg-dim)'}}>
+                {usePass ? 'wymagane przy połączeniu' : 'brak ochrony hasłem'}
+              </div>
+            </div>
+          </div>
+          {usePass && (
+            <input style={inp} type="password" value={passwd}
+              onChange={e => setPasswd(e.target.value)}
+              placeholder="Hasło VNC (max 8 znaków)"
+              maxLength={8}/>
+          )}
+        </div>
+
+        {/* SSH Tunnel */}
+        {listen === '127.0.0.1' && cfg?.actual_port && (
+          <div style={{padding:'12px 14px', background:'color-mix(in oklch,var(--accent) 6%,transparent)',
+            borderRadius:8, border:'1px solid color-mix(in oklch,var(--accent) 20%,transparent)', marginBottom:12}}>
+            <div style={{fontWeight:600, fontSize:'var(--fs-sm)', marginBottom:8}}>💡 Połącz przez SSH tunnel</div>
+            <div className="mono" style={{fontSize:11, color:'var(--fg-dim)', lineHeight:2}}>
+              <div style={{color:'var(--fg-dim)'}}># Na lokalnym komputerze:</div>
+              <div style={{color:'var(--accent)'}}>ssh -L 5900:localhost:{cfg.actual_port} user@{window.location.hostname}</div>
+              <div style={{color:'var(--fg-dim)'}}># Następnie połącz klientem VNC:</div>
+              <div style={{color:'var(--ok)'}}>vncviewer localhost:5900</div>
+            </div>
+          </div>
+        )}
+
+        {/* Wynik */}
+        {result && (
+          <div style={{padding:'12px 14px', background:'color-mix(in oklch,var(--ok) 8%,transparent)',
+            borderRadius:8, border:'1px solid color-mix(in oklch,var(--ok) 25%,transparent)', marginBottom:12}}>
+            <div style={{fontWeight:600, marginBottom:6}}>✅ Zastosowano</div>
+            <div className="mono" style={{fontSize:11, color:'var(--fg-dim)', lineHeight:1.8}}>
+              {result.direct_vnc && <div>Połącz: <span style={{color:'var(--ok)'}}>vncviewer {result.direct_vnc}</span></div>}
+              {result.note && <div style={{color:'var(--warn)', marginTop:4}}>{result.note}</div>}
+            </div>
+          </div>
+        )}
+
+        {/* Warning */}
+        {listen === '0.0.0.0' && !usePass && (
+          <div style={{padding:'10px 12px', background:'color-mix(in oklch,var(--warn) 8%,transparent)',
+            borderRadius:6, border:'1px solid color-mix(in oklch,var(--warn) 25%,transparent)',
+            fontSize:'var(--fs-xs)', color:'var(--warn)'}}>
+            ⚠ VNC bez hasła będzie dostępne z całej sieci — ustaw hasło lub ogranicz firewallem.
+          </div>
+        )}
+      </>)}
+    </Modal>
   );
 };
 
@@ -492,7 +641,8 @@ const VmCard = ({ vm, onAction }) => {
         {vm.state === 'shutting_down' && <button className="btn sm" onClick={()=>onAction(vm.id,'force-stop')} style={{color:'var(--err)',borderColor:'var(--err)'}}><Icon name="stop" size={11}/> Wymuś</button>}
         {vm.state === 'running' && <button className="btn sm" onClick={()=>onAction(vm.id,'pause')}><Icon name="pause2" size={11}/> Pauza</button>}
         <button className="btn sm" onClick={()=>onAction(vm.id,'restart')} disabled={vm.state!=='running'}><Icon name="restart" size={11}/></button>
-        <button className="btn sm ghost" style={{marginLeft:'auto'}} onClick={()=>onAction(vm.id,'vnc')} disabled={vm.state==='stopped'}>VNC</button>
+        <button className="btn sm ghost" style={{marginLeft:'auto'}} onClick={()=>onAction(vm.id,'vnc')} disabled={vm.state==='stopped'}>noVNC</button>
+        <button className="btn sm ghost" onClick={()=>onAction(vm.id,'vnc-remote')} title="Konfiguracja zdalnego VNC"><Icon name="network" size={11}/></button>
         <button className="btn sm ghost" onClick={()=>onAction(vm.id,'snap')}>
           <Icon name="download" size={11}/>{vm.snapshot>0&&<span className="nav-badge" style={{marginLeft:4}}>{vm.snapshot}</span>}
         </button>
@@ -939,6 +1089,7 @@ const KvmVirtualization = () => {
   const [installing, setInstalling] = React.useState(false);
   const [showNew,    setShowNew]    = React.useState(false);
   const [vncFor,     setVncFor]     = React.useState(null);
+  const [vncRemoteFor, setVncRemoteFor] = React.useState(null);
   const [deleteFor,  setDeleteFor]  = React.useState(null);
   const [snapFor,    setSnapFor]    = React.useState(null);
   const [view,       setView]       = React.useState('grid');
@@ -975,6 +1126,7 @@ const KvmVirtualization = () => {
 
   const action = async (id, act) => {
     if (act==='vnc')  { setVncFor(vms.find(v=>v.id===id)); return; }
+    if (act==='vnc-remote') { setVncRemoteFor(vms.find(v=>v.id===id)); return; }
     if (act==='snap') { setSnapFor(vms.find(v=>v.id===id)); return; }
 
     if (act==='delete') { setDeleteFor(vms.find(v=>v.id===id)); return; }
@@ -1041,6 +1193,7 @@ const KvmVirtualization = () => {
     <div className="col" style={{gap:'var(--gutter)'}}>
       {showNew && <NewVmDialog onClose={()=>setShowNew(false)} onAdd={addVm} kvmStatus={kvmStatus}/>}
       {vncFor  && <VncConsole vm={vncFor} onClose={()=>setVncFor(null)}/>}
+      {vncRemoteFor && <VncRemoteDialog vm={vncRemoteFor} onClose={()=>setVncRemoteFor(null)}/>}
       {snapFor   && <SnapshotsPanel vm={snapFor} onClose={()=>setSnapFor(null)}/>}
       {deleteFor && <DeleteVmDialog vm={deleteFor} onClose={()=>setDeleteFor(null)}
         onDeleted={id=>{ setDeleteFor(null); setVms(vs=>vs.filter(v=>v.id!==id && v.name!==id)); setTimeout(()=>load(), 800); setTimeout(()=>load(), 2500); }}/>}
