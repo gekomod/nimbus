@@ -86,7 +86,14 @@ func runStartupTasks() {
 		log.Println("[startup] ZFS import wyłączony w konfiguracji")
 	}
 
-	// ── 2. Docker: uruchom kontenery które działały przed restartem ──────────
+	// ── 2. NFS: zamontuj udziały z fstab ───────────────────────────────────
+	if cfg.NfsRestore {
+		restoreNFSMountsCfg(cfg)
+	} else {
+		log.Println("[startup] Przywracanie montowań NFS wyłączone w konfiguracji")
+	}
+
+	// ── 3. Docker: uruchom kontenery które działały przed restartem ──────────
 	if cfg.DockerRestore {
 		restoreDockerContainersCfg(cfg)
 	} else {
@@ -228,18 +235,20 @@ func restoreDockerContainers() {
 const startupCfgPath = "/etc/nas-panel/startup-config.json"
 
 type StartupConfig struct {
-	StartupDelay    int  `json:"startupDelay"`
-	ZfsImport       bool `json:"zfsImport"`
-	ZfsMount        bool `json:"zfsMount"`
-	ZfsLoadKey      bool `json:"zfsLoadKey"`
-	DockerRestore   bool `json:"dockerRestore"`
+	StartupDelay     int  `json:"startupDelay"`
+	ZfsImport        bool `json:"zfsImport"`
+	ZfsMount         bool `json:"zfsMount"`
+	ZfsLoadKey       bool `json:"zfsLoadKey"`
+	DockerRestore    bool `json:"dockerRestore"`
 	DockerSkipPolicy bool `json:"dockerSkipPolicy"`
-	DockerNotify    bool `json:"dockerNotify"`
-	DockerDelay     int  `json:"dockerDelay"`
-	NotifyBoot      bool `json:"notifyBoot"`
-	NotifyZFS       bool `json:"notifyZFS"`
-	NotifyDocker    bool `json:"notifyDocker"`
-	NotifyShutdown  bool `json:"notifyShutdown"`
+	DockerNotify     bool `json:"dockerNotify"`
+	DockerDelay      int  `json:"dockerDelay"`
+	NfsRestore       bool `json:"nfsRestore"`
+	NfsDelay         int  `json:"nfsDelay"`
+	NotifyBoot       bool `json:"notifyBoot"`
+	NotifyZFS        bool `json:"notifyZFS"`
+	NotifyDocker     bool `json:"notifyDocker"`
+	NotifyShutdown   bool `json:"notifyShutdown"`
 }
 
 var defaultStartupCfg = StartupConfig{
@@ -251,6 +260,8 @@ var defaultStartupCfg = StartupConfig{
 	DockerSkipPolicy: true,
 	DockerNotify:     true,
 	DockerDelay:      5,
+	NfsRestore:       true,
+	NfsDelay:         10,
 	NotifyBoot:       true,
 	NotifyZFS:        true,
 	NotifyDocker:     true,
@@ -342,6 +353,10 @@ func (s *Server) handleStartupAction(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]string{"status": "started"})
 	case "restore-docker":
 		go restoreDockerContainers()
+		jsonOK(w, map[string]string{"status": "started"})
+	case "restore-nfs":
+		cfg := getStartupConfig()
+		go restoreNFSMountsCfg(cfg)
 		jsonOK(w, map[string]string{"status": "started"})
 	case "save-state":
 		saveStartupState()
@@ -455,5 +470,169 @@ func restoreDockerContainersCfg(cfg StartupConfig) {
 		}, " | ")
 		if failed > 0 { msg += " | ❌ błąd: " + itoa(failed) }
 		sendStartupNotif("🐳 Docker — kontenery przywrócone", msg)
+	}
+}
+
+// NFSMount reprezentuje zapisany udział sieciowy
+type NFSMount struct {
+	Source  string `json:"source"`
+	Target  string `json:"target"`
+	FSType  string `json:"fstype"`
+	Options string `json:"options"`
+}
+
+const nfsMountsFile = "/var/lib/nimbus/nfs_mounts.json"
+
+// scanCurrentNFSMounts skanuje aktualnie zamontowane udziały NFS/CIFS przez findmnt
+func scanCurrentNFSMounts() []NFSMount {
+	out, err := runCmd("findmnt", "-J", "-t", "nfs,nfs4,cifs")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil
+	}
+
+	// findmnt -J zwraca JSON z filesystems[]
+	var result struct {
+		Filesystems []struct {
+			Target  string `json:"target"`
+			Source  string `json:"source"`
+			FSType  string `json:"fstype"`
+			Options string `json:"options"`
+		} `json:"filesystems"`
+	}
+
+	var mounts []NFSMount
+	if err := json.Unmarshal([]byte(out), &result); err == nil {
+		for _, fs := range result.Filesystems {
+			mounts = append(mounts, NFSMount{
+				Source:  fs.Source,
+				Target:  fs.Target,
+				FSType:  fs.FSType,
+				Options: fs.Options,
+			})
+		}
+	}
+	return mounts
+}
+
+// saveNFSMounts zapisuje aktualnie zamontowane udziały do pliku JSON
+func saveNFSMounts() error {
+	mounts := scanCurrentNFSMounts()
+	os.MkdirAll("/var/lib/nimbus", 0755)
+	data, err := json.MarshalIndent(mounts, "", "  ")
+	if err != nil { return err }
+	return os.WriteFile(nfsMountsFile, data, 0644)
+}
+
+// loadSavedNFSMounts wczytuje zapisane udziały z pliku JSON
+func loadSavedNFSMounts() []NFSMount {
+	data, err := os.ReadFile(nfsMountsFile)
+	if err != nil { return nil }
+	var mounts []NFSMount
+	json.Unmarshal(data, &mounts)
+	return mounts
+}
+
+// restoreNFSMountsCfg montuje udziały zapisane w pliku JSON
+func restoreNFSMountsCfg(cfg StartupConfig) {
+	delay := cfg.NfsDelay
+	if delay <= 0 { delay = 10 }
+	log.Printf("[startup] NFS: czekam %d sekund przed montowaniem…", delay)
+	time.Sleep(time.Duration(delay) * time.Second)
+
+	mounts := loadSavedNFSMounts()
+	if len(mounts) == 0 {
+		log.Println("[startup] NFS: brak zapisanych udziałów do montowania")
+		return
+	}
+
+	log.Printf("[startup] NFS: znaleziono %d zapisanych udziałów", len(mounts))
+	mounted := 0
+	for _, m := range mounts {
+		// Sprawdź czy już zamontowane
+		out, _ := runCmd("findmnt", "-n", m.Target)
+		if strings.TrimSpace(out) != "" {
+			log.Printf("[startup] NFS: %s już zamontowany, pomijam", m.Target)
+			continue
+		}
+
+		// Utwórz punkt montowania jeśli nie istnieje
+		os.MkdirAll(m.Target, 0755)
+
+		// Zamontuj przez mount -t fstype source target -o options
+		args := []string{"-t", m.FSType, m.Source, m.Target}
+		if m.Options != "" && m.Options != "rw,relatime" {
+			args = append(args, "-o", m.Options)
+		}
+		out2, err := runCmd("mount", args...)
+		if err != nil {
+			log.Printf("[startup] NFS: błąd montowania %s → %s: %v (%s)", m.Source, m.Target, err, out2)
+		} else {
+			log.Printf("[startup] NFS: zamontowano %s → %s", m.Source, m.Target)
+			mounted++
+		}
+	}
+	log.Printf("[startup] NFS: zamontowano %d/%d", mounted, len(mounts))
+}
+
+// getNFSMountsWithStatus zwraca zapisane udziały ze statusem aktualnego montowania
+func getNFSMountsWithStatus() []map[string]any {
+	saved := loadSavedNFSMounts()
+
+	// Pobierz aktualnie zamontowane
+	current := scanCurrentNFSMounts()
+	currentMap := map[string]bool{}
+	for _, m := range current { currentMap[m.Target] = true }
+
+	var result []map[string]any
+	for _, m := range saved {
+		result = append(result, map[string]any{
+			"source":  m.Source,
+			"target":  m.Target,
+			"fstype":  m.FSType,
+			"options": m.Options,
+			"mounted": currentMap[m.Target],
+		})
+	}
+
+	// Dodaj aktualnie zamontowane których nie ma w zapisanych
+	savedMap := map[string]bool{}
+	for _, m := range saved { savedMap[m.Target] = true }
+	for _, m := range current {
+		if !savedMap[m.Target] {
+			result = append(result, map[string]any{
+				"source":  m.Source,
+				"target":  m.Target,
+				"fstype":  m.FSType,
+				"options": m.Options,
+				"mounted": true,
+				"unsaved": true,
+			})
+		}
+	}
+	return result
+}
+
+func (s *Server) handleStartupNFSEntries(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		entries := getNFSMountsWithStatus()
+		if entries == nil { entries = []map[string]any{} }
+		// Dodaj aktualnie zamontowane (live scan)
+		current := scanCurrentNFSMounts()
+		jsonOK(w, map[string]any{
+			"entries":  entries,
+			"current":  current,
+			"saved_file": nfsMountsFile,
+		})
+	case http.MethodPost:
+		// Zapisz aktualnie zamontowane do pliku
+		if err := saveNFSMounts(); err != nil {
+			jsonErr(w, err.Error(), 500)
+			return
+		}
+		mounts := loadSavedNFSMounts()
+		jsonOK(w, map[string]any{"status": "ok", "saved": len(mounts)})
+	default:
+		jsonErr(w, "method not allowed", 405)
 	}
 }

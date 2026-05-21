@@ -241,6 +241,7 @@ const SCREENS = {
   hardware:  { title: 'Sprzęt',           sub: 'CPU · RAM · PCIe · USB · karty sieciowe · BIOS', comp: () => <HardwareInventory/>, crumbs: ['nimbus','System','Sprzęt'] },
   mail:      { title: 'Serwer poczty',    sub: 'Postfix · Dovecot · kolejka · spam · konta',      comp: () => <MailServer/>,       crumbs: ['nimbus','Aplikacje','Mail'] },
   ups:       { title: 'UPS',              sub: 'ViewPower · Megatec Q1 · bateria · obciążenie',     comp: () => <UPSScreen/>,        crumbs: ['nimbus','System','UPS'] },
+  clamav:    { title: 'Antywirus ClamAV', sub: 'ClamAV · skanowanie · kwarantanna · ochrona w czasie rzeczywistym', comp: () => <ClamAV/>, crumbs: ['nimbus','Aplikacje','ClamAV'] },
   webmail:   { title: 'Webmail',          sub: 'Klient pocztowy w przeglądarce · IMAP',            comp: () => <Webmail/>,          crumbs: ['nimbus','Aplikacje','Webmail'] },
 };
 
@@ -285,6 +286,7 @@ const AppInner = ({ user, onLogout }) => {
 
   return (
     <>
+      <ToastContainer/>
       <div className="app">
         <Sidebar active={active} onNav={nav}/>
         <div className="main">
@@ -335,6 +337,8 @@ const AppInner = ({ user, onLogout }) => {
 };
 
 // ── Root ──────────────────────────────────────────────────────────────────────
+
+
 const App = () => {
   const [authed,     setAuthed]     = React.useState(null); // null=sprawdzanie
   const [loggedUser, setLoggedUser] = React.useState('—');

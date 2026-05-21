@@ -48,6 +48,7 @@ window.NAV = [
     { id: "webdav",  label: "WebDAV",        icon: "globe"  },
     { id: "mail",    label: "Serwer poczty",  icon: "bell"     },
     { id: "webmail", label: "Webmail",          icon: "bell"     },
+    { id: "clamav",  label: "Antywirus ClamAV", icon: "shield"   },
   ]},
   { group: "Sieć", items: [
     { id: "network",    label: "Sieć",           icon: "network" },

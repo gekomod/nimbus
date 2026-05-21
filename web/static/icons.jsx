@@ -113,7 +113,21 @@ const ICONS = {
   key: (<><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></>),
   clock: (<><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></>),
   mail: (<><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>),
+  grid: (<><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>),
+  drag: (<><circle cx="9" cy="5" r="1.2" fill="currentColor"/><circle cx="15" cy="5" r="1.2" fill="currentColor"/><circle cx="9" cy="12" r="1.2" fill="currentColor"/><circle cx="15" cy="12" r="1.2" fill="currentColor"/><circle cx="9" cy="19" r="1.2" fill="currentColor"/><circle cx="15" cy="19" r="1.2" fill="currentColor"/></>),
   send: (<><path d="M22 2L11 13M22 2L15 22l-4-9-9-4z"/></>),
+  bolt: (<><path d="M13 2L4 14h7l-1 8 9-12h-7z" strokeLinejoin="round"/></>),
+  fan: (<>
+    <circle cx="12" cy="12" r="2"/>
+    <path d="M12 10c0-3 1-7 4-7 2 0 3 2 2 4-1 1.6-3 2.5-6 3"/>
+    <path d="M14 12c3 0 7 1 7 4 0 2-2 3-4 2-1.6-1-2.5-3-3-6"/>
+    <path d="M12 14c0 3-1 7-4 7-2 0-3-2-2-4 1-1.6 3-2.5 6-3"/>
+    <path d="M10 12c-3 0-7-1-7-4 0-2 2-3 4-2 1.6 1 2.5 3 3 6"/>
+  </>),
+  camera: (<>
+    <path d="M3 8a2 2 0 012-2h2l2-2h6l2 2h2a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+    <circle cx="12" cy="13" r="4"/>
+  </>),
 };
 
 window.Icon = Icon;

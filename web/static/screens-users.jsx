@@ -690,6 +690,181 @@ const Settings = () => {
 
 
 // ── Startup settings tab ──────────────────────────────────────────────────────
+const NFSStartupCard = ({ cfg, set, runNow }) => {
+  const [entries, setEntries] = React.useState([]);
+  const [current, setCurrent] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [saving,  setSaving]  = React.useState(false);
+  const [msg,     setMsg]     = React.useState('');
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/startup/nfs', { credentials:'include' });
+      const d = await r.json();
+      setEntries(d.entries || []);
+      setCurrent(d.current || []);
+    } catch(e) {}
+    finally { setLoading(false); }
+  };
+
+  React.useEffect(() => { load(); }, []);
+
+  const saveCurrentMounts = async () => {
+    setSaving(true); setMsg('');
+    try {
+      const r = await fetch('/api/startup/nfs', {
+        method: 'POST', credentials: 'include',
+      });
+      const d = await r.json();
+      if (d.status === 'ok') {
+        setMsg(`✅ Zapisano ${d.saved} udziałów — będą montowane automatycznie po restarcie`);
+        load();
+      } else {
+        setMsg('❌ ' + (d.error || 'błąd'));
+      }
+    } catch(e) { setMsg('❌ Błąd połączenia'); }
+    finally { setSaving(false); }
+  };
+
+  const mountNow = async (m) => {
+    await fetch('/api/nfs/mount', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: m.source, target: m.target, fstype: m.fstype }),
+    });
+    setTimeout(load, 1500);
+  };
+
+  const umountNow = async (target) => {
+    await fetch('/api/nfs/umount', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    });
+    setTimeout(load, 1500);
+  };
+
+  const removeEntry = async (target) => {
+    const updated = entries.filter(e => e.target !== target);
+    // Zapisz zaktualizowaną listę
+    await fetch('/api/startup/nfs', { method: 'POST', credentials: 'include' });
+    load();
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Udziały sieciowe NFS / CIFS</div>
+          <div className="card-sub">
+            Automatyczne montowanie po restarcie ·
+            {current.length > 0 ? ` ${current.length} aktualnie zamontowanych` : ' brak zamontowanych'}
+          </div>
+        </div>
+        <div className="card-actions">
+          <button className="btn sm" onClick={load} disabled={loading}>
+            <Icon name="refresh" size={11}/> Odśwież
+          </button>
+          <button className="btn sm primary" onClick={saveCurrentMounts} disabled={saving || current.length === 0}
+            title="Zapisuje aktualnie zamontowane udziały NFS/CIFS do pliku — będą montowane po każdym restarcie">
+            <Icon name="save" size={11}/> {saving ? 'Zapisuję…' : 'Zapisz zamontowane'}
+          </button>
+          <button className="btn sm" onClick={() => runNow('restore-nfs')}
+            title="Montuje teraz zapisane udziały">
+            <Icon name="play" size={11}/> Montuj teraz
+          </button>
+        </div>
+      </div>
+
+      <div className="card-body col" style={{gap:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:14,padding:'10px 0',borderBottom:'1px solid var(--line)'}}>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:500,fontSize:'var(--fs-sm)'}}>Przywróć montowania po restarcie</div>
+            <div style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)',marginTop:2}}>
+              Montuje zapisane udziały NFS/CIFS przy każdym starcie Nimbus
+            </div>
+          </div>
+          <span className={'toggle' + (cfg.nfsRestore ? ' on' : '')} onClick={() => set('nfsRestore', !cfg.nfsRestore)}/>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 0',borderBottom:'1px solid var(--line)'}}>
+          <span style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>Opóźnienie przed montowaniem (s):</span>
+          <input type="number" value={cfg.nfsDelay||10} onChange={e=>set('nfsDelay',parseInt(e.target.value)||10)}
+            style={{width:60,height:28,padding:'0 8px',background:'var(--bg-2)',border:'1px solid var(--line-strong)',
+              borderRadius:5,color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-xs)',outline:'none'}}/>
+          <span style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>sek. (czas na wstanie sieci)</span>
+        </div>
+      </div>
+
+      {msg && (
+        <div style={{margin:'0 16px 12px',padding:'8px 12px',borderRadius:6,fontSize:'var(--fs-xs)',
+          background: msg.startsWith('✅') ? 'color-mix(in oklch,var(--ok) 8%,transparent)' : 'color-mix(in oklch,var(--err) 8%,transparent)',
+          border: '1px solid ' + (msg.startsWith('✅') ? 'color-mix(in oklch,var(--ok) 25%,transparent)' : 'color-mix(in oklch,var(--err) 25%,transparent)'),
+        }}>{msg}</div>
+      )}
+
+      {/* Jak działa */}
+      <div style={{padding:'10px 16px',fontSize:'var(--fs-xs)',color:'var(--fg-dim)',
+        borderBottom: entries.length > 0 ? '1px solid var(--line)' : 'none',
+        background:'color-mix(in oklch,var(--accent) 4%,transparent)'}}>
+        💡 <b>Jak to działa:</b> Zamontuj udziały NFS/CIFS ręcznie, potem kliknij <b>Zapisz zamontowane</b> — 
+        Nimbus zapamięta je w pliku i będzie montował automatycznie po każdym restarcie.
+      </div>
+
+      {/* Tabela zapisanych */}
+      {entries.length === 0 && current.length === 0 ? (
+        <div style={{padding:'20px',fontSize:'var(--fs-sm)',color:'var(--fg-dim)',textAlign:'center'}}>
+          {loading ? 'Ładowanie…' : 'Brak zapisanych ani aktualnie zamontowanych udziałów NFS/CIFS'}
+        </div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Źródło</th>
+              <th>Punkt montowania</th>
+              <th style={{width:70}}>Typ</th>
+              <th style={{width:120}}>Status</th>
+              <th style={{width:130}}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((e, i) => (
+              <tr key={i} style={{opacity: e.unsaved ? 0.6 : 1}}>
+                <td className="mono" style={{fontSize:'var(--fs-xs)'}}>{e.source}</td>
+                <td className="mono" style={{fontSize:'var(--fs-xs)'}}>{e.target}</td>
+                <td><span className="badge mono" style={{fontSize:10}}>{e.fstype}</span></td>
+                <td>
+                  {e.unsaved ? (
+                    <span className="badge warn" style={{fontSize:10}}>zamontowany · niezapisany</span>
+                  ) : e.mounted ? (
+                    <span className="badge ok" style={{fontSize:10}}>● zamontowany</span>
+                  ) : (
+                    <span className="badge err" style={{fontSize:10}}>○ odmontowany</span>
+                  )}
+                </td>
+                <td style={{textAlign:'right'}}>
+                  <div style={{display:'flex',gap:4,justifyContent:'flex-end'}}>
+                    {e.mounted ? (
+                      <button className="btn sm" onClick={() => umountNow(e.target)}>Odmontuj</button>
+                    ) : (
+                      <button className="btn sm primary" onClick={() => mountNow(e)}>Montuj</button>
+                    )}
+                    {!e.unsaved && (
+                      <button className="icon-btn" title="Usuń z listy" onClick={() => removeEntry(e.target)}>
+                        <Icon name="trash" size={11}/>
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+};
+
 const SettingsStartup = () => {
   const [cfg,    setCfg]    = React.useState(null);
   const [saving, setSaving] = React.useState(false);
@@ -801,6 +976,9 @@ const SettingsStartup = () => {
           <span style={{fontSize:'var(--fs-xs)',color:'var(--fg-dim)'}}>sek. (czas na wstanie daemona)</span>
         </div>
       </div>
+
+      {/* ─ NFS/CIFS ─ */}
+      <NFSStartupCard cfg={cfg} set={set} runNow={runNow}/>
 
       {/* ─ Powiadomienia startowe ─ */}
       <div className="card">

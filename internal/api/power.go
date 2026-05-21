@@ -112,8 +112,7 @@ func (s *Server) handleUPSConfigNUT(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUPSEvents(w http.ResponseWriter, r *http.Request) {
-	out, _ := runCmd("upsc", "-l")
-	jsonOK(w, map[string]any{"events": strings.Split(out, "\n")})
+	upsEventsHandler(w, r)
 }
 
 func (s *Server) handleUPSLogs(w http.ResponseWriter, r *http.Request) {
