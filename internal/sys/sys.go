@@ -214,8 +214,21 @@ func NetInterfaces() []NetIface {
 
 		state := "down"
 		stateData, _ := os.ReadFile("/sys/class/net/" + name + "/operstate")
-		if strings.TrimSpace(string(stateData)) == "up" {
+		operstate := strings.TrimSpace(string(stateData))
+		if operstate == "up" {
 			state = "up"
+		} else if operstate == "unknown" {
+			// Interfejsy wirtualne (WireGuard, tunele, bridge, loopback) mają zawsze
+			// operstate="unknown" mimo że działają. Sprawdź flagę IFF_UP przez /sys/class/net/<iface>/flags
+			// Flagi to hex — bit 0x1 = IFF_UP
+			flagsData, err := os.ReadFile("/sys/class/net/" + name + "/flags")
+			if err == nil {
+				flagsStr := strings.TrimSpace(strings.TrimPrefix(string(flagsData), "0x"))
+				flags, err := strconv.ParseUint(flagsStr, 16, 32)
+				if err == nil && flags&0x1 != 0 {
+					state = "up"
+				}
+			}
 		}
 
 		ip := ""

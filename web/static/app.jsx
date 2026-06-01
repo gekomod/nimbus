@@ -27,6 +27,8 @@ const MailServer        = window.MailServer;
 const UPSScreen         = window.UPSScreen;
 const Webmail           = window.Webmail;
 const CommandPalette    = window.CommandPalette;
+const DownloadCenter    = window.DownloadCenter;
+const Vpn               = window.Vpn;
 
 // ── Login screen ──────────────────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -212,6 +214,7 @@ const SettingsWithModules = () => {
 };
 
 const SCREENS = {
+  downloads: { title: 'Download Center',    sub: 'Pobieranie plików z internetu · HTTP · Torrent · YouTube', comp: () => <DownloadCenter/>, crumbs: ['nimbus','Magazyn','Download Center'] },
   dashboard: { title: 'Pulpit',           sub: 'Przegląd całego systemu', comp: () => <Dashboard/>, crumbs: ['nimbus','Pulpit'] },
   disks:     { title: 'Dyski i pule',     sub: 'Magazyn ZFS · 12 dysków · 3 pule', comp: () => <Storage/>, crumbs: ['nimbus','Magazyn','Dyski i pule'] },
   files:     { title: 'Menedżer plików',    sub: 'Przeglądarka · upload · uprawnienia', comp: () => <FileManager/>, crumbs: ['nimbus','Magazyn','Menedżer plików'] },
@@ -226,6 +229,7 @@ const SCREENS = {
   webdav:    { title: 'WebDAV',           sub: 'Apache mod_dav · HTTPS · ścieżki', comp: () => <WebDavService/>, crumbs: ['nimbus','Aplikacje','WebDAV'] },
   netdetail: { title: 'Sieć szczegółowo', sub: 'Bandwidth · per-kontener · firewall', comp: () => <NetworkDetail/>, crumbs: ['nimbus','Sieć','Szczegóły'] },
   network:   { title: 'Sieć',             sub: '2× 10 GbE · WireGuard · firewall', comp: () => <Network/>, crumbs: ['nimbus','Sieć'] },
+  vpn:       { title: 'VPN · WireGuard',  sub: 'Peery · statystyki · QR · mapa', comp: () => <Vpn/>, crumbs: ['nimbus','Sieć','VPN'] },
   servers:   { title: 'Serwery',          sub: 'Zarządzanie zdalnymi hostami SSH', comp: () => <Servers/>, crumbs: ['nimbus','Sieć','Serwery'] },
   logs:      { title: 'Logi systemowe',   sub: 'Strumień zdarzeń na żywo', comp: () => <Logs/>, crumbs: ['nimbus','System','Logi'] },
   processes: { title: 'Procesy',          sub: 'Lista procesów systemowych', comp: () => <Processes/>, crumbs: ['nimbus','System','Procesy'] },

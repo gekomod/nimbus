@@ -37,6 +37,7 @@ done
 
 INSTALL_DIR="/opt/nimbus"
 NIMBUS_BIN="$INSTALL_DIR/nimbus"
+NIMBUS_DL_BIN="$INSTALL_DIR/nimbus-dl"
 CONFIG_DIR="/etc/nas-panel"
 DATA_DIR="/var/lib/nimbus"
 
@@ -111,6 +112,17 @@ check_optional "dovecot-core"       "dovecot"      "Dovecot (IMAP)"
 check_optional "wireguard-tools"    "wg"           "WireGuard"
 check_optional "ufw"                "ufw"          "UFW Firewall"
 check_optional "novnc"              "websockify"   "noVNC (KVM console)"
+
+# Narzędzia Download Center
+check_optional "ffmpeg"             "ffmpeg"       "ffmpeg (Download Center — CDA/HLS)"
+check_optional "wget"               "wget"         "wget (Download Center — HTTP)"
+check_optional "aria2"              "aria2c"       "aria2c (Download Center — torrenty)"
+# yt-dlp nie jest pakietem apt, sprawdzamy tylko obecność
+if command -v yt-dlp &>/dev/null; then
+    ok "yt-dlp — dostępny"
+else
+    warn "yt-dlp — niedostępny (pip3 install yt-dlp)"
+fi
 
 # ── Go — instalacja jeśli brak ────────────────────────────────────────────────
 install_go() {
@@ -194,8 +206,29 @@ if [ "$SKIP_BUILD" = "0" ]; then
     info "Kompilacja Go…"
     make go
     ok "Binarka nimbus gotowa"
+
+    info "Kompilacja nimbus-dl (Download Center daemon)…"
+    # nimbus-dl.go musi być w osobnym katalogu cmd/nimbus-dl/
+    # żeby nie kolidował z cmd/nimbus/main.go (oba package main)
+    DL_SRC=""
+    if [ -f "$SCRIPT_DIR/cmd/nimbus-dl/nimbus-dl.go" ]; then
+        DL_SRC="$SCRIPT_DIR/cmd/nimbus-dl"
+    elif [ -f "$SCRIPT_DIR/nimbus-dl.go" ]; then
+        # Plik w złym miejscu — przenieś automatycznie
+        mkdir -p "$SCRIPT_DIR/cmd/nimbus-dl"
+        cp "$SCRIPT_DIR/nimbus-dl.go" "$SCRIPT_DIR/cmd/nimbus-dl/nimbus-dl.go"
+        DL_SRC="$SCRIPT_DIR/cmd/nimbus-dl"
+        info "Przeniesiono nimbus-dl.go → cmd/nimbus-dl/"
+    fi
+    if [ -n "$DL_SRC" ]; then
+        go build -o "$SCRIPT_DIR/nimbus-dl" "$DL_SRC/nimbus-dl.go"
+        ok "Binarka nimbus-dl gotowa"
+    else
+        warn "Brak nimbus-dl.go — umieść w: cmd/nimbus-dl/nimbus-dl.go"
+    fi
 else
     [ -f "$SCRIPT_DIR/nimbus" ]               || die "Brak binarki 'nimbus' — uruchom make all"
+    [ -f "$SCRIPT_DIR/nimbus-dl" ]            || warn "Brak binarki nimbus-dl — Download Center bedzie niedostepny (zbuduj: go build -o nimbus-dl cmd/nimbus-dl/nimbus-dl.go)"
     [ -f "$SCRIPT_DIR/web/static/bundle.js" ] || die "Brak bundle.js — uruchom make js"
     ok "Używam gotowych plików (--skip-build)"
 fi
@@ -223,9 +256,11 @@ step "Tworzenie katalogów"
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$DATA_DIR"
-mkdir -p "$DATA_DIR/quarantine"   # ClamAV kwarantanna
+mkdir -p "$DATA_DIR/downloads"         # domyślny katalog pobierania
+mkdir -p "$DATA_DIR/quarantine"        # ClamAV kwarantanna
 mkdir -p "/var/lib/clamav/quarantine" 2>/dev/null || true
 chmod 750 "$CONFIG_DIR"
+chmod 755 "$DATA_DIR/downloads"
 chmod 700 "$DATA_DIR/quarantine" 2>/dev/null || true
 ok "Katalogi gotowe"
 
@@ -233,6 +268,16 @@ ok "Katalogi gotowe"
 step "Instalacja plików"
 cp "$SCRIPT_DIR/nimbus" "$NIMBUS_BIN"
 chmod 755 "$NIMBUS_BIN"
+
+# nimbus-dl — Download Center daemon
+if [ -f "$SCRIPT_DIR/nimbus-dl" ]; then
+    cp "$SCRIPT_DIR/nimbus-dl" "$NIMBUS_DL_BIN"
+    chmod 755 "$NIMBUS_DL_BIN"
+    ok "nimbus-dl zainstalowany w $NIMBUS_DL_BIN"
+else
+    warn "nimbus-dl nie znaleziony — Download Center wymaga ręcznej kompilacji:"
+    warn "  go build -o $NIMBUS_DL_BIN nimbus-dl.go"
+fi
 
 rm -rf "$INSTALL_DIR/web"
 cp -r "$SCRIPT_DIR/web" "$INSTALL_DIR/"
@@ -288,6 +333,19 @@ if [ "$UPDATE" = "1" ] && [ -f /etc/systemd/system/nimbus.service ]; then
     fi
 fi
 
+# Wygeneruj lub zachowaj token dla nimbus-dl
+DL_TOKEN_FILE="$CONFIG_DIR/dl-token"
+if [ "$UPDATE" = "1" ] && [ -f "$DL_TOKEN_FILE" ]; then
+    DL_TOKEN=$(cat "$DL_TOKEN_FILE")
+    info "Zachowuję istniejący token nimbus-dl"
+else
+    DL_TOKEN=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48 2>/dev/null || \
+               cat /proc/sys/kernel/random/uuid | tr -d '-')
+    echo "$DL_TOKEN" > "$DL_TOKEN_FILE"
+    chmod 600 "$DL_TOKEN_FILE"
+    ok "Wygenerowano token nimbus-dl"
+fi
+
 cat > /etc/systemd/system/nimbus.service << EOF
 [Unit]
 Description=Nimbus NAS Panel v3.5
@@ -314,7 +372,40 @@ LimitNPROC=4096
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
+# Osobna usługa nimbus-dl (opcjonalna — nimbus może ją też uruchamiać wewnętrznie)
+if [ -f "$NIMBUS_DL_BIN" ]; then
+    cat > /etc/systemd/system/nimbus-dl.service << EOF
+[Unit]
+Description=Nimbus Download Center daemon
+Documentation=https://github.com/gekomod/nimbus
+After=network-online.target nimbus.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=$NIMBUS_DL_BIN \\
+    -port 9797 \\
+    -localhost \\
+    -token $(cat "$DL_TOKEN_FILE") \\
+    -state $DATA_DIR \\
+    -config $CONFIG_DIR
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nimbus-dl
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable nimbus-dl
+    ok "Systemd nimbus-dl skonfigurowany (port: 9797)"
+else
+    systemctl daemon-reload
+fi
+
 systemctl enable nimbus
 ok "Systemd skonfigurowany (port: $PORT)"
 
@@ -322,7 +413,12 @@ ok "Systemd skonfigurowany (port: $PORT)"
 step "Ustawienia uprawnień"
 chmod 750 "$NIMBUS_BIN"
 chown root:root "$NIMBUS_BIN"
+if [ -f "$NIMBUS_DL_BIN" ]; then
+    chmod 750 "$NIMBUS_DL_BIN"
+    chown root:root "$NIMBUS_DL_BIN"
+fi
 chown -R root:root "$INSTALL_DIR/web"
+chown root:root "$DL_TOKEN_FILE" 2>/dev/null || true
 ok "Uprawnienia ustawione"
 
 # ── Uruchomienie ──────────────────────────────────────────────────────────────
@@ -336,6 +432,17 @@ else
     warn "Problem z uruchomieniem — sprawdź logi:"
     journalctl -u nimbus -n 20 --no-pager || true
     die "Instalacja nieudana"
+fi
+
+# Uruchom nimbus-dl jeśli zainstalowany
+if [ -f "$NIMBUS_DL_BIN" ] && systemctl is-enabled --quiet nimbus-dl 2>/dev/null; then
+    systemctl start nimbus-dl
+    sleep 2
+    if systemctl is-active --quiet nimbus-dl; then
+        ok "nimbus-dl działa (port: 9797)"
+    else
+        warn "nimbus-dl nie uruchomił się — sprawdź: journalctl -u nimbus-dl -n 20"
+    fi
 fi
 
 # ── Podsumowanie ──────────────────────────────────────────────────────────────
@@ -355,12 +462,20 @@ echo -e "${GREEN}║  Logi:     journalctl -fu nimbus                           
 echo -e "${GREEN}║  Restart:  systemctl restart nimbus                          ║${NC}"
 echo -e "${GREEN}║  Status:   systemctl status nimbus                           ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║  Download Center (nimbus-dl):                                ║${NC}"
+echo -e "${GREEN}║  Port:     9797 (tylko localhost)                            ║${NC}"
+echo -e "${GREEN}║  Logi:     journalctl -fu nimbus-dl                          ║${NC}"
+echo -e "${GREEN}║  Token:    $CONFIG_DIR/dl-token                    ║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  Konfiguracja: $CONFIG_DIR/                        ║${NC}"
 echo -e "${GREEN}║  Dane:         $DATA_DIR/                         ║${NC}"
+echo -e "${GREEN}║  Pobrane:      $DATA_DIR/downloads/               ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  Moduły opcjonalne (zainstaluj jeśli potrzebne):             ║${NC}"
 echo -e "${GREEN}║   apt install nut clamav-daemon libvirt-daemon-system qemu   ║${NC}"
 echo -e "${GREEN}║   apt install postfix dovecot-core novnc websockify           ║${NC}"
+echo -e "${GREEN}║   apt install ffmpeg wget aria2                               ║${NC}"
+echo -e "${GREEN}║   pip3 install yt-dlp                                         ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

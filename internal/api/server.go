@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"nimbus/internal/auth"
 	"nimbus/internal/sys"
 	"os"
@@ -20,9 +22,10 @@ type Config struct {
 }
 
 type Server struct {
-	cfg  Config
-	auth *auth.Manager
-	mux  *http.ServeMux
+	cfg     Config
+	auth    *auth.Manager
+	mux     *http.ServeMux
+	dlProxy *httputil.ReverseProxy // proxy do nimbus-dl
 }
 
 func NewServer(cfg Config) *Server {
@@ -31,11 +34,24 @@ func NewServer(cfg Config) *Server {
 	for _, dir := range []string{"/opt/stacks", "/etc/nas-panel"} {
 		os.MkdirAll(dir, 0755)
 	}
+
+	// Inicjalizuj proxy do nimbus-dl
+	dlTarget, _ := url.Parse("http://127.0.0.1:9797")
+	s.dlProxy = httputil.NewSingleHostReverseProxy(dlTarget)
+	// Gdy nimbus-dl nie odpowiada — zwróć 503 zamiast domyślnego crash
+	s.dlProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		jsonErr(w, "nimbus-dl niedostępny — sprawdź: systemctl status nimbus-dl", http.StatusServiceUnavailable)
+	}
+
 	s.routes()
 	go runStartupTasks()
 	sys.StartMonitor()
 	StartAlertEngine()
 	StartMetricsCollector()
+
+	// nimbus-dl jest zarządzany przez systemd jako osobna usługa (nimbus-dl.service)
+	// server.go tylko proxy-uje żądania do localhost:9797
+
 	return s
 }
 
@@ -151,7 +167,7 @@ func (s *Server) routes() {
 	a("/api/zfs/snap-policy", s.handleZFSSnapPolicy)
 
 	// network
-	a("/api/network", s.handleNetworkOverview)
+	a("/api/network", s.networkOverviewWithRealStates(s.handleNetworkOverview))
 	a("/network/interfaces", s.handleNetworkInterfaces)
 	a("/network/interfaces/details/", s.handleNetworkInterfaceDetail)
 	a("/network/interfaces/add", s.handleNetworkInterfaceAdd)
@@ -308,6 +324,12 @@ func (s *Server) routes() {
 	a("/api/vpn/openvpn", s.handleVPNOpenVPN)
 	a("/api/vpn/openvpn/", s.handleVPNOpenVPNItem)
 	a("/api/vpn/ipsec", s.handleVPNIPSec)
+	a("/api/vpn/install-wireguard", s.handleVPNInstallWireGuard)
+	a("/api/vpn/install-openvpn",   s.handleVPNInstallOpenVPN)
+	a("/api/vpn/install-ipsec",     s.handleVPNInstallIPSec)
+	// Peer CRUD
+	a("/api/vpn/peers", s.handleVPNPeerCreate)
+	a("/api/vpn/peers/", s.handleVPNPeerRouter)
 	a("/api/vpn/ipsec/", s.handleVPNIPSecAction)
 
 	// docker
@@ -569,6 +591,42 @@ func (s *Server) routes() {
 	// ZFS pool create
 	a("/api/zfs/pool/create", s.handleZFSPoolCreate)
 
+	// Download Center — wszystkie żądania proxy-owane do nimbus-dl (:9797)
+	// arr/rss to nowe endpointy dodane w nimbus-dl, nieobecne w starym downloads.go
+	for _, path := range []string{
+		"/api/downloads",
+		"/api/downloads/add",
+		"/api/downloads/cancel",
+		"/api/downloads/delete",
+		"/api/downloads/clear-done",
+		"/api/downloads/retry",
+		"/api/downloads/config",
+		"/api/downloads/config/save",
+		"/api/downloads/tools",
+		"/api/downloads/install-tool",
+		"/api/downloads/cda-config",
+		"/api/downloads/cda-config/save",
+		"/api/downloads/cda-test",
+		"/api/downloads/cda-preview",
+		"/api/downloads/cda-folder",
+		// *arr integracje (nowe)
+		"/api/downloads/arr/services",
+		"/api/downloads/arr/services/save",
+		"/api/downloads/arr/services/test",
+		"/api/downloads/arr/status",
+		"/api/downloads/arr/notify",
+		"/api/downloads/arr/queue",
+		// RSS monitorowanie (nowe)
+		"/api/downloads/rss",
+		"/api/downloads/rss/save",
+		"/api/downloads/rss/refresh",
+		"/api/downloads/rss/history",
+		// Health nimbus-dl
+		"/api/dl/status",
+	} {
+		a(path, s.handleDownloadsProxy)
+	}
+
 	// Package manager
 	a("/api/packages/installed",   s.handlePkgInstalled)
 	a("/api/packages/search",      s.handlePkgSearch)
@@ -817,3 +875,27 @@ func (s *Server) handleModules(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// ─── nimbus-dl proxy ──────────────────────────────────────────────────────────
+
+// handleDownloadsProxy przekazuje wszystkie żądania /api/downloads/* do nimbus-dl.
+// Uwierzytelnienie jest już sprawdzone przez auth_ wrapper, więc dodajemy tylko
+// wewnętrzny token żeby nimbus-dl wiedział że to zaufane żądanie z nimbus.
+func (s *Server) handleDownloadsProxy(w http.ResponseWriter, r *http.Request) {
+	// Token do nimbus-dl — najpierw env, fallback do pliku
+	token := os.Getenv("NIMBUS_DL_TOKEN")
+	if token == "" {
+		if data, err := os.ReadFile("/etc/nas-panel/dl-token"); err == nil {
+			token = strings.TrimSpace(string(data))
+		}
+	}
+	if token != "" {
+		r.Header.Set("X-Dl-Token", token)
+	}
+	// Wydłuż timeout dla streaming endpointów (install-tool)
+	if strings.HasSuffix(r.URL.Path, "/install-tool") {
+		w.Header().Set("X-Accel-Buffering", "no")
+	}
+	s.dlProxy.ServeHTTP(w, r)
+}
+
