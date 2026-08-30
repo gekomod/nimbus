@@ -18,18 +18,21 @@ step()  { echo -e "\n${BOLD}${CYAN}▶ $*${NC}"; }
 PORT=80
 UPDATE=0
 SKIP_BUILD=0
+QUICK_UPDATE=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --port)       PORT="$2"; shift 2 ;;
-        --update)     UPDATE=1; shift ;;
-        --skip-build) SKIP_BUILD=1; shift ;;
+        --port)         PORT="$2"; shift 2 ;;
+        --update)       UPDATE=1; shift ;;
+        --skip-build)   SKIP_BUILD=1; shift ;;
+        --quick-update) QUICK_UPDATE=1; UPDATE=1; SKIP_BUILD=1; shift ;;
         -h|--help)
             echo "Użycie: sudo bash install.sh [opcje]"
             echo "  --port PORT      Port HTTP (domyślnie: 80)"
             echo "  --update         Aktualizuj istniejącą instalację"
-            echo "  --skip-build     Pomiń kompilację (użyj gotowych binaries)"
+            echo "  --skip-build     Pomiń kompilację (użyj gotowych binaries z ZIP)"
+            echo "  --quick-update   Szybka aktualizacja: --update + --skip-build"
             exit 0 ;;
         *) die "Nieznana opcja: $1" ;;
     esac
@@ -52,6 +55,22 @@ echo -e "${CYAN}║  Tryb: Świeża instalacja                                  
 fi
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+
+# ── Weryfikacja katalogu źródłowego ───────────────────────────────────────────
+step "Weryfikacja źródeł"
+info "Katalog instalatora: $SCRIPT_DIR"
+[ -f "$SCRIPT_DIR/go.mod" ]                           || die "Brak go.mod — uruchom install.sh z katalogu ze źródłami"
+[ -f "$SCRIPT_DIR/web/static/entry.jsx" ]             || die "Brak entry.jsx — uszkodzony pakiet instalacyjny"
+[ -f "$SCRIPT_DIR/web/static/screens-routers.jsx" ]  || warn "Brak screens-routers.jsx — moduł Routery może nie działać"
+[ -f "$SCRIPT_DIR/internal/api/routers.go" ]          || warn "Brak routers.go — API routerów może nie działać"
+
+# Pokaż wersję bundla z pliku źródłowego
+if [ -f "$SCRIPT_DIR/web/static/bundle.js" ]; then
+    BUNDLE_SIZE=$(wc -c < "$SCRIPT_DIR/web/static/bundle.js")
+    BUNDLE_HAS_ROUTERS=$(grep -c "RouterManager\|BE6500" "$SCRIPT_DIR/web/static/bundle.js" 2>/dev/null || echo 0)
+    info "bundle.js: ${BUNDLE_SIZE} bajtów, zawiera moduł Routery: $([ "$BUNDLE_HAS_ROUTERS" -gt 0 ] && echo TAK || echo NIE)"
+fi
+ok "Źródła zweryfikowane"
 
 # ── Sprawdź root ───────────────────────────────────────────────────────────────
 [ "$(id -u)" = "0" ] || die "Uruchom jako root: sudo bash install.sh"
@@ -199,6 +218,11 @@ if [ "$SKIP_BUILD" = "0" ]; then
 
     cd "$SCRIPT_DIR"
 
+    info "Usuwanie starych plików bundle (cache-busting)…"
+    rm -f "$SCRIPT_DIR/web/static/bundle.js"
+    rm -f "$SCRIPT_DIR/web/static/bundle.js.gz"
+    ok "Stare bundle.js i bundle.js.gz usunięte"
+
     info "Kompilacja JS (esbuild)…"
     make js
     ok "bundle.js gotowy"
@@ -285,6 +309,14 @@ cp -r "$SCRIPT_DIR/web" "$INSTALL_DIR/"
 # Usuń pozostałości po poprzednich wersjach
 rm -f "$INSTALL_DIR/web/static/live.jsx"
 rm -f "$INSTALL_DIR/web/static/live.go"
+
+# Jeśli bundle.js.gz jest starszy niż bundle.js — usuń .gz żeby serwer użył świeżego JS
+if [ -f "$INSTALL_DIR/web/static/bundle.js" ] && [ -f "$INSTALL_DIR/web/static/bundle.js.gz" ]; then
+    if [ "$INSTALL_DIR/web/static/bundle.js" -nt "$INSTALL_DIR/web/static/bundle.js.gz" ]; then
+        rm -f "$INSTALL_DIR/web/static/bundle.js.gz"
+        info "Usunięto nieaktualny bundle.js.gz (serwer użyje nowego bundle.js)"
+    fi
+fi
 
 ok "Pliki zainstalowane w $INSTALL_DIR"
 

@@ -25,11 +25,13 @@ const MODULES_DEFAULT = {
   network:   { label:'Sieć',                group:'Sieć',          enabled:true,  icon:'🌐', desc:'Interfejsy, WireGuard, DHCP, DNS, UFW' },
   netdetail: { label:'Sieć szczegółowo',    group:'Sieć',          enabled:true,  icon:'📊', desc:'Bandwidth, per-kontener, firewall' },
   servers:   { label:'Serwery zdalne',      group:'Sieć',          enabled:true,  icon:'🖧', desc:'SSH do zdalnych hostów, CPU/RAM/dyski na żywo' },
+  routers:   { label:'Routery',             group:'Sieć',          enabled:true,  icon:'📶', desc:'Xiaomi BE6500 · Cudy LT400 · MikroTik · OpenWrt' },
   // System
   logs:      { label:'Logi systemowe',      group:'System',        enabled:true,  icon:'📋', desc:'journald stream, filtrowanie, eksport' },
   processes: { label:'Procesy',             group:'System',        enabled:true,  icon:'⚙', desc:'Lista wg CPU, kill z potwierdzeniem' },
   smart:     { label:'S.M.A.R.T.',          group:'System',        enabled:true,  icon:'🔍', desc:'Pełny raport dysków, błędy, testy' },
   temps:     { label:'Temperatury',         group:'System',        enabled:true,  icon:'🌡', desc:'CPU, płyta główna, wentylatory, dyski' },
+  ipmi:      { label:'IPMI / Czujniki',     group:'System',        enabled:true,  icon:'🧭', desc:'BMC, zasilanie, SEL — ipmitool' },
   terminal:  { label:'Terminal',            group:'System',        enabled:true,  icon:'💻', desc:'Sesja powłoki bash w przeglądarce' },
   hardware:  { label:'Sprzęt',              group:'System',        enabled:true,  icon:'🔧', desc:'CPU, RAM, PCIe, USB, BIOS' },
   ups:       { label:'UPS',                 group:'System',        enabled:false, icon:'🔋', desc:'NUT, historia napięcia, shutdown kaskadowy' },

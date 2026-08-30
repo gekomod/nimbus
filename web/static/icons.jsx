@@ -128,6 +128,18 @@ const ICONS = {
     <path d="M3 8a2 2 0 012-2h2l2-2h6l2 2h2a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
     <circle cx="12" cy="13" r="4"/>
   </>),
+  router: (<>
+    <rect x="2" y="13" width="20" height="8" rx="1.5"/>
+    <path d="M7 13V8.5a5 5 0 0110 0V13"/>
+    <circle cx="7"  cy="17" r="1" fill="currentColor"/>
+    <circle cx="11" cy="17" r="1" fill="currentColor"/>
+    <path d="M16 16h4M16 18.5h3"/>
+    <circle cx="12" cy="13" r="1.2" fill="currentColor"/>
+  </>),
+  signal: (<>
+    <path d="M1 9a15 15 0 0122 0M5 13a10 10 0 0114 0M9 17a5 5 0 016 0"/>
+    <circle cx="12" cy="20" r="1.2" fill="currentColor"/>
+  </>),
 };
 
 window.Icon = Icon;

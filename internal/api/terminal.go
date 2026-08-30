@@ -1,236 +1,215 @@
 package api
 
-// ── Terminal ──────────────────────────────────────────────────────────────────
-// Zaimplementowane handlery dla /terminal/* oraz uzupełnienia /api/processes
-// Dołącz do pakietu api (osobny plik terminal.go)
+// terminal.go — Prawdziwy terminal PTY przez WebSocket
+//
+// Architektura:
+//   Browser (xterm.js) ←→ WebSocket ←→ Go PTY ←→ /bin/bash
+//
+// Protokół WebSocket (binary frames):
+//   Wejście (browser → server):
+//     byte[0] = '0'  → stdin data (reszta = bajty do zapisu do PTY)
+//     byte[0] = '1'  → resize: byte[1..4] = cols uint16 LE, byte[5..8] = rows uint16 LE
+//   Wyjście (server → browser):
+//     surowe bajty z PTY stdout (xterm.js je renderuje bezpośrednio)
+//
+// Endpointy:
+//   GET  /terminal/ws?cols=N&rows=N   — WebSocket z PTY
+//   GET  /terminal/sessions           — aktywne sesje
+//   GET  /terminal/shells             — dostępne shelle
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 )
 
-// ─── Session store ────────────────────────────────────────────────────────────
+// ── WebSocket upgrader ────────────────────────────────────────────────────────
 
-type termSession struct {
+var termUpgrader = websocket.Upgrader{
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+	CheckOrigin:     func(r *http.Request) bool { return true }, // auth przez middleware
+}
+
+// ── Sesja PTY ─────────────────────────────────────────────────────────────────
+
+type ptySession struct {
 	ID      string    `json:"id"`
 	Shell   string    `json:"shell"`
 	Created time.Time `json:"created"`
-	Cwd     string    `json:"cwd"`
+	PID     int       `json:"pid"`
 }
 
 var (
-	termMu       sync.Mutex
-	termSessions = map[string]*termSession{}
+	ptySessions   = map[string]*ptySession{}
+	ptySessionsMu sync.Mutex
 )
 
-func newSessionID() string {
-	return fmt.Sprintf("sess-%d", time.Now().UnixNano())
-}
+// ── WebSocket handler — serce terminala ──────────────────────────────────────
 
-// POST /terminal/sessions        — utwórz sesję
-// GET  /terminal/sessions        — lista sesji
-func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		var req struct {
-			Shell string `json:"shell"`
+// GET /terminal/ws?cols=220&rows=50&shell=/bin/bash
+func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
+	// Parametry startowe
+	cols := uint16(220)
+	rows := uint16(50)
+	if v := r.URL.Query().Get("cols"); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", new(int)); n == 1 && err == nil {
+			var tmp int
+			fmt.Sscanf(v, "%d", &tmp)
+			cols = uint16(tmp)
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.Shell == "" {
-			req.Shell = "/bin/bash"
-		}
-		// Sprawdź czy shell istnieje
-		if _, err := os.Stat(req.Shell); err != nil {
-			for _, sh := range []string{"/bin/bash", "/bin/sh"} {
-				if _, e := os.Stat(sh); e == nil {
-					req.Shell = sh
-					break
-				}
-			}
-		}
-		cwd, _ := os.Getwd()
-		sess := &termSession{
-			ID:      newSessionID(),
-			Shell:   req.Shell,
-			Created: time.Now(),
-			Cwd:     cwd,
-		}
-		termMu.Lock()
-		termSessions[sess.ID] = sess
-		termMu.Unlock()
-		jsonOK(w, map[string]any{
-			"id":      sess.ID,
-			"shell":   sess.Shell,
-			"cwd":     sess.Cwd,
-			"created": sess.Created,
-		})
-
-	case http.MethodGet:
-		termMu.Lock()
-		list := make([]any, 0, len(termSessions))
-		for _, s := range termSessions {
-			list = append(list, s)
-		}
-		termMu.Unlock()
-		jsonOK(w, map[string]any{"sessions": list})
-
-	default:
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// /terminal/sessions/{id}         — GET info, DELETE zakończ
-// /terminal/sessions/{id}/execute — POST wykonaj polecenie
-func (s *Server) handleTerminalSessionItem(w http.ResponseWriter, r *http.Request) {
-	// Wyciągnij id i opcjonalny sub-path
-	suffix := pathSuffix(r, "/terminal/sessions/")
-	parts := strings.SplitN(suffix, "/", 2)
-	id := parts[0]
-	sub := ""
-	if len(parts) > 1 {
-		sub = parts[1]
+	if v := r.URL.Query().Get("rows"); v != "" {
+		var tmp int
+		fmt.Sscanf(v, "%d", &tmp)
+		rows = uint16(tmp)
 	}
 
-	// Pobierz lub utwórz sesję
-	termMu.Lock()
-	sess := termSessions[id]
-	if sess == nil && sub == "execute" {
-		// Auto-utwórz jeśli jeszcze nie ma
-		cwd, _ := os.Getwd()
-		sess = &termSession{
-			ID:      id,
-			Shell:   "/bin/bash",
-			Created: time.Now(),
-			Cwd:     cwd,
-		}
-		termSessions[id] = sess
+	shell := r.URL.Query().Get("shell")
+	if shell == "" {
+		shell = os.Getenv("SHELL")
 	}
-	termMu.Unlock()
+	if shell == "" {
+		for _, sh := range []string{"/bin/bash", "/bin/sh", "/usr/bin/bash"} {
+			if _, err := os.Stat(sh); err == nil {
+				shell = sh
+				break
+			}
+		}
+	}
 
-	switch sub {
-	case "execute":
-		if r.Method != http.MethodPost {
-			jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Command string `json:"command"`
-			Cwd     string `json:"cwd"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.Command == "" {
-			jsonOK(w, map[string]any{"output": "", "exit_code": 0})
-			return
-		}
+	// Upgrade do WebSocket
+	conn, err := termUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("terminal ws upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
 
-		execCwd := "/"
-		if sess != nil && sess.Cwd != "" {
-			execCwd = sess.Cwd
-		}
-		if req.Cwd != "" {
-			execCwd = req.Cwd
-		}
+	// Uruchom shell w PTY
+	cmd := exec.Command(shell)
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		fmt.Sprintf("COLUMNS=%d", cols),
+		fmt.Sprintf("LINES=%d", rows),
+		"COLORTERM=truecolor",
+		"HOME=/root",
+		"HISTCONTROL=ignoreboth",
+	)
 
-		// Obsłuż `cd` specjalnie — zmień Cwd sesji
-		if strings.HasPrefix(strings.TrimSpace(req.Command), "cd ") {
-			target := strings.TrimSpace(req.Command[3:])
-			if target == "" || target == "~" {
-				home, _ := os.UserHomeDir()
-				if home == "" {
-					home = "/root"
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Cols: cols,
+		Rows: rows,
+	})
+	if err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("\r\nBłąd uruchomienia PTY: "+err.Error()+"\r\n"))
+		return
+	}
+	defer func() {
+		ptmx.Close()
+		cmd.Process.Kill()
+	}()
+
+	// Zarejestruj sesję
+	sessID := fmt.Sprintf("pty-%d", time.Now().UnixNano())
+	sess := &ptySession{
+		ID:      sessID,
+		Shell:   shell,
+		Created: time.Now(),
+		PID:     cmd.Process.Pid,
+	}
+	ptySessionsMu.Lock()
+	ptySessions[sessID] = sess
+	ptySessionsMu.Unlock()
+	defer func() {
+		ptySessionsMu.Lock()
+		delete(ptySessions, sessID)
+		ptySessionsMu.Unlock()
+	}()
+
+	// ── Goroutine: PTY → WebSocket ────────────────────────────────────────
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err2 := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err2 != nil {
+					return
 				}
-				target = home
 			}
-			if !strings.HasPrefix(target, "/") {
-				target = execCwd + "/" + target
-			}
-			// Wyczyść ścieżkę
-			cmd := exec.Command("realpath", target)
-			out, err := cmd.Output()
-			if err == nil {
-				target = strings.TrimSpace(string(out))
-			}
-			if stat, err := os.Stat(target); err == nil && stat.IsDir() {
-				if sess != nil {
-					termMu.Lock()
-					sess.Cwd = target
-					termMu.Unlock()
-				}
-				jsonOK(w, map[string]any{"output": "", "exit_code": 0, "cwd": target})
-			} else {
-				jsonOK(w, map[string]any{
-					"output":    fmt.Sprintf("cd: %s: Nie ma takiego pliku ani katalogu\n", target),
-					"exit_code": 1,
-					"cwd":       execCwd,
-				})
-			}
-			return
-		}
-
-		// Wykonaj polecenie z timeout 30s
-		ctx := r.Context()
-		cmd := exec.CommandContext(ctx, "/bin/bash", "-c", req.Command)
-		cmd.Dir = execCwd
-		cmd.Env = append(os.Environ(),
-			"TERM=xterm-256color",
-			"HOME=/root",
-			"LANG=pl_PL.UTF-8",
-			"LC_ALL=pl_PL.UTF-8",
-		)
-
-		out, err := cmd.CombinedOutput()
-		exitCode := 0
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				exitCode = ee.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
-
-		// Zaktualizuj cwd po wykonaniu (dla poleceń które zmieniają katalog przez subshell)
-		newCwd := execCwd
-		if sess != nil {
-			termMu.Lock()
-			newCwd = sess.Cwd
-			termMu.Unlock()
-		}
-
-		jsonOK(w, map[string]any{
-			"output":    string(out),
-			"exit_code": exitCode,
-			"cwd":       newCwd,
-		})
-
-	case "":
-		switch r.Method {
-		case http.MethodGet:
-			if sess == nil {
-				jsonErr(w, "session not found", http.StatusNotFound)
+			if err != nil {
 				return
 			}
-			jsonOK(w, sess)
-		case http.MethodDelete:
-			termMu.Lock()
-			delete(termSessions, id)
-			termMu.Unlock()
-			jsonOK(w, map[string]string{"status": "ok"})
+		}
+	}()
+
+	// ── Pętla: WebSocket → PTY ────────────────────────────────────────────
+	conn.SetReadDeadline(time.Time{}) // brak timeout na read
+	for {
+		select {
+		case <-done:
+			return
 		default:
-			jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 
-	default:
-		jsonErr(w, "unknown sub-path", http.StatusNotFound)
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if len(msg) == 0 {
+			continue
+		}
+
+		switch msg[0] {
+		case '0':
+			// Dane wejściowe → stdin PTY
+			ptmx.Write(msg[1:])
+
+		case '1':
+			// Resize: cols uint16 LE + rows uint16 LE
+			if len(msg) >= 5 {
+				newCols := binary.LittleEndian.Uint16(msg[1:3])
+				newRows := binary.LittleEndian.Uint16(msg[3:5])
+				if newCols > 0 && newRows > 0 {
+					pty.Setsize(ptmx, &pty.Winsize{
+						Cols: newCols,
+						Rows: newRows,
+					})
+				}
+			}
+		}
 	}
 }
 
-// GET /terminal/shells — dostępne shelle
+// ── Pozostałe handlery ────────────────────────────────────────────────────────
+
+func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) {
+	ptySessionsMu.Lock()
+	list := make([]*ptySession, 0, len(ptySessions))
+	for _, sess := range ptySessions {
+		list = append(list, sess)
+	}
+	ptySessionsMu.Unlock()
+	jsonOK(w, map[string]any{"sessions": list, "count": len(list)})
+}
+
+func (s *Server) handleTerminalSessionItem(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleTerminalShells(w http.ResponseWriter, r *http.Request) {
 	data, _ := os.ReadFile("/etc/shells")
 	var shells []string
@@ -248,25 +227,26 @@ func (s *Server) handleTerminalShells(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"shells": shells})
 }
 
-// GET/POST /terminal/preferences
 func (s *Server) handleTerminalPreferences(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		jsonOK(w, map[string]string{"status": "ok"})
+		return
+	}
 	jsonOK(w, map[string]any{
-		"font_size":   14,
-		"theme":       "dark",
-		"scrollback":  1000,
-		"bell":        false,
+		"font_size":  14,
+		"theme":      "dark",
+		"scrollback": 5000,
+		"bell":       false,
 	})
 }
 
-// GET /terminal/stats
 func (s *Server) handleTerminalStats(w http.ResponseWriter, r *http.Request) {
-	termMu.Lock()
-	count := len(termSessions)
-	termMu.Unlock()
+	ptySessionsMu.Lock()
+	count := len(ptySessions)
+	ptySessionsMu.Unlock()
 	jsonOK(w, map[string]any{"active_sessions": count})
 }
 
-// GET /terminal/system-info
 func (s *Server) handleTerminalSysInfo(w http.ResponseWriter, r *http.Request) {
 	hostname, _ := os.Hostname()
 	kernel, _ := runCmd("uname", "-r")
@@ -279,7 +259,6 @@ func (s *Server) handleTerminalSysInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /terminal/ls?path=...
 func (s *Server) handleTerminalLS(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -297,27 +276,34 @@ func (s *Server) handleTerminalLS(w http.ResponseWriter, r *http.Request) {
 		if info != nil {
 			size = info.Size()
 		}
-		files = append(files, map[string]any{
-			"name":  e.Name(),
-			"dir":   e.IsDir(),
-			"size":  size,
-		})
+		files = append(files, map[string]any{"name": e.Name(), "dir": e.IsDir(), "size": size})
 	}
 	jsonOK(w, map[string]any{"path": path, "files": files})
 }
 
-// POST /terminal/cleanup — usuń stare sesje
 func (s *Server) handleTerminalCleanup(w http.ResponseWriter, r *http.Request) {
-	termMu.Lock()
-	cutoff := time.Now().Add(-2 * time.Hour)
-	removed := 0
-	for id, sess := range termSessions {
-		if sess.Created.Before(cutoff) {
-			delete(termSessions, id)
-			removed++
-		}
-	}
-	termMu.Unlock()
-	jsonOK(w, map[string]any{"removed": removed})
+	jsonOK(w, map[string]any{"removed": 0})
 }
 
+// handleTerminalExecute zachowane dla kompatybilności (stary frontend)
+func (s *Server) handleTerminalExecute(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Command string `json:"command"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Command == "" {
+		jsonOK(w, map[string]any{"output": "", "exit_code": 0})
+		return
+	}
+	cmd := exec.Command("/bin/bash", "-c", req.Command)
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			code = 1
+		}
+	}
+	jsonOK(w, map[string]any{"output": string(out), "exit_code": code})
+}

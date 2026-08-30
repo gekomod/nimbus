@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"net/http"
@@ -465,51 +466,66 @@ func (s *Server) handleDockerComposeCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Sanitize name — tylko bezpieczne znaki
-	safeName := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '-'
-	}, req.Name)
-	if safeName == "" {
-		jsonErr(w, "invalid stack name", http.StatusBadRequest)
-		return
-	}
-
-	// Upewnij się że /opt/stacks istnieje
-	if err := os.MkdirAll("/opt/stacks", 0755); err != nil {
-		jsonErr(w, "cannot create /opt/stacks: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	dir := "/opt/stacks/" + safeName
-	file := dir + "/docker-compose.yml"
-
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		jsonErr(w, "cannot create stack dir "+dir+": "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	if req.Content == "" {
 		req.Content = "services:\n  app:\n    image: nginx:alpine\n    restart: unless-stopped\n"
 	}
 
-	if err := writeFile(file, req.Content); err != nil {
-		jsonErr(w, "cannot write file "+file+": "+err.Error(), http.StatusInternalServerError)
+	file, out, err := createComposeStack(req.Name, req.Content, req.Deploy)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if req.Deploy {
-		out, err := runCmd("docker", "compose", "-f", file, "up", "-d")
-		if err != nil {
-			jsonErr(w, out, http.StatusInternalServerError)
-			return
-		}
 		jsonOK(w, map[string]any{"status": "ok", "file": file, "output": out})
 		return
 	}
-	jsonOK(w, map[string]any{"status": "ok", "file": file, "name": safeName})
+	jsonOK(w, map[string]any{"status": "ok", "file": file, "name": sanitizeStackName(req.Name)})
+}
+
+// sanitizeStackName oczyszcza nazwę stosu do bezpiecznych znaków — używane
+// zarówno przy tworzeniu stosu od zera, jak i przy instalacji z szablonu.
+func sanitizeStackName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, name)
+}
+
+// createComposeStack zapisuje docker-compose.yml pod /opt/stacks/<name>/
+// i opcjonalnie od razu go uruchamia ("docker compose up -d"). Wspólna
+// logika dla "Nowy stos" (ręczny YAML) oraz instalacji z szablonu.
+func createComposeStack(name, content string, deploy bool) (file string, output string, err error) {
+	safeName := sanitizeStackName(name)
+	if safeName == "" {
+		return "", "", errors.New("invalid stack name")
+	}
+
+	if err := os.MkdirAll("/opt/stacks", 0755); err != nil {
+		return "", "", errors.New("cannot create /opt/stacks: " + err.Error())
+	}
+
+	dir := "/opt/stacks/" + safeName
+	file = dir + "/docker-compose.yml"
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", "", errors.New("cannot create stack dir " + dir + ": " + err.Error())
+	}
+
+	if err := writeFile(file, content); err != nil {
+		return "", "", errors.New("cannot write file " + file + ": " + err.Error())
+	}
+
+	if deploy {
+		out, runErr := runCmd("docker", "compose", "-f", file, "up", "-d")
+		if runErr != nil {
+			return file, out, errors.New(out)
+		}
+		return file, out, nil
+	}
+	return file, "", nil
 }
 
 func (s *Server) handleDockerComposeDeploy(w http.ResponseWriter, r *http.Request) {
@@ -924,5 +940,352 @@ func (s *Server) handleDockerExec(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"output":    out,
 		"exit_code": exitCode,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Docker Templates — gotowe szablony aplikacji do zainstalowania jednym klikiem
+// GET  /services/docker/templates          — lista dostępnych szablonów
+// POST /services/docker/templates/install  — zapisuje docker-compose.yml
+//      wygenerowany z szablonu (podstawiając zmienne) i wdraża go
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TemplateVar — pojedyncze pole konfiguracyjne szablonu (np. port, ścieżka).
+// Placeholder w polu Compose ma postać {{KLUCZ}} i jest podmieniany przy
+// instalacji na wartość podaną przez użytkownika (albo Default, jeśli pusta).
+type TemplateVar struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Default string `json:"default"`
+}
+
+// DockerTemplate — definicja gotowej aplikacji do zainstalowania.
+type DockerTemplate struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Category    string        `json:"category"`
+	Icon        string        `json:"icon"`
+	Compose     string        `json:"compose"`
+	Vars        []TemplateVar `json:"vars"`
+}
+
+// dockerTemplates — wbudowana biblioteka szablonów. Każdy wpis to kompletny
+// docker-compose.yml z placeholderami {{...}} podmienianymi przy instalacji.
+var dockerTemplates = []DockerTemplate{
+	{
+		ID: "portainer", Name: "Portainer", Category: "Zarządzanie", Icon: "settings",
+		Description: "Graficzny panel do zarządzania Dockerem (kontenery, obrazy, sieci) przez przeglądarkę.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "9000"},
+		},
+		Compose: "services:\n" +
+			"  portainer:\n" +
+			"    image: portainer/portainer-ce:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:9000\"\n" +
+			"    volumes:\n" +
+			"      - /var/run/docker.sock:/var/run/docker.sock\n" +
+			"      - portainer_data:/data\n" +
+			"volumes:\n" +
+			"  portainer_data:\n",
+	},
+	{
+		ID: "jellyfin", Name: "Jellyfin", Category: "Multimedia", Icon: "play",
+		Description: "Serwer multimediów (filmy, seriale, muzyka) ze streamingiem do dowolnego urządzenia.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "8096"},
+			{Key: "MEDIA_PATH", Label: "Ścieżka do biblioteki mediów", Default: "/srv/media"},
+			{Key: "TZ", Label: "Strefa czasowa", Default: "Europe/Warsaw"},
+		},
+		Compose: "services:\n" +
+			"  jellyfin:\n" +
+			"    image: jellyfin/jellyfin:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - TZ={{TZ}}\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:8096\"\n" +
+			"    volumes:\n" +
+			"      - jellyfin_config:/config\n" +
+			"      - jellyfin_cache:/cache\n" +
+			"      - {{MEDIA_PATH}}:/media\n" +
+			"volumes:\n" +
+			"  jellyfin_config:\n" +
+			"  jellyfin_cache:\n",
+	},
+	{
+		ID: "nextcloud", Name: "Nextcloud", Category: "Pliki", Icon: "folder",
+		Description: "Prywatna chmura plików — synchronizacja, kalendarz, kontakty (jak własny Dropbox).",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "8080"},
+			{Key: "DATA_PATH", Label: "Ścieżka do danych", Default: "/srv/nextcloud"},
+		},
+		Compose: "services:\n" +
+			"  nextcloud:\n" +
+			"    image: nextcloud:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:80\"\n" +
+			"    volumes:\n" +
+			"      - {{DATA_PATH}}:/var/www/html\n",
+	},
+	{
+		ID: "pihole", Name: "Pi-hole", Category: "Sieć", Icon: "shield",
+		Description: "Blokowanie reklam i trackerów w całej sieci na poziomie DNS.",
+		Vars: []TemplateVar{
+			{Key: "WEB_PORT", Label: "Port panelu WWW", Default: "8081"},
+			{Key: "PASSWORD", Label: "Hasło do panelu", Default: "changeme"},
+			{Key: "TZ", Label: "Strefa czasowa", Default: "Europe/Warsaw"},
+		},
+		Compose: "services:\n" +
+			"  pihole:\n" +
+			"    image: pihole/pihole:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - TZ={{TZ}}\n" +
+			"      - WEBPASSWORD={{PASSWORD}}\n" +
+			"    ports:\n" +
+			"      - \"53:53/tcp\"\n" +
+			"      - \"53:53/udp\"\n" +
+			"      - \"{{WEB_PORT}}:80\"\n" +
+			"    volumes:\n" +
+			"      - pihole_etc:/etc/pihole\n" +
+			"      - pihole_dnsmasq:/etc/dnsmasq.d\n" +
+			"    cap_add:\n" +
+			"      - NET_ADMIN\n" +
+			"volumes:\n" +
+			"  pihole_etc:\n" +
+			"  pihole_dnsmasq:\n",
+	},
+	{
+		ID: "vaultwarden", Name: "Vaultwarden", Category: "Bezpieczeństwo", Icon: "key",
+		Description: "Lekki, samodzielnie hostowany serwer haseł kompatybilny z klientami Bitwarden.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "8082"},
+		},
+		Compose: "services:\n" +
+			"  vaultwarden:\n" +
+			"    image: vaultwarden/server:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:80\"\n" +
+			"    volumes:\n" +
+			"      - vaultwarden_data:/data\n" +
+			"volumes:\n" +
+			"  vaultwarden_data:\n",
+	},
+	{
+		ID: "homeassistant", Name: "Home Assistant", Category: "Automatyka domowa", Icon: "settings",
+		Description: "Centrum automatyki domowej — integracja czujników, urządzeń IoT i scenariuszy.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "8123"},
+			{Key: "TZ", Label: "Strefa czasowa", Default: "Europe/Warsaw"},
+		},
+		Compose: "services:\n" +
+			"  homeassistant:\n" +
+			"    image: ghcr.io/home-assistant/home-assistant:stable\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - TZ={{TZ}}\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:8123\"\n" +
+			"    volumes:\n" +
+			"      - homeassistant_config:/config\n" +
+			"volumes:\n" +
+			"  homeassistant_config:\n",
+	},
+	{
+		ID: "qbittorrent", Name: "qBittorrent", Category: "Multimedia", Icon: "download",
+		Description: "Klient torrent z panelem WWW, przydatny do pobierania w tle na serwerze.",
+		Vars: []TemplateVar{
+			{Key: "WEB_PORT", Label: "Port panelu WWW", Default: "8083"},
+			{Key: "TORRENT_PORT", Label: "Port ruchu torrent", Default: "6881"},
+			{Key: "DOWNLOADS_PATH", Label: "Ścieżka pobierania", Default: "/srv/downloads"},
+			{Key: "TZ", Label: "Strefa czasowa", Default: "Europe/Warsaw"},
+		},
+		Compose: "services:\n" +
+			"  qbittorrent:\n" +
+			"    image: lscr.io/linuxserver/qbittorrent:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - TZ={{TZ}}\n" +
+			"      - WEBUI_PORT={{WEB_PORT}}\n" +
+			"    ports:\n" +
+			"      - \"{{WEB_PORT}}:{{WEB_PORT}}\"\n" +
+			"      - \"{{TORRENT_PORT}}:{{TORRENT_PORT}}\"\n" +
+			"      - \"{{TORRENT_PORT}}:{{TORRENT_PORT}}/udp\"\n" +
+			"    volumes:\n" +
+			"      - qbittorrent_config:/config\n" +
+			"      - {{DOWNLOADS_PATH}}:/downloads\n" +
+			"volumes:\n" +
+			"  qbittorrent_config:\n",
+	},
+	{
+		ID: "uptimekuma", Name: "Uptime Kuma", Category: "Monitoring", Icon: "thermometer",
+		Description: "Monitorowanie dostępności usług i stron z powiadomieniami przy awarii.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "3001"},
+		},
+		Compose: "services:\n" +
+			"  uptime-kuma:\n" +
+			"    image: louislam/uptime-kuma:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:3001\"\n" +
+			"    volumes:\n" +
+			"      - uptimekuma_data:/app/data\n" +
+			"volumes:\n" +
+			"  uptimekuma_data:\n",
+	},
+	{
+		ID: "nginx-proxy-manager", Name: "Nginx Proxy Manager", Category: "Sieć", Icon: "globe",
+		Description: "Reverse proxy z certyfikatami SSL (Let's Encrypt) zarządzany przez panel WWW.",
+		Vars: []TemplateVar{
+			{Key: "ADMIN_PORT", Label: "Port panelu admina", Default: "81"},
+			{Key: "HTTP_PORT", Label: "Port HTTP", Default: "80"},
+			{Key: "HTTPS_PORT", Label: "Port HTTPS", Default: "443"},
+		},
+		Compose: "services:\n" +
+			"  npm:\n" +
+			"    image: jc21/nginx-proxy-manager:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{HTTP_PORT}}:80\"\n" +
+			"      - \"{{HTTPS_PORT}}:443\"\n" +
+			"      - \"{{ADMIN_PORT}}:81\"\n" +
+			"    volumes:\n" +
+			"      - npm_data:/data\n" +
+			"      - npm_letsencrypt:/etc/letsencrypt\n" +
+			"volumes:\n" +
+			"  npm_data:\n" +
+			"  npm_letsencrypt:\n",
+	},
+	{
+		ID: "grafana", Name: "Grafana", Category: "Monitoring", Icon: "log",
+		Description: "Dashboardy i wizualizacja metryk — najczęściej łączony z Prometheusem lub InfluxDB.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "3000"},
+		},
+		Compose: "services:\n" +
+			"  grafana:\n" +
+			"    image: grafana/grafana:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:3000\"\n" +
+			"    volumes:\n" +
+			"      - grafana_data:/var/lib/grafana\n" +
+			"volumes:\n" +
+			"  grafana_data:\n",
+	},
+	{
+		ID: "watchtower", Name: "Watchtower", Category: "Zarządzanie", Icon: "refresh",
+		Description: "Automatycznie aktualizuje obrazy uruchomionych kontenerów, gdy pojawi się nowa wersja.",
+		Vars: []TemplateVar{
+			{Key: "INTERVAL", Label: "Interwał sprawdzania (sekundy)", Default: "86400"},
+		},
+		Compose: "services:\n" +
+			"  watchtower:\n" +
+			"    image: containrrr/watchtower:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - WATCHTOWER_POLL_INTERVAL={{INTERVAL}}\n" +
+			"      - WATCHTOWER_CLEANUP=true\n" +
+			"    volumes:\n" +
+			"      - /var/run/docker.sock:/var/run/docker.sock\n",
+	},
+	{
+		ID: "code-server", Name: "code-server", Category: "Deweloperskie", Icon: "terminal",
+		Description: "VS Code działający w przeglądarce — kodowanie zdalnie z dowolnego urządzenia.",
+		Vars: []TemplateVar{
+			{Key: "PORT", Label: "Port WWW", Default: "8443"},
+			{Key: "PASSWORD", Label: "Hasło logowania", Default: "changeme"},
+			{Key: "PROJECTS_PATH", Label: "Ścieżka do projektów", Default: "/srv/projects"},
+		},
+		Compose: "services:\n" +
+			"  code-server:\n" +
+			"    image: lscr.io/linuxserver/code-server:latest\n" +
+			"    restart: unless-stopped\n" +
+			"    environment:\n" +
+			"      - PASSWORD={{PASSWORD}}\n" +
+			"    ports:\n" +
+			"      - \"{{PORT}}:8443\"\n" +
+			"    volumes:\n" +
+			"      - codeserver_config:/config\n" +
+			"      - {{PROJECTS_PATH}}:/config/workspace\n" +
+			"volumes:\n" +
+			"  codeserver_config:\n",
+	},
+}
+
+// GET /services/docker/templates — lista dostępnych szablonów
+func (s *Server) handleDockerTemplates(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]any{"templates": dockerTemplates})
+}
+
+// POST /services/docker/templates/install
+// Body: {"id":"jellyfin","name":"jellyfin","vars":{"PORT":"8096",...},"deploy":true}
+func (s *Server) handleDockerTemplateInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID     string            `json:"id"`
+		Name   string            `json:"name"`
+		Vars   map[string]string `json:"vars"`
+		Deploy *bool             `json:"deploy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		jsonErr(w, "id required", http.StatusBadRequest)
+		return
+	}
+
+	var tpl *DockerTemplate
+	for i := range dockerTemplates {
+		if dockerTemplates[i].ID == req.ID {
+			tpl = &dockerTemplates[i]
+			break
+		}
+	}
+	if tpl == nil {
+		jsonErr(w, "nieznany szablon: "+req.ID, http.StatusNotFound)
+		return
+	}
+
+	stackName := req.Name
+	if stackName == "" {
+		stackName = tpl.ID
+	}
+
+	// Podstaw zmienne — brakujące pola wypełnij domyślnymi wartościami szablonu
+	content := tpl.Compose
+	for _, v := range tpl.Vars {
+		val := ""
+		if req.Vars != nil {
+			val = strings.TrimSpace(req.Vars[v.Key])
+		}
+		if val == "" {
+			val = v.Default
+		}
+		content = strings.ReplaceAll(content, "{{"+v.Key+"}}", val)
+	}
+
+	deploy := true // domyślnie od razu uruchamiamy zainstalowaną aplikację
+	if req.Deploy != nil {
+		deploy = *req.Deploy
+	}
+
+	file, out, err := createComposeStack(stackName, content, deploy)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"status": "ok",
+		"name":   sanitizeStackName(stackName),
+		"file":   file,
+		"output": out,
 	})
 }

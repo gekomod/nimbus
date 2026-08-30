@@ -733,6 +733,182 @@ button, input, select, textarea { font: inherit; color: inherit; }
   letter-spacing: 0.05em;
 }
 
+
+/* ── Bay / Disk Tray Chassis (Zatoki LED) ──────────────────────────────────── */
+.bay-chassis {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 8px;
+  overflow-x: auto;
+}
+
+.bay-chassis-cap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 2px;
+  min-width: 24px;
+  flex-shrink: 0;
+}
+
+.bay-chassis-brand {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.bay-chassis-btn {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  flex-shrink: 0;
+  display: block;
+}
+.bay-chassis-btn.uid {
+  background: oklch(0.55 0.18 255);
+  box-shadow: 0 0 5px oklch(0.55 0.18 255 / 60%);
+}
+
+.bay-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.bay-row {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+}
+
+/* Pojedyncza zatoka */
+.bay-tray {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  width: 52px;
+  height: 72px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  cursor: pointer;
+  padding: 4px 4px 5px;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.bay-tray:hover {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 6%, var(--bg-2));
+}
+.bay-tray.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, var(--bg-2));
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 30%, transparent);
+}
+.bay-tray.empty {
+  opacity: 0.4;
+  background: var(--bg-1);
+}
+.bay-tray.empty:hover {
+  opacity: 0.65;
+}
+
+/* Rączka zatoki */
+.bay-tray-handle {
+  width: 36px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  margin-bottom: 2px;
+  flex-shrink: 0;
+}
+.bay-tray.selected .bay-tray-handle,
+.bay-tray:hover .bay-tray-handle {
+  background: color-mix(in oklch, var(--accent) 15%, var(--bg-3));
+}
+
+/* Numer zatoki */
+.bay-tray-num {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+  line-height: 1;
+  letter-spacing: .04em;
+}
+.bay-tray.selected .bay-tray-num {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Panel LED w górnej części zatoki */
+.bay-tray-leds {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+}
+
+.bay-tray-led {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  transition: background .25s, box-shadow .25s;
+}
+/* Aktywność (zielony) */
+.bay-tray-led.act {
+  background: var(--ok);
+  border-color: var(--ok);
+  box-shadow: 0 0 5px color-mix(in oklch, var(--ok) 70%, transparent);
+  animation: _led-blink 2.2s ease-in-out infinite;
+}
+/* Locate (niebieski) */
+.bay-tray-led.locate {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 7px color-mix(in oklch, var(--accent) 80%, transparent);
+  animation: _led-pulse .9s ease-in-out infinite alternate;
+}
+/* Fault (czerwony) */
+.bay-tray-led.fault {
+  background: var(--err);
+  border-color: var(--err);
+  box-shadow: 0 0 7px color-mix(in oklch, var(--err) 80%, transparent);
+  animation: _led-pulse .4s ease-in-out infinite alternate;
+}
+
+@keyframes _led-blink {
+  0%, 90%, 100% { opacity: 1; }
+  95% { opacity: .3; }
+}
+@keyframes _led-pulse {
+  from { opacity: .55; }
+  to   { opacity: 1;   }
+}
+
 /* ===== Process tree highlights ===== */
 .tree-row { font-family: var(--font-mono); }
 

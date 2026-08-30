@@ -7,6 +7,7 @@ const useStore = window.useStore;
 const storeSet = window.storeSet;
 const Icon = window.Icon;
 const Modal = window.Modal;
+const Field = window.Field;
 const LineChart = window.LineChart;
 const genSeries = window.genSeries;
 const Logs = window.Logs;
@@ -740,6 +741,230 @@ const ContainerEditDialog = ({ c, onClose, onSaved }) => {
   );
 };
 
+// ── NewContainerDialog — formularz tworzenia nowego kontenera ───────────────
+const NewContainerDialog = ({ onClose, onAdd }) => {
+  const [image,    setImage]    = React.useState('');
+  const [name,     setName]     = React.useState('');
+  const [ports,    setPorts]    = React.useState('');
+  const [volumes,  setVolumes]  = React.useState('');
+  const [env,      setEnv]      = React.useState('');
+  const [network,  setNetwork]  = React.useState('');
+  const [restart,  setRestart]  = React.useState('unless-stopped');
+  const [creating, setCreating] = React.useState(false);
+  const [err,      setErr]      = React.useState('');
+
+  const parseLines = (s) => s.split('\n').map(l => l.trim()).filter(Boolean);
+
+  const submit = async () => {
+    if (!image.trim()) { setErr('Podaj obraz (np. nginx:latest)'); return; }
+    setCreating(true);
+    setErr('');
+    try {
+      const body = {
+        Image:   image.trim(),
+        Name:    name.trim(),
+        Network: network.trim(),
+        Restart: restart,
+        Ports:   parseLines(ports),
+        Volumes: parseLines(volumes),
+        Env:     parseLines(env),
+      };
+      const r = await fetch('/services/docker/container/create', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setErr(d.error || d.output || `Błąd tworzenia kontenera (HTTP ${r.status})`);
+        return;
+      }
+      window.toast?.success('Kontener utworzony');
+      onAdd && onAdd({ name: name.trim() || image.trim(), image: image.trim(), ports: ports.trim() });
+      onClose();
+    } catch (e) {
+      setErr(e.message || 'Błąd sieci');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const fieldStyle = {
+    width: '100%', background: 'var(--bg-2)', border: '1px solid var(--line-strong)',
+    borderRadius: 6, padding: '7px 10px', color: 'var(--fg)',
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', outline: 'none',
+  };
+  const labelStyle = { fontSize: 'var(--fs-xs)', color: 'var(--fg-dim)', marginBottom: 4, display: 'block' };
+
+  return (
+    <Modal title="Nowy kontener" sub="docker run" onClose={onClose} width={520}
+      footer={<div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
+        <button className="btn sm" onClick={onClose} disabled={creating}>Anuluj</button>
+        <button className="btn sm primary" onClick={submit} disabled={creating || !image.trim()}>
+          {creating ? 'Tworzenie…' : 'Utwórz i uruchom'}
+        </button>
+      </div>}
+    >
+      <div className="col" style={{ gap: 12 }}>
+        {err && (
+          <div style={{ background: 'color-mix(in oklch, var(--err) 12%, var(--bg-2))',
+            border: '1px solid var(--err)', borderRadius: 6, padding: '8px 10px',
+            fontSize: 'var(--fs-xs)', color: 'var(--err)' }}>
+            {err}
+          </div>
+        )}
+
+        <div>
+          <label style={labelStyle}>Obraz *</label>
+          <input style={fieldStyle} value={image} onChange={e => setImage(e.target.value)}
+            placeholder="np. nginx:latest" autoFocus />
+        </div>
+
+        <div>
+          <label style={labelStyle}>Nazwa kontenera</label>
+          <input style={fieldStyle} value={name} onChange={e => setName(e.target.value)}
+            placeholder="opcjonalnie — auto jeśli puste" />
+        </div>
+
+        <div className="row gap-sm">
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Sieć</label>
+            <input style={fieldStyle} value={network} onChange={e => setNetwork(e.target.value)}
+              placeholder="bridge (domyślnie)" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Restart policy</label>
+            <select style={fieldStyle} value={restart} onChange={e => setRestart(e.target.value)}>
+              <option value="no">no</option>
+              <option value="on-failure">on-failure</option>
+              <option value="unless-stopped">unless-stopped</option>
+              <option value="always">always</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label style={labelStyle}>Porty (jeden na linię, np. 8080:80)</label>
+          <textarea style={{ ...fieldStyle, resize: 'vertical', minHeight: 50 }} rows={2}
+            value={ports} onChange={e => setPorts(e.target.value)} placeholder={'8080:80\n443:443'} />
+        </div>
+
+        <div>
+          <label style={labelStyle}>Woluminy (jeden na linię, np. /dane:/data)</label>
+          <textarea style={{ ...fieldStyle, resize: 'vertical', minHeight: 50 }} rows={2}
+            value={volumes} onChange={e => setVolumes(e.target.value)} placeholder={'/mnt/dane:/data\nnazwa_woluminu:/config'} />
+        </div>
+
+        <div>
+          <label style={labelStyle}>Zmienne środowiskowe (jedna na linię, np. KEY=value)</label>
+          <textarea style={{ ...fieldStyle, resize: 'vertical', minHeight: 50 }} rows={2}
+            value={env} onChange={e => setEnv(e.target.value)} placeholder={'PUID=1000\nTZ=Europe/Warsaw'} />
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// ── MoreMenu — dodatkowe akcje kontenera ("...") ────────────────────────────
+const MoreMenu = ({ c, onAction, onClose }) => {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [onClose]);
+
+  const copyId = () => {
+    navigator.clipboard?.writeText(c.id).then(() => window.toast?.success('ID skopiowane'));
+    onClose();
+  };
+
+  const items = [
+    { label: 'Edytuj',        icon: 'edit',   action: () => onAction(c.id, 'edit') },
+    c.state === 'running'
+      ? { label: 'Pauza',      icon: 'pause',  action: () => onAction(c.id, 'pause') }
+      : null,
+    { label: 'Kopiuj ID',     icon: null,     action: copyId },
+    { label: '─' },
+    { label: 'Usuń',          icon: 'trash',  danger: true, action: () => onAction(c.id, 'remove') },
+  ].filter(Boolean);
+
+  return (
+    <div ref={ref} style={{ position:'absolute', right:0, top:'100%', zIndex:500, marginTop:4,
+      background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:7,
+      boxShadow:'0 8px 28px rgba(0,0,0,0.35)', minWidth:180, padding:'4px 0' }}>
+      {items.map((it, i) => it.label === '─'
+        ? <div key={i} style={{ height:1, background:'var(--line)', margin:'3px 0' }}/>
+        : <div key={i}
+            onClick={e => { e.stopPropagation(); onClose(); it.action && it.action(); }}
+            style={{ display:'flex', alignItems:'center', gap:9, padding:'7px 14px', cursor:'pointer',
+              fontSize:'var(--fs-sm)', color: it.danger ? 'var(--err)' : 'var(--fg)' }}
+            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-3)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <Icon name={it.icon} size={13}/> {it.label}
+          </div>
+      )}
+    </div>
+  );
+};
+
+// ── InspectDialog — pełny podgląd "docker inspect" dla kontenera ───────────
+const InspectDialog = ({ c, onClose }) => {
+  const [data,    setData]    = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [err,     setErr]     = React.useState('');
+  const [filter,  setFilter]  = React.useState('');
+
+  React.useEffect(() => {
+    fetch(`/api/docker/inspect/${encodeURIComponent(c.id)}`, { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(d => setData(d))
+      .catch(e => setErr(e.message || 'Nie można pobrać danych kontenera'))
+      .finally(() => setLoading(false));
+  }, [c.id]);
+
+  const pretty = data ? JSON.stringify(data, null, 2) : '';
+  const lines = pretty.split('\n');
+  const shown = filter ? lines.filter(l => l.toLowerCase().includes(filter.toLowerCase())) : lines;
+
+  const copyAll = () => {
+    navigator.clipboard?.writeText(pretty).then(() => window.toast?.success('Skopiowano JSON'));
+  };
+
+  return (
+    <Modal title={`Inspekcja · ${c.name}`} sub={c.image} onClose={onClose} width={820}
+      footer={<div className="row gap-sm" style={{ justifyContent:'flex-end' }}>
+        <button className="btn sm" onClick={copyAll} disabled={!data}>
+          Kopiuj JSON
+        </button>
+        <button className="btn sm primary" onClick={onClose}>Zamknij</button>
+      </div>}
+    >
+      {loading ? (
+        <div className="dim" style={{ padding:20, textAlign:'center' }}>Ładowanie…</div>
+      ) : err ? (
+        <div style={{ color:'var(--err)', padding:20, textAlign:'center' }}>{err}</div>
+      ) : (
+        <>
+          <div className="row gap-sm" style={{ marginBottom:10 }}>
+            <Icon name="search" size={13} style={{ color:'var(--fg-dim)' }}/>
+            <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtruj…"
+              style={{ flex:1, background:'var(--bg-2)', border:'1px solid var(--line-strong)', borderRadius:5,
+                padding:'5px 10px', color:'var(--fg)', fontFamily:'var(--font-mono)', fontSize:'var(--fs-xs)', outline:'none' }}/>
+          </div>
+          <div style={{ background:'var(--bg)', borderRadius:6, padding:'12px 14px', fontFamily:'var(--font-mono)',
+            fontSize:'var(--fs-xs)', lineHeight:1.6, maxHeight:480, overflowY:'auto', color:'var(--fg-muted)',
+            whiteSpace:'pre' }}>
+            {shown.length === 0
+              ? <span className="dim">Brak wyników dla „{filter}”</span>
+              : shown.join('\n')}
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+};
+
 // ── ContSkeleton — skeleton karty podczas ładowania ─────────────────────────
 const ContSkeleton = () => (
   <div className="cont-card" style={{opacity:0.5}}>
@@ -1296,6 +1521,302 @@ const DockerVolumes = () => {
 };
 
 // ── Docker: tab Compose ───────────────────────────────────────────────────────
+// ── ComposeStackDialog — tworzenie/edycja stosu docker-compose ─────────────
+// Uwaga: celowo NIE nazwane "ComposeDialog" — ta nazwa jest już zajęta przez
+// dialog pisania e-maili w screens-webmail.jsx.
+const ComposeStackDialog = ({ stack, onClose, onDeploy }) => {
+  const isEdit = !!stack;
+  const [name,     setName]     = React.useState(stack?.name || '');
+  const [yaml,     setYaml]     = React.useState(
+    stack?.yaml || 'services:\n  app:\n    image: nginx:alpine\n    restart: unless-stopped\n    ports:\n      - "8080:80"\n'
+  );
+  const [deployNow, setDeployNow] = React.useState(true);
+  const [saving,    setSaving]    = React.useState(false);
+  const [err,       setErr]       = React.useState('');
+
+  const submit = async () => {
+    if (!name.trim()) { setErr('Podaj nazwę stosu'); return; }
+    if (!yaml.trim()) { setErr('Treść docker-compose.yml nie może być pusta'); return; }
+    setSaving(true);
+    setErr('');
+    try {
+      const r = await fetch('/api/docker/compose/create', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), content: yaml, deploy: deployNow }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setErr(d.error || d.output || `Błąd zapisu stosu (HTTP ${r.status})`);
+        return;
+      }
+      window.toast?.success(isEdit ? 'Stos zaktualizowany' : 'Stos utworzony');
+      onDeploy && onDeploy({
+        name: name.trim(),
+        file: d.file || `/opt/stacks/${name.trim()}/docker-compose.yml`,
+        status: deployNow ? 'running' : 'stopped',
+      });
+      onClose();
+    } catch (e) {
+      setErr(e.message || 'Błąd sieci');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldStyle = {
+    width: '100%', background: 'var(--bg-2)', border: '1px solid var(--line-strong)',
+    borderRadius: 6, padding: '7px 10px', color: 'var(--fg)',
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', outline: 'none',
+  };
+  const labelStyle = { fontSize: 'var(--fs-xs)', color: 'var(--fg-dim)', marginBottom: 4, display: 'block' };
+
+  return (
+    <Modal title={isEdit ? `Edytuj stos · ${stack.name}` : 'Nowy stos Compose'}
+      sub={isEdit ? stack.file : 'docker-compose up -d'} onClose={onClose} width={680}
+      footer={<div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
+        <label className="row gap-sm" style={{ marginRight: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--fg-dim)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={deployNow} onChange={e => setDeployNow(e.target.checked)} />
+          Uruchom od razu (docker compose up -d)
+        </label>
+        <button className="btn sm" onClick={onClose} disabled={saving}>Anuluj</button>
+        <button className="btn sm primary" onClick={submit} disabled={saving || !name.trim() || !yaml.trim()}>
+          {saving ? 'Zapisywanie…' : isEdit ? 'Zapisz i wdróż' : 'Utwórz stos'}
+        </button>
+      </div>}
+    >
+      <div className="col" style={{ gap: 12 }}>
+        {err && (
+          <div style={{ background: 'color-mix(in oklch, var(--err) 12%, var(--bg-2))',
+            border: '1px solid var(--err)', borderRadius: 6, padding: '8px 10px',
+            fontSize: 'var(--fs-xs)', color: 'var(--err)' }}>
+            {err}
+          </div>
+        )}
+
+        <div>
+          <label style={labelStyle}>Nazwa stosu</label>
+          <input style={fieldStyle} value={name} onChange={e => setName(e.target.value)}
+            placeholder="np. jellyfin" disabled={isEdit} autoFocus={!isEdit} />
+          {!isEdit && (
+            <div style={{ fontSize: 9, color: 'var(--fg-dim)', marginTop: 3 }}>
+              Zostanie zapisany jako /opt/stacks/{name.trim() || '<nazwa>'}/docker-compose.yml
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label style={labelStyle}>docker-compose.yml</label>
+          <textarea style={{ ...fieldStyle, resize: 'vertical', minHeight: 280, lineHeight: 1.5 }}
+            rows={14} spellCheck={false}
+            value={yaml} onChange={e => setYaml(e.target.value)} />
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// ── Docker: tab Szablony (App Store) ─────────────────────────────────────────
+// Instalacja gotowych aplikacji jednym kliknięciem — backend renderuje
+// docker-compose.yml z szablonu (podstawiając porty/ścieżki) i wdraża go
+// dokładnie tą samą drogą co "Nowy stos" w zakładce Compose.
+
+const TemplateInstallDialog = ({ tpl, onClose, onInstalled }) => {
+  const [name, setName]     = React.useState(tpl.id);
+  const [vars, setVars]     = React.useState(() => {
+    const init = {};
+    (tpl.vars || []).forEach(v => { init[v.key] = v.default || ''; });
+    return init;
+  });
+  const [deployNow, setDeployNow] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [err, setErr]       = React.useState('');
+
+  const setVar = (key, val) => setVars(v => ({ ...v, [key]: val }));
+
+  const submit = async () => {
+    if (!name.trim()) { setErr('Podaj nazwę stosu'); return; }
+    setSaving(true);
+    setErr('');
+    try {
+      const r = await fetch('/services/docker/templates/install', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: tpl.id, name: name.trim(), vars, deploy: deployNow }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setErr(d.error || d.output || `Błąd instalacji (HTTP ${r.status})`);
+        return;
+      }
+      window.toast?.success(`${tpl.name} zainstalowany`);
+      onInstalled && onInstalled({
+        name: d.name || name.trim(),
+        file: d.file || `/opt/stacks/${name.trim()}/docker-compose.yml`,
+        status: deployNow ? 'running' : 'stopped',
+        services: [tpl.id],
+      });
+      onClose();
+    } catch (e) {
+      setErr(e.message || 'Błąd sieci');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldStyle = {
+    width: '100%', background: 'var(--bg-2)', border: '1px solid var(--line-strong)',
+    borderRadius: 6, padding: '7px 10px', color: 'var(--fg)',
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', outline: 'none',
+  };
+  const labelStyle = { fontSize: 'var(--fs-xs)', color: 'var(--fg-dim)', marginBottom: 4, display: 'block' };
+
+  return (
+    <Modal title={`Instaluj · ${tpl.name}`} sub={tpl.description} onClose={onClose} width={560}
+      footer={<div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
+        <label className="row gap-sm" style={{ marginRight: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--fg-dim)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={deployNow} onChange={e => setDeployNow(e.target.checked)} />
+          Uruchom od razu (docker compose up -d)
+        </label>
+        <button className="btn sm" onClick={onClose} disabled={saving}>Anuluj</button>
+        <button className="btn sm primary" onClick={submit} disabled={saving || !name.trim()}>
+          {saving ? 'Instalowanie…' : 'Zainstaluj'}
+        </button>
+      </div>}
+    >
+      <div className="col" style={{ gap: 12 }}>
+        {err && (
+          <div style={{ background: 'color-mix(in oklch, var(--err) 12%, var(--bg-2))',
+            border: '1px solid var(--err)', borderRadius: 6, padding: '8px 10px',
+            fontSize: 'var(--fs-xs)', color: 'var(--err)' }}>
+            {err}
+          </div>
+        )}
+
+        <div>
+          <label style={labelStyle}>Nazwa stosu</label>
+          <input style={fieldStyle} value={name} onChange={e => setName(e.target.value)}
+            placeholder={tpl.id} autoFocus />
+          <div style={{ fontSize: 9, color: 'var(--fg-dim)', marginTop: 3 }}>
+            Zostanie zapisany jako /opt/stacks/{name.trim() || tpl.id}/docker-compose.yml
+          </div>
+        </div>
+
+        {(tpl.vars || []).map(v => (
+          <div key={v.key}>
+            <label style={labelStyle}>{v.label}</label>
+            <input style={fieldStyle} value={vars[v.key] ?? ''} onChange={e => setVar(v.key, e.target.value)}
+              placeholder={v.default} />
+          </div>
+        ))}
+        {(tpl.vars || []).length === 0 && (
+          <div className="dim" style={{ fontSize: 'var(--fs-xs)' }}>Ten szablon nie wymaga dodatkowej konfiguracji.</div>
+        )}
+      </div>
+    </Modal>
+  );
+};
+
+const DockerTemplates = ({ onInstalled }) => {
+  const [templates, setTemplates] = React.useState([]);
+  const [loading, setLoading]     = React.useState(true);
+  const [q, setQ]                 = React.useState('');
+  const [category, setCategory]   = React.useState('all');
+  const [installTpl, setInstallTpl] = React.useState(null);
+
+  React.useEffect(() => {
+    fetch('/services/docker/templates', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => setTemplates(Array.isArray(data?.templates) ? data.templates : []))
+      .catch(() => setTemplates([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const categories = ['all', ...Array.from(new Set(templates.map(t => t.category).filter(Boolean)))];
+
+  const shown = templates.filter(t => {
+    if (category !== 'all' && t.category !== category) return false;
+    if (!q) return true;
+    const s = q.toLowerCase();
+    return t.name.toLowerCase().includes(s) || (t.description || '').toLowerCase().includes(s);
+  });
+
+  const handleInstalled = (stack) => {
+    onInstalled && onInstalled(stack);
+    window.toast?.success(`Zainstalowano: ${stack.name}`);
+  };
+
+  return (
+    <div className="col" style={{ gap: 'var(--gutter)' }}>
+      {installTpl && (
+        <TemplateInstallDialog tpl={installTpl} onClose={() => setInstallTpl(null)} onInstalled={handleInstalled} />
+      )}
+
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Szablony aplikacji</div>
+            <div className="card-sub">{templates.length} dostępnych — instalacja jednym kliknięciem</div>
+          </div>
+          <div className="card-actions" style={{ gap: 8 }}>
+            <div className="row gap-sm">
+              <Icon name="search" size={13} style={{ color: 'var(--fg-dim)' }} />
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Szukaj aplikacji…"
+                style={{ background: 'var(--bg-2)', border: '1px solid var(--line-strong)', borderRadius: 5,
+                  padding: '5px 10px', color: 'var(--fg)', fontSize: 'var(--fs-sm)', outline: 'none', width: 200 }} />
+            </div>
+          </div>
+        </div>
+        <div style={{ padding: '0 16px 14px', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {categories.map(c => (
+            <button key={c} className={'chip' + (category === c ? ' active' : '')}
+              style={{ cursor: 'pointer', border: category === c ? '1px solid var(--accent)' : undefined,
+                color: category === c ? 'var(--accent)' : undefined }}
+              onClick={() => setCategory(c)}>
+              {c === 'all' ? 'Wszystkie' : c}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--fg-dim)' }}>
+          Ładowanie szablonów…
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--fg-dim)' }}>
+          <Icon name="search" size={32} style={{ color: 'var(--line-strong)', display: 'block', margin: '0 auto 12px' }} />
+          Brak szablonów pasujących do wyszukiwania
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+          {shown.map(t => (
+            <div key={t.id} className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 8, flexShrink: 0, display: 'grid', placeItems: 'center',
+                  background: 'color-mix(in oklch, var(--accent) 15%, transparent)' }}>
+                  <Icon name={t.icon || 'download'} size={17} style={{ color: 'var(--accent)' }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)' }}>{t.name}</div>
+                  <div className="dim" style={{ fontSize: 'var(--fs-xs)' }}>{t.category}</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)', flex: 1, lineHeight: 1.5 }}>
+                {t.description}
+              </div>
+              <button className="btn sm primary" style={{ width: '100%' }}
+                onClick={() => setInstallTpl(t)}>
+                <Icon name="plus" size={11} /> Zainstaluj
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const DockerCompose = () => {
   const [confirmEl, confirmFn] = useConfirm();
   const [stacks, setStacks] = React.useState([]);
@@ -1384,8 +1905,8 @@ const DockerCompose = () => {
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
       {confirmEl}
-      {showNew    && <ComposeDialog onClose={()=>setShowNew(false)} onDeploy={deploy}/>}
-      {editStack  && <ComposeDialog stack={editStack} onClose={()=>setEditStack(null)} onDeploy={deploy}/>}
+      {showNew    && <ComposeStackDialog onClose={()=>setShowNew(false)} onDeploy={deploy}/>}
+      {editStack  && <ComposeStackDialog stack={editStack} onClose={()=>setEditStack(null)} onDeploy={deploy}/>}
       <div className="card">
         <div className="card-head">
           <div><div className="card-title">Stosy Compose</div><div className="card-sub">{stacks.length} stosów</div></div>
@@ -1474,6 +1995,7 @@ const Docker = () => {
     {id:'networks',   label:'Sieci'},
     {id:'volumes',    label:'Wolumeny'},
     {id:'compose',    label:'Compose'},
+    {id:'templates',  label:'Szablony'},
     {id:'topology',   label:'Topology'},
   ];
   return (
@@ -1486,6 +2008,7 @@ const Docker = () => {
       {dockerTab==='networks'   && <DockerNetworks/>}
       {dockerTab==='volumes'    && <DockerVolumes/>}
       {dockerTab==='compose'    && <DockerCompose/>}
+      {dockerTab==='templates'  && <DockerTemplates onInstalled={()=>setDockerTab('compose')}/>}
       {dockerTab==='topology'   && window.DockerTopology && React.createElement(window.DockerTopology)}
     </div>
   );

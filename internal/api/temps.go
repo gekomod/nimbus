@@ -549,7 +549,176 @@ func toFloat(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// ── HTTP handlers ─────────────────────────────────────────────────────────────
+// ── HP IPMI (BMC / iLO) — odczyt temperatur i wentylatorów ────────────────────
+//
+// Na serwerach HP ProLiant lm-sensors zwykle widzi tylko "coretemp"/"acpitz"
+// (temperatury CPU) — czujniki płyty głównej i wentylatory chassis siedzą
+// w kontrolerze BMC (iLO) i trzeba je odpytać przez IPMI ("ipmitool sensor list").
+//
+// UWAGA: to integracja WYŁĄCZNIE DO ODCZYTU. Na starszych HP (iLO2, iLO4 bez
+// spatchowanego firmware) nie da się ustawić prędkości wentylatorów przez IPMI —
+// próby "ipmitool raw 0x30 0x30 ..." (standard Supermicro/Dell) kończą się
+// błędem "Invalid command", bo HP nigdy nie udostępnił tej funkcji w tym miejscu.
+// Dlatego wentylatory z IPMI trafiają do panelu jako informacyjne (Mode = -1,
+// bez PWMFile) i handleFanControl ich nie dotyka — steruje wyłącznie fanami
+// wykrytymi przez hwmon (discoverHwmonFans), które nie istnieją na tym sprzęcie.
+
+func isHPServer() bool {
+	v := strings.ToLower(dmiSysVendor())
+	if strings.Contains(v, "hp") || strings.Contains(v, "hewlett") {
+		return true
+	}
+	// Fallback: sys_vendor bywa pusty/nietypowy (np. na niektórych OEM/rebranded
+	// płytach), ale nazwa modelu ("ProLiant", "Compaq") zwykle jednoznacznie
+	// zdradza HP nawet gdy pole producenta samo w sobie tego nie mówi.
+	p := strings.ToLower(dmiSystemProductName())
+	if strings.Contains(p, "proliant") || strings.Contains(p, "compaq") {
+		return true
+	}
+	return false
+}
+
+func dmiSystemProductName() string {
+	if d, err := os.ReadFile("/sys/class/dmi/id/product_name"); err == nil {
+		s := strings.TrimSpace(string(d))
+		if s != "" {
+			return s
+		}
+	}
+	out, _ := runCmd("dmidecode", "-s", "system-product-name")
+	return strings.TrimSpace(out)
+}
+
+func dmiSysVendor() string {
+	if d, err := os.ReadFile("/sys/class/dmi/id/sys_vendor"); err == nil {
+		s := strings.TrimSpace(string(d))
+		if s != "" {
+			return s
+		}
+	}
+	out, _ := runCmd("dmidecode", "-s", "system-manufacturer")
+	return strings.TrimSpace(out)
+}
+
+func ipmitoolAvailable() bool {
+	_, err := runCmd("which", "ipmitool")
+	return err == nil
+}
+
+// parseIPMISensors odpytuje BMC przez "ipmitool sensor list" i rozdziela wynik na:
+//   - tempGroup: temperatury jako SensorGroup, do wspólnej listy z lm-sensors
+//   - fans: wentylatory (RPM lub %), oznaczone jako tylko-do-odczytu (Mode=-1)
+func parseIPMISensors() (tempGroup *SensorGroup, fans []FanInfo, err error) {
+	if !ipmitoolAvailable() {
+		return nil, nil, fmt.Errorf("ipmitool not installed")
+	}
+	out, cmdErr := runCmd("ipmitool", "sensor", "list")
+	if cmdErr != nil || out == "" {
+		return nil, nil, fmt.Errorf("ipmitool sensor list failed or returned empty output")
+	}
+
+	group := &SensorGroup{Name: "IPMI (BMC)", Adapter: "ipmi"}
+	fanIdx := 0
+
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) < 3 {
+			continue
+		}
+		for i := range fields {
+			fields[i] = strings.TrimSpace(fields[i])
+		}
+		name := fields[0]
+		valStr := fields[1]
+		unit := fields[2]
+
+		if valStr == "" || valStr == "na" {
+			continue
+		}
+		// ipmitool formatuje liczby zgodnie z locale procesu (LC_NUMERIC) —
+		// w systemach z polskim locale wypisuje przecinek zamiast kropki
+		// jako separator dziesiętny (np. "47,040" zamiast "47.040").
+		// strconv.ParseFloat rozumie tylko kropkę, więc normalizujemy najpierw.
+		val, perr := strconv.ParseFloat(strings.Replace(valStr, ",", ".", 1), 64)
+		if perr != nil {
+			continue
+		}
+
+		lname := strings.ToLower(name)
+		switch {
+		case strings.Contains(lname, "temp"):
+			// Pomiń nieobsadzone/nieużywane sloty — HP raportuje je jako
+			// dokładnie 0.000°C (np. Temp 26-31 na pustych zatokach Storage Zone).
+			if val <= 0 {
+				continue
+			}
+			s := SensorReading{
+				Label: name,
+				Temp:  val,
+				Unit:  "°C",
+				Warn:  70,
+				Crit:  85,
+				Max:   85,
+			}
+			// Format ipmitool: name|value|unit|status|lnr|lcr|lnc|unc|ucr|unr
+			// Zweryfikowane na realnych danych z iLO (Temp1: Caution 42/Critical 47,
+			// surowe kolumny unc=40,ucr=42,unr=47): to co iLO nazywa "Caution"
+			// odpowiada kolumnie ucr (idx 8), a "Critical" kolumnie unr (idx 9).
+			// unc (idx 7) to osobny, wcześniejszy próg informacyjny, którego
+			// iLO w ogóle nie pokazuje na stronie WWW — NIE używamy go jako Warn,
+			// bo bywa znacząco niższy niż realna "Caution" (stąd wcześniejsze
+			// fałszywe ostrzeżenia np. przy 40°C na CPU z realnym progiem 82°C).
+			// HP zostawia niesparametryzowane progi jako DOKŁADNIE 99.000 —
+			// to jedyna wartość, którą traktujemy jako "brak progu" (placeholder).
+			isPlaceholder := func(v float64) bool {
+				return v <= 0 || (v > 98.9 && v < 99.1)
+			}
+			if len(fields) > 9 {
+				ucrStr := strings.Replace(fields[8], ",", ".", 1)
+				unrStr := strings.Replace(fields[9], ",", ".", 1)
+				if ucr, e := strconv.ParseFloat(ucrStr, 64); e == nil && !isPlaceholder(ucr) {
+					s.Warn = ucr
+				}
+				if unr, e := strconv.ParseFloat(unrStr, 64); e == nil && !isPlaceholder(unr) {
+					s.Crit = unr
+					s.Max = unr
+				}
+			}
+			group.Sensors = append(group.Sensors, s)
+
+		case strings.Contains(lname, "fan"):
+			fanIdx++
+			rpm, pwmPct := 0, 0
+			switch {
+			case strings.Contains(unit, "RPM"):
+				rpm = int(val)
+			case strings.Contains(unit, "percent"):
+				pwmPct = int(val)
+			}
+			fans = append(fans, FanInfo{
+				Index:  fanIdx,
+				Name:   fmt.Sprintf("ipmi_fan%d", fanIdx),
+				Label:  name,
+				Loc:    "BMC / iLO",
+				RPM:    rpm,
+				PWM:    -1, // HP nie udostępnia surowej wartości PWM przez IPMI
+				PWMPct: pwmPct,
+				PWMMin: -1,
+				PWMMax: -1,
+				RPMMax: 0,
+				Mode:   -1, // -1 = tylko odczyt — brak sterowania (patrz komentarz wyżej)
+				I8kIdx: -1,
+			})
+		}
+	}
+
+	if len(group.Sensors) == 0 {
+		group = nil
+	}
+	return group, fans, nil
+}
+
+
 
 func (s *Server) handleTemps(w http.ResponseWriter, r *http.Request) {
 	_, sensorsErr := runCmd("which", "sensors")
@@ -557,6 +726,24 @@ func (s *Server) handleTemps(w http.ResponseWriter, r *http.Request) {
 
 	fans := buildFanList()
 	groups, _, _ := parseSensorsOutput()
+
+	// Na serwerach HP lm-sensors zwykle nie widzi czujników płyty/wentylatorów
+	// (za kontrolerem Smart Array/iLO) — dociągnij dane z BMC przez IPMI.
+	isHP := isHPServer()
+	ipmiAvailable := false
+	var ipmiFans []FanInfo
+	if isHP {
+		if ipmiGroup, ipmiFanList, ipmiErr := parseIPMISensors(); ipmiErr == nil {
+			ipmiAvailable = true
+			if ipmiGroup != nil {
+				groups = append(groups, *ipmiGroup)
+			}
+			ipmiFans = ipmiFanList
+		}
+	}
+	if ipmiFans == nil {
+		ipmiFans = []FanInfo{}
+	}
 
 	fanAutoMu.Lock(); autoOn := fanAutoEnabled; fanAutoMu.Unlock()
 	fanCfgMu.RLock(); cfg := fanCfg; fanCfgMu.RUnlock()
@@ -567,15 +754,19 @@ func (s *Server) handleTemps(w http.ResponseWriter, r *http.Request) {
 	tempHistory.mu.Unlock()
 
 	jsonOK(w, map[string]any{
-		"installed":     installed,
-		"i8k_installed": i8kInstalled(),
-		"hwmon_fans":    len(discoverHwmonFans()) > 0,
-		"auto_mode":     autoOn,
-		"preset":        cfg.Preset,
-		"fan_config":    cfg,
-		"groups":        groups,
-		"fans":          fans,
-		"history":       map[string]any{"cpu": cpuH, "mb": mbH},
+		"installed":              installed,
+		"i8k_installed":          i8kInstalled(),
+		"hwmon_fans":             len(discoverHwmonFans()) > 0,
+		"is_hp_server":           isHP,
+		"ipmi_available":         ipmiAvailable,
+		"ipmi_fans_controllable": false, // HP (iLO2/iLO4 bez patcha) nie udostępnia zapisu PWM przez IPMI
+		"auto_mode":              autoOn,
+		"preset":                 cfg.Preset,
+		"fan_config":             cfg,
+		"groups":                 groups,
+		"fans":                   fans,     // wentylatory hwmon/i8k — sterowalne przez handleFanControl
+		"ipmi_fans":              ipmiFans, // wentylatory z BMC — tylko odczyt (RPM/%)
+		"history":                map[string]any{"cpu": cpuH, "mb": mbH},
 	})
 }
 

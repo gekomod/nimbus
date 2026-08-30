@@ -119,6 +119,14 @@ func (s *Server) routes() {
 	a("/api/processes", s.handleProcesses)
 	a("/api/system-logs", s.handleSystemLogs)
 
+        // Bays
+	a("/api/bays/info",     s.handleBaysInfo)
+	a("/api/bays/tools",    s.handleBaysTools)
+	a("/api/bays/scan",     s.handleBaysScan)
+	a("/api/bays/all-off",  s.handleBaysAllOff)
+	a("/api/bays",          s.handleBays)
+	a("/api/bays/",         s.handleBayLED)
+
 	// storage
 	a("/api/storage/devices", s.handleStorageDevices)
 	a("/api/storage/debug-devices", s.handleStorageDebugDevices)
@@ -160,6 +168,7 @@ func (s *Server) routes() {
 	a("/api/storage/smart/force-reallocation", s.handleStorageSMARTAction)
 	a("/api/storage/smart/fix-physical-issues", s.handleStorageSMARTAction)
 	a("/api/storage/smart/run-test", s.handleStorageSMARTRunTest)
+        a("/api/storage/smart-debug", s.handleStorageSMARTDebug)
 	a("/api/zfs/pools", s.handleZFSPools)
 	a("/api/zfs/snapshots", s.handleZFSSnapshots)
 	a("/api/zfs/snapshots/", s.handleZFSSnapshotAction)
@@ -261,6 +270,11 @@ func (s *Server) routes() {
 	// Sprzęt
 	a("/api/hardware",           s.handleHardware)
 	a("/api/hardware/install",   s.handleHardwareInstall)
+
+	// IPMI / BMC
+	a("/api/ipmi",             s.handleIPMI)
+	a("/api/ipmi/install",     s.handleIPMIInstall)
+	a("/api/ipmi/sel/clear",   s.handleIPMISELClear)
 
 	// Poczta
 	a("/api/mail/status",          s.handleMailStatus)
@@ -385,6 +399,8 @@ func (s *Server) routes() {
 	a("/services/docker/build/github", s.handleDockerBuildGitHub)
 	a("/services/docker/build/", s.handleDockerBuildItem)
 	a("/services/docker/composer/deploy-stream", s.handleDockerComposeStream)
+        a("/services/docker/templates", s.handleDockerTemplates)
+        a("/services/docker/templates/install", s.handleDockerTemplateInstall)
 	a("/api/services/config", s.handleServicesConfig)
 
 	// samba
@@ -462,6 +478,7 @@ func (s *Server) routes() {
 	a("/services/loadbalancer/apply", s.handleLBApply)
 
 	// terminal
+	s.mux.HandleFunc("/terminal/ws", s.auth_(s.handleTerminalWS)) // WebSocket â€” bez CSRF
 	a("/terminal/sessions", s.handleTerminalSessions)
 	a("/terminal/sessions/", s.handleTerminalSessionItem)
 	a("/terminal/shells", s.handleTerminalShells)
@@ -530,6 +547,13 @@ func (s *Server) routes() {
 	// servers (multi-host)
 	a("/api/servers", s.handleServers)
 	a("/api/servers/", s.handleServerItem)
+
+	// routers — Xiaomi MiWiFi, Cudy/OpenWrt ubus, MikroTik RouterOS
+	a("/api/routers/models", s.handleRouterModels)
+	a("/api/routers/probe",  s.handleRouterProbe)
+	a("/api/routers/dedup",  s.handleRouterDedup)
+	a("/api/routers", s.handleRouters)
+	a("/api/routers/", s.handleRouterItem)
 
 
 	// 2FA TOTP
@@ -814,9 +838,11 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(clean, ".jsx") {
 		w.Header().Set("Content-Type", "application/javascript")
 	}
-	// Cache dla statyki (bundle.js, CSS) — nie zmienia się między restartami
+	// Cache dla statyki — wymuszamy rewalidację przy każdym żądaniu
+	// (no-cache = zawsze sprawdź z serwerem; nie cache = nigdy nie cachuj)
 	if strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".css") {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 	}
 	// Gzip jeśli klient obsługuje
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {

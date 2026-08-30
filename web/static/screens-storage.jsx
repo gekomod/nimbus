@@ -158,14 +158,16 @@ const Storage = () => {
         </div>
         <div className={"tab " + (tab==='snap'  ? 'active':'')} onClick={()=>setTab('snap')}>Migawki</div>
         <div className={"tab " + (tab==='smart'      ? 'active':'')} onClick={()=>setTab('smart')}>S.M.A.R.T.</div>
+        <div className={"tab " + (tab==='leds'       ? 'active':'')} onClick={()=>setTab('leds')}>Zatoki (LED)</div>
       </div>
 
-      {tab==='pools'      && (selectedPool ? <PoolDetail pool={selectedPool} onBack={()=>setSelectedPool(null)}/> : <PoolsList onSelect={setSelectedPool}/>)}
+      {tab==='pools'      && (selectedPool ? <PoolDetail pool={selectedPool} onBack={()=>setSelectedPool(null)} onViewSnapshots={()=>setTab('snap')}/> : <PoolsList onSelect={setSelectedPool}/>)}
       {tab==='disks'      && <DisksList onSelect={setSelectedDisk} selected={selectedDisk}/>}
       {tab==='mounts'     && <MountsView onEditFstab={()=>setShowFstab(true)} onAdd={()=>setShowAddMount(true)} onUnmount={setUnmountTarget}/>}
       {tab==='unassigned' && <UnassignedView onFormat={setFormatTarget} onMount={setMountTarget}/>}
       {tab==='snap'  && <Snapshots/>}
       {tab==='smart' && <SmartView/>}
+      {tab==='leds'  && <BayLedsView/>}
 
       {formatTarget  && <FormatModal   disk={formatTarget}   onClose={()=>setFormatTarget(null)}/>}
       {mountTarget   && <MountModal    disk={mountTarget}    onClose={()=>setMountTarget(null)}/>}
@@ -236,7 +238,7 @@ const PoolsList = ({ onSelect }) => {
 };
 
 // ── Pool detail ────────────────────────────────────────────────────────────────
-const PoolDetail = ({ pool, onBack }) => {
+const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
   const DISKS_ALL = useStore('DISKS') || [];
   const disks = DISKS_ALL.filter(d => d.pool === pool.name);
   const pct    = pool.total > 0 ? (pool.used / pool.total) * 100 : 0;
@@ -284,7 +286,7 @@ const PoolDetail = ({ pool, onBack }) => {
           <span className="dim mono" style={{fontSize:'var(--fs-xs)'}}>/{pool.name}</span>
         </div>
         <div className="row gap-sm">
-          <button className="btn sm" onClick={()=>setShowSnaps(true)}>Migawki</button>
+          <button className="btn sm" onClick={onViewSnapshots}>Migawki</button>
           <button className="btn sm" disabled={scrubRunning} onClick={async()=>{
             setScrubRunning(true);
             const r = await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
@@ -1129,8 +1131,10 @@ const FormatModal = ({ disk, onClose }) => {
       body:JSON.stringify({device:'/dev/'+disk.bay, fs, label})}).catch(()=>{});
     // Opcjonalnie mount
     if (fs !== 'zfs' && mp) {
+      // mkfs powyżej działa na całym dysku (bez tabeli partycji), więc montujemy
+      // też cały dysk — NIE "/dev/sdX1" (taka partycja nigdy nie powstała).
       await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({command:`mkdir -p ${mp} && mount /dev/${disk.bay}1 ${mp}`})}).catch(()=>{});
+        body:JSON.stringify({command:`mkdir -p ${mp} && mount /dev/${disk.bay} ${mp}`})}).catch(()=>{});
     }
     onClose();
   };
@@ -1165,9 +1169,9 @@ const FormatModal = ({ disk, onClose }) => {
       <Field label="Polecenie shell">
         <pre className="mono" style={{margin:0,padding:'10px 12px',background:'var(--bg-1)',border:'1px solid var(--line)',borderRadius:5,fontSize:11,color:'var(--fg-muted)',whiteSpace:'pre-wrap'}}>
 {fs==='zfs' ? `zpool create -f -o ashift=12 ${label} /dev/${disk.bay}` :
- fs==='exfat' ? `mkfs.exfat -L "${label}" /dev/${disk.bay}1` :
- `mkfs.${fs} -L "${label}" /dev/${disk.bay}1`}
-{`\nmkdir -p ${mp}\nmount /dev/${disk.bay}1 ${mp}`}
+ fs==='exfat' ? `mkfs.exfat -n "${label}" /dev/${disk.bay}` :
+ `mkfs.${fs} -L "${label}" /dev/${disk.bay}`}
+{fs==='zfs' ? '' : `\nmkdir -p ${mp}\nmount /dev/${disk.bay} ${mp}`}
         </pre>
       </Field>
       <Field label={`Aby potwierdzić, wpisz nazwę zatoki: ${disk.bay}`}>
@@ -1547,7 +1551,372 @@ const CreatePoolModal = ({ onClose }) => {
   );
 };
 
+// ===== Zatoki (LED) — pełne API =====
+// GET  /api/bays/info     — enclosure info + lista narzędzi
+// GET  /api/bays          — lista slotów: urządzenie, model, SMART, stan LED
+// POST /api/bays/scan     — wymuś reskan
+// POST /api/bays/all-off  — wyłącz wszystkie LED
+// POST /api/bays/{slot}/led  {action:"locate-on"|"locate-off"|"fault-on"|"fault-off", tool:"ledctl"|...}
+
+const BayLedsView = () => {
+  const [enclosure,  setEnclosure] = React.useState(null);   // dane z /api/bays/info
+  const [slots,      setSlots]     = React.useState([]);       // dane z /api/bays
+  const [tool,       setTool]      = React.useState('');       // aktualnie wybrany tool
+  const [selected,   setSelected]  = React.useState(null);    // wybrany numer slotu
+  const [loading,    setLoading]   = React.useState(true);
+  const [scanning,   setScanning]  = React.useState(false);
+  const [ledBusy,    setLedBusy]   = React.useState(false);
+  const [lastResult, setLastResult]= React.useState(null);    // wynik ostatniej komendy LED
+
+  // ── Ładowanie ──────────────────────────────────────────────────────────────
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const [infoRes, baysRes] = await Promise.all([
+        fetch('/api/bays/info', { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/bays',      { credentials: 'include' }).then(r => r.json()),
+      ]);
+      setEnclosure(infoRes);
+      // Ustaw tool z serwera jeśli jeszcze nie ustawiony przez użytkownika
+      setTool(prev => prev || infoRes.tool || 'mock');
+      const list = baysRes.slots || [];
+      setSlots(list);
+      // Wybierz pierwszy zajęty slot domyślnie
+      if (selected === null && list.length > 0) {
+        setSelected((list.find(s => s.occupied) || list[0]).slot);
+      }
+    } catch (e) {
+      console.error('BayLedsView load error:', e);
+    }
+    setLoading(false);
+  };
+
+  React.useEffect(() => { loadAll(); }, []);
+
+  // ── Rescan ────────────────────────────────────────────────────────────────
+  const rescan = async () => {
+    setScanning(true);
+    try {
+      await fetch('/api/bays/scan', { method: 'POST', credentials: 'include' });
+      await loadAll();
+    } catch {}
+    setScanning(false);
+  };
+
+  // ── Sterowanie LED ────────────────────────────────────────────────────────
+  const applyLed = async (action) => {
+    if (selected === null) return;
+    setLedBusy(true);
+    setLastResult(null);
+    try {
+      const r = await fetch(`/api/bays/${selected}/led`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, tool }),
+      });
+      const res = await r.json();
+      setLastResult(res);
+      // Zaktualizuj stan LED lokalnie bez ponownego ładowania
+      if (res.new_led !== undefined) {
+        setSlots(ss => ss.map(s =>
+          s.slot === selected ? { ...s, led: res.new_led, led_color: res.new_led === 'off' ? 'off' : res.new_led === 'locate' ? 'blue' : 'amber' } : s
+        ));
+      }
+    } catch (e) {
+      setLastResult({ ok: false, error: e.message, command: '' });
+    }
+    setLedBusy(false);
+  };
+
+  // ── Wszystkie OFF ─────────────────────────────────────────────────────────
+  const allOff = async () => {
+    setLedBusy(true);
+    try {
+      await fetch('/api/bays/all-off', { method: 'POST', credentials: 'include' });
+      setSlots(ss => ss.map(s => ({ ...s, led: 'off', led_color: 'off' })));
+    } catch {}
+    setLedBusy(false);
+  };
+
+  // ── Dane wybranej zatoki ──────────────────────────────────────────────────
+  const bay = slots.find(s => s.slot === selected) || null;
+  const occupied   = slots.filter(s => s.occupied).length;
+  const activeLEDs = slots.filter(s => s.led && s.led !== 'off').length;
+  const faultOK    = ['ledctl', 'ledmon', 'sg_ses'].includes(tool);
+
+  // Kolory LED
+  const ledColor = led => led === 'locate' ? 'var(--accent)' : led === 'fault' ? 'var(--err)' : 'var(--line-strong)';
+  const ledGlow  = led => led === 'locate' ? '0 0 8px var(--accent)' : led === 'fault' ? '0 0 8px var(--err)' : 'none';
+
+  if (loading) return (
+    <div style={{ textAlign: 'center', padding: '64px 0', color: 'var(--fg-dim)' }}>
+      <div style={{ width: 20, height: 20, border: '2px solid var(--line)', borderTopColor: 'var(--accent)',
+        borderRadius: '50%', animation: '_spin .7s linear infinite', margin: '0 auto 14px' }}/>
+      Wykrywanie enclosure i zatok…
+    </div>
+  );
+
+  return (
+    <div className="col" style={{ gap: 'var(--gutter)' }}>
+
+      {/* ── Info o enclosure + wybór narzędzia ── */}
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Sterownik obudowy</div>
+            <div className="card-sub">
+              {enclosure
+                ? `${enclosure.name} · sterownik: ${enclosure.driver}${enclosure.ses_device ? ' · SES: ' + enclosure.ses_device : ''}`
+                : 'Wykrywanie…'}
+            </div>
+          </div>
+          <div className="row gap-sm">
+            {activeLEDs > 0 && (
+              <button className="btn sm" onClick={allOff} disabled={ledBusy}>
+                Wszystkie LED OFF
+              </button>
+            )}
+            <button className="btn sm" onClick={rescan} disabled={scanning}>
+              <Icon name="refresh" size={11}/> {scanning ? 'Skanowanie…' : 'Rescan'}
+            </button>
+          </div>
+        </div>
+
+        <div className="card-body col" style={{ gap: 14 }}>
+          {/* Statsy */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(120px,1fr))', gap: 10 }}>
+            {[
+              ['ZATOKI',        enclosure?.total_slots || slots.length],
+              ['ZAJĘTE',        occupied],
+              ['PUSTE',         slots.length - occupied],
+              ['LED AKTYWNYCH', activeLEDs],
+            ].map(([k, v]) => <Mini key={k} label={k} v={v}/>)}
+          </div>
+
+          {/* Wybór narzędzia */}
+          <Field label="Narzędzie sterowania LED">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 6 }}>
+              {(enclosure?.tools || []).map(t => (
+                <div key={t.name}
+                  onClick={() => t.available && setTool(t.name)}
+                  style={{
+                    padding: '8px 10px', borderRadius: 5, cursor: t.available ? 'pointer' : 'default',
+                    opacity: t.available ? 1 : 0.4,
+                    border: '1px solid ' + (tool === t.name ? 'var(--accent)' : 'var(--line)'),
+                    background: tool === t.name ? 'color-mix(in oklch, var(--accent) 10%, transparent)' : 'var(--bg-1)',
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                    <span className="mono" style={{ fontWeight: 500, fontSize: 'var(--fs-sm)' }}>{t.name}</span>
+                    {t.available
+                      ? <span className="badge ok" style={{ fontSize: 9 }}>dostępny</span>
+                      : <span className="badge"    style={{ fontSize: 9 }}>brak</span>}
+                  </div>
+                  <div className="dim" style={{ fontSize: 10, lineHeight: 1.4 }}>{t.note}</div>
+                </div>
+              ))}
+              {/* Zawsze dostępny tryb demo */}
+              <div onClick={() => setTool('mock')}
+                style={{
+                  padding: '8px 10px', borderRadius: 5, cursor: 'pointer',
+                  border: '1px solid ' + (tool === 'mock' ? 'var(--accent)' : 'var(--line)'),
+                  background: tool === 'mock' ? 'color-mix(in oklch, var(--accent) 10%, transparent)' : 'var(--bg-1)',
+                }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  <span className="mono" style={{ fontWeight: 500, fontSize: 'var(--fs-sm)' }}>mock</span>
+                  <span className="badge info" style={{ fontSize: 9 }}>demo</span>
+                </div>
+                <div className="dim" style={{ fontSize: 10 }}>Tryb offline — podgląd UI bez sprzętu</div>
+              </div>
+            </div>
+          </Field>
+
+          {!faultOK && (
+            <div style={{ padding: '8px 10px', background: 'color-mix(in oklch, var(--warn) 8%, var(--bg-2))',
+              border: '1px solid color-mix(in oklch, var(--warn) 35%, var(--line))',
+              borderRadius: 5, fontSize: 'var(--fs-xs)', color: 'var(--fg-muted)' }}>
+              ⚠ Narzędzie <span className="mono">{tool}</span> nie obsługuje ręcznego LED awarii (fault) — dostępny tylko locate/identify.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Mapa zatok + panel szczegółów ── */}
+      <div className="grid grid-2-1">
+
+        {/* Mapa */}
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Mapa zatok</div>
+              <div className="card-sub">Kliknij zatokę, aby zobaczyć szczegóły i sterować LED</div>
+            </div>
+            <div className="row gap-sm" style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--fg-dim)' }}>
+              {[['off', 'brak'], ['locate', 'locate'], ['fault', 'fault']].map(([led, lbl]) => (
+                <span key={led} className="row gap-sm">
+                  <span style={{
+                    display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+                    background: ledColor(led), boxShadow: ledGlow(led), flexShrink: 0,
+                  }}/>
+                  {lbl}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="card-body">
+            {slots.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--fg-dim)', fontSize: 'var(--fs-sm)' }}>
+                Brak wykrytych zatok — kliknij <strong>Rescan</strong>
+              </div>
+            ) : (
+              <>
+                {/* Chassis render — układ siatki n×5 jak oryginał */}
+                <div className="bay-chassis">
+                  <div className="bay-chassis-cap" style={{ flexDirection: 'column' }}>
+                    <span className="bay-chassis-btn"/>
+                    <span className="bay-chassis-brand" style={{ writingMode: 'vertical-rl' }}>
+                      {enclosure?.name || 'Enclosure'}
+                    </span>
+                    <span className="bay-chassis-btn uid" title="UID"/>
+                  </div>
+                  <div className="bay-rows">
+                    {Array.from({ length: Math.ceil(slots.length / 5) }).map((_, row) => (
+                      <div className="bay-row" key={row}>
+                        {slots.slice(row * 5, row * 5 + 5).map(b => (
+                          <div key={b.slot}
+                            className={"bay-tray" + (!b.occupied ? " empty" : "") + (selected === b.slot ? " selected" : "")}
+                            onClick={() => setSelected(b.slot)}
+                            title={b.occupied ? `${b.slot}: ${b.device || b.bay}` : `Zatoka ${b.slot} — pusta`}>
+                            <div className="bay-tray-leds">
+                              <span className={"bay-tray-led " + (b.occupied ? "act" : "")}/>
+                              <span className={"bay-tray-led " + (b.led === 'locate' ? 'locate' : b.led === 'fault' ? 'fault' : '')}/>
+                            </div>
+                            <div className="bay-tray-handle"/>
+                            <span className="bay-tray-num">{String(b.slot).padStart(2, '0')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="bay-chassis-cap" style={{ flexDirection: 'column' }}>
+                    <span className="bay-chassis-btn"/>
+                    <span className="bay-chassis-brand" style={{ writingMode: 'vertical-rl' }}>
+                      {slots.length}× SFF
+                    </span>
+                    <span className="bay-chassis-btn"/>
+                  </div>
+                </div>
+                <div className="row gap-sm" style={{ marginTop: 10, fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--fg-dim)' }}>
+                  <span className="row gap-sm"><span className="bay-tray-led act" style={{ position: 'static' }}/>aktywność</span>
+                  <span className="row gap-sm"><span className="bay-tray-led locate" style={{ position: 'static' }}/>locate</span>
+                  <span className="row gap-sm"><span className="bay-tray-led fault" style={{ position: 'static' }}/>fault</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Panel szczegółów wybranego slotu */}
+        <div className="card">
+          <div className="card-head">
+            <div className="card-title">
+              {bay ? `Zatoka ${String(bay.slot).padStart(2, '0')}` : 'Szczegóły'}
+            </div>
+          </div>
+          <div className="card-body col" style={{ gap: 10 }}>
+            {!bay && (
+              <div className="dim" style={{ fontSize: 'var(--fs-sm)' }}>Wybierz zatokę z mapy</div>
+            )}
+            {bay && (<>
+              {/* Adres / urządzenie */}
+              <KV k="Urządzenie" v={<span className="mono">{bay.device || bay.bay || '—'}</span>}/>
+              <KV k="Adres SAS"  v={<span className="mono">{bay.sas_addr || '—'}</span>}/>
+              <KV k="Stan LED"   v={
+                bay.led === 'fault'  ? <span className="badge err"><span className="dot pulse"/>FAULT</span>  :
+                bay.led === 'locate' ? <span className="badge info"><span className="dot pulse"/>LOCATE</span> :
+                                       <span className="badge">wyłączony</span>
+              }/>
+
+              <hr className="div"/>
+
+              {/* Dane dysku */}
+              {bay.occupied && bay.model ? (<>
+                <KV k="Model"     v={bay.model}/>
+                <KV k="S/N"       v={<span className="mono dim">{bay.serial || '—'}</span>}/>
+                <KV k="Pojemność" v={<span className="mono">{bay.size || '—'}</span>}/>
+                <KV k="Temp."     v={
+                  <span className="mono" style={bay.temp > 42 ? { color: 'var(--warn)' } : {}}>
+                    {bay.temp ? `${bay.temp}°C` : '—'}
+                  </span>
+                }/>
+                <KV k="S.M.A.R.T." v={
+                  bay.smart === 'warn'
+                    ? <span className="badge warn">WARN</span>
+                    : <span className="badge ok">PASSED</span>
+                }/>
+              </>) : bay.occupied ? (
+                <div className="dim" style={{ fontSize: 'var(--fs-sm)' }}>Dysk obecny — kliknij Rescan po danych</div>
+              ) : (
+                <div className="dim" style={{ fontSize: 'var(--fs-sm)' }}>Pusta zatoka — brak nośnika</div>
+              )}
+
+              <hr className="div"/>
+
+              {/* Przyciski sterowania */}
+              <div className="row gap-sm" style={{ flexWrap: 'wrap' }}>
+                <button className="btn sm"
+                  disabled={!bay.occupied || ledBusy}
+                  style={!bay.occupied ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
+                  onClick={() => applyLed('locate-on')}>Lokalizuj (ON)</button>
+                <button className="btn sm"
+                  disabled={!bay.occupied || ledBusy}
+                  style={!bay.occupied ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
+                  onClick={() => applyLed('locate-off')}>Locate OFF</button>
+                <button className="btn sm"
+                  disabled={!bay.occupied || !faultOK || ledBusy}
+                  style={(!bay.occupied || !faultOK) ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
+                  onClick={() => applyLed('fault-on')}>Ustaw fault</button>
+                <button className="btn sm"
+                  disabled={!bay.occupied || !faultOK || ledBusy}
+                  style={(!bay.occupied || !faultOK) ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
+                  onClick={() => applyLed('fault-off')}>Wyczyść fault</button>
+              </div>
+
+              {/* Wynik ostatniej komendy */}
+              {lastResult && (
+                <Field label="Wykonane polecenie">
+                  <pre className="mono" style={{
+                    margin: 0, padding: '8px 10px',
+                    background: 'var(--bg-1)', border: '1px solid var(--line)',
+                    borderRadius: 5, fontSize: 11, color: 'var(--fg-muted)', whiteSpace: 'pre-wrap',
+                  }}>{lastResult.command || '—'}</pre>
+                  {lastResult.output && (
+                    <pre className="mono" style={{
+                      margin: '4px 0 0', padding: '6px 10px',
+                      background: 'var(--bg)', border: '1px solid var(--line)',
+                      borderRadius: 5, fontSize: 10, color: 'var(--fg-dim)', whiteSpace: 'pre-wrap',
+                    }}>{lastResult.output}</pre>
+                  )}
+                  {lastResult.error && (
+                    <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: 'var(--warn)' }}>
+                      ⚠ {lastResult.error}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: lastResult.ok ? 'var(--ok)' : 'var(--err)' }}>
+                    {lastResult.ok ? '✓ Sukces' : '✗ Błąd'}
+                  </div>
+                </Field>
+              )}
+            </>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 window.Storage = Storage;
 window.KV      = KV;
 window.Mini    = Mini;
+window.Field   = Field;
 window.Modal   = Modal;

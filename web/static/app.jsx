@@ -23,6 +23,7 @@ const Servers         = window.Servers;
 const KVMScreen       = window.KVMScreen;
 const ModuleSettings  = window.ModuleSettings;
 const HardwareInventory = window.HardwareInventory;
+const IPMI               = window.IPMI;
 const MailServer        = window.MailServer;
 const UPSScreen         = window.UPSScreen;
 const Webmail           = window.Webmail;
@@ -231,9 +232,11 @@ const SCREENS = {
   network:   { title: 'Sieć',             sub: '2× 10 GbE · WireGuard · firewall', comp: () => <Network/>, crumbs: ['nimbus','Sieć'] },
   vpn:       { title: 'VPN · WireGuard',  sub: 'Peery · statystyki · QR · mapa', comp: () => <Vpn/>, crumbs: ['nimbus','Sieć','VPN'] },
   servers:   { title: 'Serwery',          sub: 'Zarządzanie zdalnymi hostami SSH', comp: () => <Servers/>, crumbs: ['nimbus','Sieć','Serwery'] },
+  routers:   { title: 'Routery',          sub: 'Xiaomi BE6500 · Cudy LT400 · MikroTik · OpenWrt · inne', comp: () => <RouterManager/>, crumbs: ['nimbus','Sieć','Routery'] },
   logs:      { title: 'Logi systemowe',   sub: 'Strumień zdarzeń na żywo', comp: () => <Logs/>, crumbs: ['nimbus','System','Logi'] },
   processes: { title: 'Procesy',          sub: 'Lista procesów systemowych', comp: () => <Processes/>, crumbs: ['nimbus','System','Procesy'] },
   temps:     { title: 'Temperatury',          sub: 'CPU · płyta główna · wentylatory · dyski', comp: () => <SystemTemps/>, crumbs: ['nimbus','System','Temperatury'] },
+  ipmi:      { title: 'IPMI / Czujniki',      sub: 'BMC · temperatury · wentylatory · napięcia · SEL', comp: () => <IPMI/>, crumbs: ['nimbus','System','IPMI'] },
   smart:     { title: 'S.M.A.R.T. szczegóły',sub: 'Pełny raport dysków · błędy · testy · predykcja', comp: () => <SmartDetails/>, crumbs: ['nimbus','System','S.M.A.R.T.'] },
   terminal:  { title: 'Terminal',         sub: 'Sesja powłoki przez przeglądarkę', comp: () => <Terminal/>, crumbs: ['nimbus','System','Terminal'] },
   cron:      { title: 'Harmonogram zadań',    sub: 'cron · systemd timers · historia wykonań',   comp: () => <CronJobs/>,     crumbs: ['nimbus','Administracja','Harmonogram'] },
@@ -313,6 +316,8 @@ const AppInner = ({ user, onLogout }) => {
                 {active==='dashboard' && <button className="btn primary"><Icon name="download" size={12}/> Raport</button>}
                 {active==='servers'    && <button className="btn" onClick={()=>document.dispatchEvent(new CustomEvent('nimbus:refresh-servers'))}><Icon name="refresh" size={12}/> Odśwież statusy</button>}
                 {active==='servers'    && <button className="btn primary" onClick={()=>document.dispatchEvent(new CustomEvent('nimbus:add-server'))}><Icon name="plus" size={12}/> Dodaj serwer</button>}
+                {active==='routers'    && <button className="btn" onClick={()=>document.dispatchEvent(new CustomEvent('nimbus:refresh-routers'))}><Icon name="refresh" size={12}/> Odśwież statusy</button>}
+                {active==='routers'    && <button className="btn primary" onClick={()=>document.dispatchEvent(new CustomEvent('nimbus:add-router'))}><Icon name="plus" size={12}/> Dodaj router</button>}
                 {active==='users'     && <button className="btn primary"><Icon name="plus"     size={12}/> Nowy użytkownik</button>}
               </div>
             </div>
