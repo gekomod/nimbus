@@ -33,4 +33,6 @@ import './screens-network-detail.jsx';
 import './screens-filemanager.jsx';
 import './screens-packages.jsx';
 import './screens-downloads.jsx';
+// Control Center overrides only the React shell/dashboard; Go API remains unchanged.
+import './control-center.jsx';
 import './app.jsx';

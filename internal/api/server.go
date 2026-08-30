@@ -818,22 +818,21 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".css") {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 	}
-	// Gzip jeśli klient obsługuje
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		if strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".css") {
+	// Gzip jeśli klient obsługuje i skompresowany plik faktycznie istnieje.
+	// Content-Encoding nie może być ustawiony dla nieskompresowanego fallbacku.
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") &&
+		(strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".css")) {
+		gzPath := clean + ".gz"
+		if _, err := os.Stat(gzPath); err == nil {
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Set("Vary", "Accept-Encoding")
-			// Sprawdź czy jest skompresowana wersja
-			gzPath := clean + ".gz"
-			if _, err := os.Stat(gzPath); err == nil {
-				if strings.HasSuffix(clean, ".js") {
-					w.Header().Set("Content-Type", "application/javascript")
-				} else {
-					w.Header().Set("Content-Type", "text/css")
-				}
-				http.ServeFile(w, r, gzPath)
-				return
+			if strings.HasSuffix(clean, ".js") {
+				w.Header().Set("Content-Type", "application/javascript")
+			} else {
+				w.Header().Set("Content-Type", "text/css")
 			}
+			http.ServeFile(w, r, gzPath)
+			return
 		}
 	}
 	http.ServeFile(w, r, clean)
