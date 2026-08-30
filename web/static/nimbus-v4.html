@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nimbus NAS — Control Center</title>
+<link rel="stylesheet" href="nimbus-v4.css">
+</head>
+<body>
+<div class="app-shell">
+<aside class="sidebar">
+  <a class="brand" href="#"><span class="cloud">⌁</span><b>Nimbus</b></a>
+  <nav class="main-nav">
+    <button class="active" data-go="dashboard"><span>▦</span>Pulpit</button>
+    <button data-go="disks"><span>▣</span>Magazyn</button>
+    <button data-go="docker"><span>◇</span>Aplikacje</button>
+    <button data-go="network"><span>⌘</span>Sieć</button>
+    <button data-go="settings"><span>⚙</span>System</button>
+  </nav>
+  <nav class="side-foot"><button id="theme">☼</button><button>?</button><button data-go="users">♙</button><button id="logout">⇥</button></nav>
+</aside>
+
+<header class="topbar">
+  <div class="title"><b>Pulpit</b><i></i><span>NAS online</span><em></em><small>Host: <strong id="hostTop">nimbus</strong></small></div>
+  <label class="search"><span>⌕</span><input placeholder="Wyszukaj w systemie…"><kbd>⌘ K</kbd></label>
+  <div class="user-tools"><button>♧<sup id="alerts">0</sup></button><button>◉</button><span class="avatar">A</span><b id="username">admin</b><span>⌄</span></div>
+</header>
+
+<main class="workspace">
+  <section class="hardware-stage">
+    <div class="server">
+      <div class="server-top"></div>
+      <div class="ear left-ear"><b>hp</b></div>
+      <div class="drive-wall" id="driveWall"></div>
+      <div class="ear right-ear"><button class="power">◉</button><i></i><i></i><i></i><i></i><span>▭</span></div>
+      <div class="server-label">ProLiant<br>SE326M1 R2</div>
+    </div>
+    <div class="server-shadow"></div>
+  </section>
+
+  <section class="resource-flow">
+    <header><span>⌁</span><b>Zasoby systemowe</b></header>
+    <article class="resource cpu-row">
+      <div class="ring blue" id="cpuRing"><strong><span id="cpu">0</span>%</strong></div>
+      <svg class="spark" viewBox="0 0 190 46"><path class="gridline" d="M0 35H190"/><path id="cpuPath" d="M0 30L190 30"/></svg>
+      <div class="resource-copy"><b id="cpuClock">— GHz</b><small>Średnie użycie</small></div>
+    </article>
+    <article class="resource ram-row">
+      <div class="ring green" id="ramRing"><strong><span id="ram">0</span>%</strong></div>
+      <svg class="spark" viewBox="0 0 190 46"><path class="gridline" d="M0 35H190"/><path id="ramPath" d="M0 30L190 30"/></svg>
+      <div class="resource-copy"><b><span id="ramUsed">—</span> / <span id="ramTotal">—</span> GB</b><small>W użyciu</small></div>
+    </article>
+    <article class="resource net-row">
+      <div class="net-ring"><strong>↑ <span id="tx">0</span></strong><small>Mb/s</small><strong>↓ <span id="rx">0</span></strong><small>Mb/s</small></div>
+      <svg class="spark dual" viewBox="0 0 190 52"><path id="txPath" d="M0 20L190 20"/><path id="rxPath" d="M0 35L190 35"/></svg>
+      <div class="resource-copy"><b><span id="iface">LAN</span> <i></i></b><small id="speed">—</small></div>
+    </article>
+  </section>
+
+  <section class="activity panel">
+    <header><h2>Aktywność</h2></header>
+    <div class="timeline">
+      <div class="times"><span>09:00</span><span>09:15</span><span>09:30</span><span>09:45</span><span class="now">10:00</span><span>10:15</span><span>10:30</span><span>10:45</span><span>11:00</span></div>
+      <div class="track"><i></i><i class="warn"></i><i></i><i class="current"></i><i></i><i></i></div>
+      <div class="events">
+        <article><span class="event-icon green">▣</span><div><b>Udostępniono folder</b><small>Dane</small></div></article>
+        <article><span class="event-icon amber">○</span><div><b>Skanowanie dysków</b><small id="poolActivity">Pule ZFS</small></div></article>
+        <article><span class="event-icon green">♙</span><div><b>Kopia zapasowa</b><small>Backup_nocny</small></div></article>
+        <article><span class="event-icon green">♧</span><div><b>Aktualizacja systemu</b><small id="kernel">Kernel</small></div></article>
+        <article><span class="event-icon green">⇩</span><div><b>Utworzono migawkę</b><small id="snapshotPool">Pula 1</small></div></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="services panel">
+    <header><h2>Usługi</h2></header>
+    <div class="service-grid" id="services"></div>
+    <button class="manage" data-go="shares">Zarządzaj usługami <span>›</span></button>
+  </section>
+</main>
+</div>
+<script src="nimbus-v4.js"></script>
+</body></html>
