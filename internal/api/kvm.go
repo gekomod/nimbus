@@ -59,8 +59,7 @@ type VMInfo struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
 	State    string  `json:"state"`    // running|stopped|paused
-	OS       string  `json:"os"
-	"os/exec"`       // linux|windows|bsd|other
+	OS       string  `json:"os"`       // linux|windows|bsd|other
 	Icon     string  `json:"icon"`
 	CPU      int     `json:"cpu"`
 	CPUUsed  float64 `json:"cpuUsed"`
@@ -69,6 +68,10 @@ type VMInfo struct {
 	Disk     string  `json:"disk"`
 	DiskUsed int     `json:"diskUsed"` // GB
 	IP       string  `json:"ip"`
+	IPs      []string `json:"ips"`
+	MAC      string   `json:"mac"`
+	Network  string   `json:"network"`
+	VLAN     string   `json:"vlan"`
 	VNC      string  `json:"vnc"`
 	Uptime   string  `json:"uptime"`
 	Snapshot int     `json:"snapshot"`
@@ -248,13 +251,38 @@ func enrichVM(vm *VMInfo) {
 		vm.RAMUsed = 0
 	}
 
-	// IP z dominfo lub domifaddr
-	if vm.State == "running" {
-		ipOut, _ := runCmd("virsh", "domifaddr", vm.ID)
-		reIP := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)`)
-		if m := reIP.FindStringSubmatch(ipOut); m != nil {
-			vm.IP = m[1]
+	// Interfejs, sieć/bridge i VLAN.
+	ifOut, _ := runCmd("virsh", "domiflist", vm.ID)
+	for _, line := range strings.Split(ifOut, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 5 && (f[1] == "network" || f[1] == "bridge" || f[1] == "direct") {
+			vm.Network, vm.MAC = f[2], f[4]
+			if f[1] == "bridge" { vm.Network = "bridge:" + f[2] }
+			break
 		}
+	}
+	reVLAN := regexp.MustCompile(`<vlan>[\s\S]*?<tag id=['\"](\d+)['\"]`)
+	if m := reVLAN.FindStringSubmatch(xmlOutMem); m != nil { vm.VLAN = m[1] }
+	if vm.VLAN == "" && vm.Network != "" && !strings.HasPrefix(vm.Network, "bridge:") {
+		if netXML, err := runCmd("virsh", "net-dumpxml", vm.Network); err == nil {
+			if m := reVLAN.FindStringSubmatch(netXML); m != nil { vm.VLAN = m[1] }
+		}
+	}
+	if vm.VLAN == "" { vm.VLAN = "—" }
+	if vm.Network == "" { vm.Network = "—" }
+	if vm.MAC == "" { vm.MAC = "—" }
+
+	// IP: agent QEMU, dzierżawy DHCP libvirt, a na końcu tablica ARP.
+	if vm.State == "running" {
+		reIP := regexp.MustCompile(`(?:\d{1,3}\.){3}\d{1,3}`)
+		seen := map[string]bool{}
+		for _, source := range []string{"agent", "lease", "arp"} {
+			ipOut, _ := runCmd("virsh", "domifaddr", vm.ID, "--source", source)
+			for _, ip := range reIP.FindAllString(ipOut, -1) {
+				if !seen[ip] { seen[ip] = true; vm.IPs = append(vm.IPs, ip) }
+			}
+		}
+		if len(vm.IPs) > 0 { vm.IP = vm.IPs[0] }
 		if vm.IP == "" { vm.IP = "—" }
 	} else {
 		vm.IP = "—"
@@ -464,8 +492,7 @@ func (s *Server) handleKVMCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Name string `json:"name"`
-		OS   string `json:"os"
-	"os/exec"`
+		OS   string `json:"os"`
 		CPU  int    `json:"cpu"`
 		RAM  int    `json:"ram"`  // MB
 		Disk int    `json:"disk"` // GB
@@ -998,7 +1025,7 @@ func (s *Server) handleKVMInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := runCmd("apt-get", "install", "-y",
 		"qemu-kvm", "libvirt-daemon-system", "libvirt-clients",
-		"bridge-utils", "virtinst", "novnc", "websockify")
+		"bridge-utils", "virtinst", "novnc", "websockify", "genisoimage")
 	if err != nil {
 		jsonErr(w, out, http.StatusInternalServerError)
 		return

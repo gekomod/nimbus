@@ -215,6 +215,11 @@ func (s *Server) routes() {
 	a("/api/kvm/vnc-proxy", s.handleKVMVNCProxy)
 	a("/api/kvm/networks",  s.handleKVMNetworks)
 	a("/api/kvm/delete",    s.handleKVMDelete)
+	a("/api/kvm/templates", s.handleKVMTemplates)
+	a("/api/kvm/template-deploy", s.handleKVMTemplateDeploy)
+	a("/api/kvm/template-jobs", s.handleKVMTemplateJobs)
+	a("/api/remote-access/status", s.handleRemoteAccessStatus)
+	a("/api/remote-access/action", s.handleRemoteAccessAction)
 
 	// Fail2Ban
 	a("/api/system/fail2ban-status", s.handleFail2BanStatus)
@@ -924,4 +929,3 @@ func (s *Server) handleDownloadsProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.dlProxy.ServeHTTP(w, r)
 }
-

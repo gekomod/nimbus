@@ -231,6 +231,7 @@ const SCREENS = {
   netdetail: { title: 'Sieć szczegółowo', sub: 'Bandwidth · per-kontener · firewall', comp: () => <NetworkDetail/>, crumbs: ['nimbus','Sieć','Szczegóły'] },
   network:   { title: 'Sieć',             sub: '2× 10 GbE · WireGuard · firewall', comp: () => <Network/>, crumbs: ['nimbus','Sieć'] },
   vpn:       { title: 'VPN · WireGuard',  sub: 'Peery · statystyki · QR · mapa', comp: () => <Vpn/>, crumbs: ['nimbus','Sieć','VPN'] },
+  remote:    { title: 'Dostęp zdalny', sub: 'Tailscale · Cloudflare Tunnel · bez otwierania portów', comp: () => <RemoteAccess/>, crumbs: ['nimbus','Sieć','Dostęp zdalny'] },
   servers:   { title: 'Serwery',          sub: 'Zarządzanie zdalnymi hostami SSH', comp: () => <Servers/>, crumbs: ['nimbus','Sieć','Serwery'] },
   routers:   { title: 'Routery',          sub: 'Xiaomi BE6500 · Cudy LT400 · MikroTik · OpenWrt · inne', comp: () => <RouterManager/>, crumbs: ['nimbus','Sieć','Routery'] },
   logs:      { title: 'Logi systemowe',   sub: 'Strumień zdarzeń na żywo', comp: () => <Logs/>, crumbs: ['nimbus','System','Logi'] },

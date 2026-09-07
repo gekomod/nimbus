@@ -21,6 +21,35 @@ const kvmApi = {
   isoDownloads: ()       => fetch('/api/kvm/iso-download', {credentials:'include'}).then(r=>r.json()),
   isoDeleteDownload: (id) => fetch('/api/kvm/iso-download?id='+id, {method:'DELETE',credentials:'include'}),
   install:   ()         => fetch('/api/kvm/install',   {method:'POST',credentials:'include'}),
+  templates: ()         => fetch('/api/kvm/templates', {credentials:'include'}).then(r=>r.json()),
+  templateDeploy: data  => fetch('/api/kvm/template-deploy', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Błąd wdrażania');return d}),
+  templateJobs: ()      => fetch('/api/kvm/template-jobs', {credentials:'include'}).then(r=>r.json()),
+};
+
+const KVMTemplatesPanel = ({ onReady }) => {
+  const [templates,setTemplates]=React.useState([]), [jobs,setJobs]=React.useState([]);
+  const [networks,setNetworks]=React.useState([]);
+  const [chosen,setChosen]=React.useState(null), [error,setError]=React.useState('');
+  const [form,setForm]=React.useState({name:'',network:'default',cpu:2,ram:2048,disk:20,sshKey:''});
+  const loadJobs=()=>kvmApi.templateJobs().then(d=>setJobs(d.jobs||[])).catch(()=>{});
+  React.useEffect(()=>{kvmApi.templates().then(d=>setTemplates(d.templates||[]));kvmApi.networks().then(d=>setNetworks(d.networks||[])).catch(()=>{});loadJobs();const t=setInterval(loadJobs,1800);return()=>clearInterval(t)},[]);
+  React.useEffect(()=>{if(jobs.some(j=>j.status==='done'))onReady&&onReady()},[jobs.map(j=>j.status).join(',')]);
+  const select=t=>{setChosen(t);setForm(f=>({...f,name:t.id+'-01',cpu:t.min_cpu,ram:t.min_ram,disk:t.min_disk}))};
+  const deploy=async()=>{setError('');try{await kvmApi.templateDeploy({template:chosen.id,...form});setChosen(null);loadJobs()}catch(e){setError(e.message)}};
+  return <div className="col" style={{gap:'var(--gutter)'}}>
+    <div className="card" style={{padding:18}}><div className="card-title">Gotowe systemy</div><div className="card-sub">Oficjalne obrazy cloud QCOW2 · szybkie wdrożenie · cloud-init · QEMU Guest Agent</div></div>
+    <div className="grid grid-3">{templates.map(t=><button key={t.id} className="card" onClick={()=>select(t)} style={{padding:18,textAlign:'left',cursor:'pointer',border:chosen?.id===t.id?'1px solid var(--accent)':undefined}}>
+      <div className="row" style={{justifyContent:'space-between'}}><span style={{fontSize:28}}>{t.icon}</span><span className="badge">{t.version}</span></div>
+      <div style={{fontWeight:700,marginTop:12}}>{t.name}</div><div className="card-sub" style={{marginTop:5,minHeight:34}}>{t.description}</div>
+      <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:12}}>{t.min_cpu} vCPU · {Math.round(t.min_ram/1024*10)/10} GB RAM · {t.min_disk} GB</div>
+    </button>)}</div>
+    {chosen&&<div className="card" style={{padding:20}}><div className="row" style={{justifyContent:'space-between'}}><div><div className="card-title">Wdróż {chosen.name} {chosen.version}</div><div className="card-sub">Obraz zostanie pobrany raz i zachowany jako baza kolejnych VM.</div></div><button className="icon-btn" onClick={()=>setChosen(null)}>×</button></div>
+      <div className="grid grid-4" style={{marginTop:16}}><label>Nazwa VM<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>Sieć<select value={form.network} onChange={e=>setForm({...form,network:e.target.value})}>{(networks.length?networks:[{name:'default'}]).map(n=><option key={n.name||n} value={n.name||n}>{n.name||n}</option>)}</select></label><label>vCPU<input type="number" min={chosen.min_cpu} value={form.cpu} onChange={e=>setForm({...form,cpu:+e.target.value})}/></label><label>RAM MB<input type="number" min={chosen.min_ram} step="512" value={form.ram} onChange={e=>setForm({...form,ram:+e.target.value})}/></label></div>
+      <div className="grid grid-2" style={{marginTop:12}}><label>Dysk GB<input type="number" min={chosen.min_disk} value={form.disk} onChange={e=>setForm({...form,disk:+e.target.value})}/></label><label>Klucz publiczny SSH (opcjonalnie)<input value={form.sshKey} onChange={e=>setForm({...form,sshKey:e.target.value})} placeholder="ssh-ed25519 AAAA…"/></label></div>
+      {error&&<div style={{color:'var(--err)',marginTop:10}}>{error}</div>}<button className="btn primary" onClick={deploy} style={{marginTop:16}}>Pobierz i uruchom system</button>
+    </div>}
+    {jobs.length>0&&<div className="card"><div style={{padding:16,borderBottom:'1px solid var(--line)'}}><div className="card-title">Wdrożenia</div></div>{jobs.sort((a,b)=>new Date(b.started)-new Date(a.started)).map(j=><div key={j.id} style={{padding:'14px 16px',borderBottom:'1px solid var(--line)'}}><div className="row" style={{justifyContent:'space-between'}}><b>{j.name}</b><span className={`badge ${j.status==='done'?'ok':j.status==='error'?'err':'warn'}`}>{j.status==='done'?'GOTOWE':j.status==='error'?'BŁĄD':j.progress+'%'}</span></div><div className="card-sub" style={{marginTop:4}}>{j.error||j.step}</div><div style={{height:4,background:'var(--line)',borderRadius:4,marginTop:9}}><div style={{height:'100%',width:j.progress+'%',background:j.status==='error'?'var(--err)':'var(--accent)',borderRadius:4}}/></div></div>)}</div>}
+  </div>
 };
 
 const OS_COLOR = { windows:'oklch(0.65 0.15 220)', linux:'oklch(0.65 0.18 145)', bsd:'oklch(0.65 0.2 25)' };
@@ -602,7 +631,7 @@ const VmCard = ({ vm, onAction }) => {
         </div>
         <div style={{flex:1,minWidth:0}}>
           <div style={{fontWeight:600,fontSize:14,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{vm.name}</div>
-          <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:2}}>{vm.ip} · VNC :{vm.vnc}</div>
+          <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:2}}>{vm.ip} · {vm.network||'—'}{vm.vlan&&vm.vlan!=='—'?' · VLAN '+vm.vlan:''} · VNC :{vm.vnc}</div>
         </div>
         <span className="badge" style={{background:stateColor[vm._pending?'running':vm.state]+'22',color:stateColor[vm._pending?'running':vm.state],flexShrink:0}}>
           {vm._pending
@@ -1218,6 +1247,7 @@ const KvmVirtualization = () => {
           <button className={tab==='iso'?'active':''} onClick={()=>setTab('iso')}>
             💿 Obrazy ISO
           </button>
+          <button className={tab==='templates'?'active':''} onClick={()=>setTab('templates')}>📦 Gotowe systemy</button>
         </div>
         {tab==='vms' && (
           <div className="row gap-sm">
@@ -1246,7 +1276,7 @@ const KvmVirtualization = () => {
         ) : (
           <div className="card">
             <table className="table">
-              <thead><tr><th>Stan</th><th>Nazwa</th><th>OS</th><th>vCPU</th><th>RAM</th><th>Dysk</th><th>IP</th><th>Uptime</th><th></th></tr></thead>
+              <thead><tr><th>Stan</th><th>Nazwa</th><th>OS</th><th>vCPU</th><th>RAM</th><th>Dysk</th><th>IP</th><th>Sieć / VLAN</th><th>Uptime</th><th></th></tr></thead>
               <tbody>
                 {vms.map(vm=>{
                   const sc = {running:'var(--ok)',stopped:'var(--fg-dim)',paused:'var(--warn)',shutting_down:'oklch(0.65 0.2 25)'};
@@ -1264,6 +1294,7 @@ const KvmVirtualization = () => {
                       <td className="mono">{Math.round(vm.ram/1024)} GB / {Math.round(vm.ramUsed/1024*10)/10} GB</td>
                       <td className="mono dim">{vm.disk}</td>
                       <td className="mono">{vm.ip}</td>
+                      <td className="mono dim">{vm.network||'—'}{vm.vlan&&vm.vlan!=='—'?` / ${vm.vlan}`:''}</td>
                       <td className="mono dim">{vm.uptime}</td>
                       <td>
                         <div className="row gap-sm">
@@ -1285,6 +1316,7 @@ const KvmVirtualization = () => {
       </>)}
 
       {tab === 'iso'    && <KVMISOPanel kvmStatus={kvmStatus}/>}
+      {tab === 'templates' && <KVMTemplatesPanel onReady={load}/>}
       {tab === 'config' && <KVMConfigPanel kvmStatus={kvmStatus} setKvmStatus={setKvmStatus}/>}
     </div>
   );

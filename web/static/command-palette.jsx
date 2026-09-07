@@ -18,6 +18,7 @@ const CP_ITEMS = [
   { id: 'nav-processes',    type: 'nav',    icon: 'process',   label: 'Procesy',              sub: 'Lista procesów systemowych',       screen: 'processes' },
   { id: 'nav-terminal',     type: 'nav',    icon: 'terminal',  label: 'Terminal',             sub: 'Sesja powłoki przez przeglądarkę',screen: 'terminal' },
   { id: 'nav-kvm',          type: 'nav',    icon: 'process',   label: 'Wirtualizacja KVM',    sub: 'KVM/QEMU · libvirt · VNC',        screen: 'kvm' },
+  { id: 'nav-remote',       type: 'nav',    icon: 'globe',     label: 'Dostęp zdalny',        sub: 'Tailscale · Cloudflare Tunnel',  screen: 'remote' },
   { id: 'nav-temps',        type: 'nav',    icon: 'thermometer',label: 'Temperatury',         sub: 'CPU · dyski · HBA',               screen: 'temps' },
   { id: 'nav-smart',        type: 'nav',    icon: 'thermometer',label: 'S.M.A.R.T.',          sub: 'Pełny raport dysków',             screen: 'smart' },
   { id: 'nav-settings',     type: 'nav',    icon: 'settings',  label: 'Ustawienia',           sub: 'System · backup · alerty · UPS',  screen: 'settings' },

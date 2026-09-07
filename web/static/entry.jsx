@@ -17,6 +17,7 @@ import './screens-system.jsx';
 import './screens-users.jsx';
 import './screens-netsvcs.jsx';
 import './screens-vpn.jsx';
+import './screens-remote-access.jsx';
 import './screens-nfs.jsx';
 import './screens-servers.jsx';
 import './screens-routers.jsx';

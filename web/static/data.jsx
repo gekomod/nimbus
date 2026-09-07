@@ -54,6 +54,7 @@ window.NAV = [
   { group: "Sieć", items: [
     { id: "network",    label: "Sieć",              icon: "network" },
     { id: "vpn",        label: "VPN · WireGuard",   icon: "shield"  },
+    { id: "remote",     label: "Dostęp zdalny",     icon: "globe"   },
     { id: "netdetail",  label: "Sieć szczegółowo",  icon: "network" },
     { id: "servers",    label: "Serwery",            icon: "network" },
     { id: "routers",    label: "Routery",            icon: "router"  },
