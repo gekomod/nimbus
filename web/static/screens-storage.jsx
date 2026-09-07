@@ -161,7 +161,7 @@ const Storage = () => {
         <div className={"tab " + (tab==='leds'       ? 'active':'')} onClick={()=>setTab('leds')}>Zatoki (LED)</div>
       </div>
 
-      {tab==='pools'      && (selectedPool ? <PoolDetail pool={selectedPool} onBack={()=>setSelectedPool(null)} onViewSnapshots={()=>setTab('snap')}/> : <PoolsList onSelect={setSelectedPool}/>)}
+      {tab==='pools'      && (selectedPool ? <PoolDetail pool={selectedPool} onBack={()=>setSelectedPool(null)} onViewSnapshots={()=>setTab('snap')}/> : <PoolsList onSelect={setSelectedPool} onOpenMounts={()=>setTab('mounts')}/>)}
       {tab==='disks'      && <DisksList onSelect={setSelectedDisk} selected={selectedDisk}/>}
       {tab==='mounts'     && <MountsView onEditFstab={()=>setShowFstab(true)} onAdd={()=>setShowAddMount(true)} onUnmount={setUnmountTarget}/>}
       {tab==='unassigned' && <UnassignedView onFormat={setFormatTarget} onMount={setMountTarget}/>}
@@ -179,26 +179,37 @@ const Storage = () => {
 };
 
 // ── Pools list ────────────────────────────────────────────────────────────────
-const PoolsList = ({ onSelect }) => {
+const PoolsList = ({ onSelect, onOpenMounts }) => {
   const POOLS = useStore('POOLS') || [];
   const [showCreate, setShowCreate] = React.useState(false);
+
+  React.useEffect(() => {
+    const load = () => fetch('/api/storage/pools',{credentials:'include'})
+      .then(r=>r.ok?r.json():null)
+      .then(raw=>{ if(raw) storeSet('POOLS', _parsePools(raw)); })
+      .catch(()=>{});
+    load();
+    const id = setInterval(load, 20000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <>
     <div className="grid grid-3">
       {POOLS.length === 0 && (
         <div className="card" style={{gridColumn:'1/-1',padding:40,textAlign:'center',color:'var(--fg-dim)'}}>
-          Ładowanie pul ZFS… (lub ZFS niedostępny)
+          Brak pul ZFS i zamontowanych dysków danych
         </div>
       )}
       {POOLS.map(p => {
         const pct = p.total > 0 ? (p.used / p.total) * 100 : 0;
         const cls = pct > 90 ? 'err' : pct > 75 ? 'warn' : 'ok';
         return (
-          <div key={p.id || p.name} className="card" style={{cursor:'pointer'}} onClick={() => onSelect(p)}>
+          <div key={p.id || p.name} className="card" style={{cursor:'pointer'}} onClick={() => p.kind==='mount' ? onOpenMounts() : onSelect(p)}>
             <div className="card-head">
               <div>
                 <div className="card-title">{p.name}</div>
-                <div className="card-sub">{p.type || 'ZFS'} · {p.drives || '—'} dysków · parytet {p.parity || 0}</div>
+                <div className="card-sub">{p.kind==='mount' ? `${p.type} · ${p.device}` : `${p.type || 'ZFS'} · ${p.drives || '—'} dysków · parytet ${p.parity || 0}`}</div>
               </div>
               <span className={"badge " + (p.health==='ok'?'ok':'warn')}>
                 <span className="dot pulse"/>{p.health==='ok'?'OK':'UWAGA'}
@@ -219,6 +230,7 @@ const PoolsList = ({ onSelect }) => {
                 <Mini label="ODCZYT"  v={fmtMbps(p.read_mbps)}/>
                 <Mini label="ZAPIS"   v={fmtMbps(p.write_mbps)}/>
               </div>
+			  {p.kind==='mount' && <div className="mono dim" style={{fontSize:11}}><Icon name="folder" size={11}/> {p.mount}</div>}
               <div className={"bar " + cls}><i style={{width:pct+'%'}}/></div>
             </div>
           </div>
@@ -680,11 +692,11 @@ const DisksList = ({ onSelect, selected }) => {
 const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
   const MOUNTS = useStore('MOUNTS') || [];
   const [mounts, setMounts] = React.useState(MOUNTS);
+  const [fstabBusy, setFstabBusy] = React.useState({});
+  const [error, setError] = React.useState('');
   React.useEffect(() => { setMounts(MOUNTS); }, [MOUNTS]);
 
-  // Odśwież z API co 8s
-  React.useEffect(() => {
-    const load = () => fetch('/api/storage/mounts',{credentials:'include'})
+  const loadMounts = React.useCallback(() => fetch('/api/storage/mounts',{credentials:'include'})
       .then(r=>r.ok?r.json():null)
       .then(raw => {
         if (!Array.isArray(raw)) return;
@@ -697,17 +709,38 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
           size:    (m.total_gb||0).toFixed(1) + ' GB',
           used:    m.used_gb || 0,
           pct:     m.percent || 0,
-          auto:    true,
+          auto:    !!m.in_fstab,
           type:    (m.fs||'').toLowerCase()==='zfs'?'ZFS':(m.fs||'').toUpperCase().slice(0,5),
           inFstab: !!m.in_fstab,
         }));
         setMounts(parsed);
         storeSet('MOUNTS', parsed);
-      }).catch(()=>{});
-    load();
-    const id = setInterval(load, 20000);
+      }).catch(()=>{}), []);
+
+  // Odśwież z API co 20s
+  React.useEffect(() => {
+    loadMounts();
+    const id = setInterval(loadMounts, 20000);
     return () => clearInterval(id);
-  }, []);
+  }, [loadMounts]);
+
+  const toggleFstab = async (mount) => {
+	const protectedMounts=new Set(['/','/boot','/boot/efi','/efi','/usr','/var','/home','/tmp','/opt']);
+    if (mount.fs.toLowerCase()==='zfs' || protectedMounts.has(mount.mp) || fstabBusy[mount.mp]) return;
+    setError('');
+    setFstabBusy(prev=>({...prev,[mount.mp]:true}));
+    try {
+      const r = await fetch('/api/storage/fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({device:mount.device,target:mount.mp,enable:!mount.inFstab})});
+      const data = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(data.error||'Nie udało się zmienić wpisu /etc/fstab');
+      await loadMounts();
+    } catch(e) {
+      setError(e.message);
+    } finally {
+      setFstabBusy(prev=>({...prev,[mount.mp]:false}));
+    }
+  };
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
@@ -722,6 +755,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
             <button className="btn sm primary" onClick={onAdd}><Icon name="plus" size={12}/> Dodaj montowanie</button>
           </div>
         </div>
+		{error && <div style={{margin:'10px 16px 0',padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',color:'var(--err)',borderRadius:5,fontSize:'var(--fs-sm)'}}>{error}</div>}
         <table className="table">
           <thead><tr>
             <th>Punkt montowania</th><th>Urządzenie</th><th>Typ</th><th>System plików</th><th>Opcje</th><th>Wykorzystanie</th><th>Auto</th><th>fstab</th><th></th>
@@ -730,6 +764,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
             {mounts.length === 0 && <tr><td colSpan={9} style={{textAlign:'center',padding:30,color:'var(--fg-dim)'}}>Ładowanie punktów montowania…</td></tr>}
             {mounts.map((m,i) => {
               const pct = m.pct || (m.used / parseFloat(m.size)) * 100 || 0;
+			  const toggleDisabled=m.fs.toLowerCase()==='zfs'||['/','/boot','/boot/efi','/efi','/usr','/var','/home','/tmp','/opt'].includes(m.mp);
               return (
                 <tr key={i}>
                   <td><span className="row gap-sm"><Icon name="folder" size={12} style={{color:'var(--fg-dim)'}}/><span className="mono">{m.mp}</span></span></td>
@@ -743,7 +778,9 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
                       <span className="mono dim" style={{fontSize:11,minWidth:78,textAlign:'right'}}>{m.used.toFixed?m.used.toFixed(1):m.used}/{m.size}</span>
                     </div>
                   </td>
-                  <td><div className={"toggle "+(m.auto?'on':'')}/></td>
+                  <td><div className={"toggle "+(m.auto?'on':'')+(fstabBusy[m.mp]?' disabled':'')}
+					title={toggleDisabled?'Montowanie systemowe jest chronione':'Zmień wpis w /etc/fstab'}
+					onClick={()=>toggleFstab(m)} style={toggleDisabled?{opacity:.45,cursor:'not-allowed'}:{}}/></td>
                   <td>{m.inFstab?<span className="badge ok">tak</span>:<span className="badge warn">nie</span>}</td>
                   <td>
                     <button className="btn ghost sm" onClick={()=>onUnmount(m)}>Odmontuj</button>
@@ -1057,40 +1094,73 @@ const SnapPolicyModal = ({ onClose }) => {
 
 // ── SMART view ────────────────────────────────────────────────────────────────
 const SmartView = () => {
-  const DISKS = useStore('DISKS') || [];
+  const [disks, setDisks] = React.useState([]);
   const [details, setDetails] = React.useState({});
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState('');
+
+  const loadDisks = React.useCallback(() => {
+	setLoading(true);setError('');
+    return fetch('/api/storage/smart',{credentials:'include'})
+      .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można pobrać danych S.M.A.R.T.'); return d; })
+      .then(data=>setDisks((data.devices||[]).map(d=>({
+        bay:d.bay||(d.name||'').replace('/dev/',''), name:d.name, model:d.model||'—', serial:d.serial||'—',
+        size:d.size||'—', type:d.type||d.protocol||'—', protocol:d.protocol||'—',
+        temp:Number(d.temp)||0, hours:Number(d.hours)||0, smart:(d.smart||'unknown').toLowerCase(), source:d.source||'smartctl'
+      }))))
+      .catch(e=>setError(e.message))
+      .finally(()=>setLoading(false));
+  }, []);
+
+  React.useEffect(() => {
+    loadDisks();
+    const id=setInterval(loadDisks,30000);
+    return()=>clearInterval(id);
+  }, [loadDisks]);
 
   const loadDetails = async (bay) => {
-    const r = await fetch('/api/storage/smart/details/'+bay,{credentials:'include'}).catch(()=>null);
-    if (!r || !r.ok) return;
-    const d = await r.json();
-    setDetails(prev => ({...prev, [bay]: d}));
+    setError('');
+    try {
+      const r = await fetch('/api/storage/smart/details/'+encodeURIComponent(bay),{credentials:'include'});
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.error||'Nie można pobrać szczegółów S.M.A.R.T.');
+      setDetails(prev => ({...prev, [bay]: d}));
+    } catch(e) { setError(e.message); }
   };
 
   return (
     <div className="grid grid-2">
-      {DISKS.length === 0 && <div className="card" style={{gridColumn:'1/-1',padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie danych S.M.A.R.T.…</div>}
-      {DISKS.slice(0,8).map(d => {
+      <div style={{gridColumn:'1/-1',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+		<div className="dim" style={{fontSize:'var(--fs-sm)'}}>{disks.length} dysków obsługiwanych przez smartctl lub HP Smart Array</div>
+		<button className="btn sm" onClick={loadDisks} disabled={loading}><Icon name="refresh" size={11}/> Odśwież</button>
+	  </div>
+      {error && <div className="card" style={{gridColumn:'1/-1',padding:14,color:'var(--err)'}}>{error}</div>}
+      {loading && disks.length === 0 && <div className="card" style={{gridColumn:'1/-1',padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie danych S.M.A.R.T.…</div>}
+      {!loading && disks.length === 0 && !error && <div className="card" style={{gridColumn:'1/-1',padding:40,textAlign:'center',color:'var(--fg-dim)'}}>Nie wykryto dysków dostępnych przez smartctl ani HP Smart Array.</div>}
+      {disks.map(d => {
         const det = details[d.bay];
         const attrs = det && det.ata_smart_attributes && det.ata_smart_attributes.table;
         const getAttr = (id) => attrs ? (attrs.find(a=>a.id===id)||{}).raw?.value || '0' : '—';
+		const passed = d.smart==='passed'||d.smart==='ok';
+		const warned = d.smart==='warn'||d.smart==='failed';
         return (
           <div key={d.bay} className="card">
             <div className="card-head">
               <div>
                 <div className="card-title">{d.bay} · {d.model}</div>
-                <div className="card-sub">{d.serial} · {d.type}</div>
+				<div className="card-sub">{d.serial} · {d.type} · {d.size}</div>
               </div>
               <div className="row gap-sm">
-                {d.smart==='warn' ? <span className="badge warn">UWAGA</span> : <span className="badge ok">PASSED</span>}
+				{passed ? <span className="badge ok">PASSED</span> : warned ? <span className="badge warn">UWAGA</span> : <span className="badge">BRAK DANYCH</span>}
                 <button className="btn sm" onClick={()=>loadDetails(d.bay)}><Icon name="refresh" size={11}/></button>
               </div>
             </div>
             <div className="card-body">
               <table className="table" style={{fontSize:11}}>
                 <tbody>
-                  <tr><td className="dim">Temperatura</td><td className="mono" style={d.temp>42?{color:'var(--warn)'}:{}}>{d.temp}°C</td></tr>
-                  <tr><td className="dim">Godziny pracy</td><td className="mono">{(d.hours||0).toLocaleString('pl')}</td></tr>
+				  <tr><td className="dim">Źródło</td><td className="mono">{d.source==='ssacli'?'HP Smart Array':'smartctl'}</td></tr>
+                  <tr><td className="dim">Temperatura</td><td className="mono" style={d.temp>42?{color:'var(--warn)'}:{}}>{d.temp?d.temp+'°C':'—'}</td></tr>
+                  <tr><td className="dim">Godziny pracy</td><td className="mono">{d.hours?d.hours.toLocaleString('pl'):'—'}</td></tr>
                   <tr><td className="dim">5 Reallocated Sectors</td><td className="mono">{getAttr(5)}</td></tr>
                   <tr><td className="dim">197 Current Pending</td><td className="mono">{getAttr(197)}</td></tr>
                   <tr><td className="dim">198 Offline Uncorrectable</td><td className="mono">{getAttr(198)}</td></tr>
@@ -1226,29 +1296,54 @@ const MountModal = ({ disk, onClose }) => {
 const FstabModal = ({ onClose }) => {
   const FSTAB_TEXT = useStore('FSTAB_TEXT') || '';
   const [text, setText] = React.useState(FSTAB_TEXT);
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState('');
+  const [error, setError] = React.useState('');
+
+  React.useEffect(() => {
+    fetch('/api/storage/fstab-content',{credentials:'include'})
+      .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można odczytać /etc/fstab'); return d; })
+      .then(d=>{ const content=d.content||''; setText(content); storeSet('FSTAB_TEXT',content); })
+      .catch(e=>setError(e.message))
+      .finally(()=>setLoading(false));
+  }, []);
 
   const check = async () => {
-    const r = await fetch('/api/storage/fstab-check',{credentials:'include'}).then(r=>r.json()).catch(()=>null);
-    if (r) alert(r.output || (r.ok ? 'OK — brak błędów' : 'Błędy w fstab!'));
+    setBusy(true);setError('');setMessage('');
+    try {
+      const response = await fetch('/api/storage/fstab-check',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})});
+      const data = await response.json();
+      if(!response.ok) throw new Error(data.error||'Nie można sprawdzić fstab');
+      if(!data.ok) throw new Error(data.output||'Wykryto błędy w fstab');
+      setMessage(data.output||'Składnia poprawna — brak błędów.');
+    } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
   const save = async () => {
-    await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})}).catch(()=>{});
-    await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'mount -a'})}).catch(()=>{});
-    storeSet('FSTAB_TEXT', text);
-    onClose();
+    setBusy(true);setError('');setMessage('');
+    try {
+      const response = await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,apply:true})});
+      const data = await response.json().catch(()=>({}));
+      if(data.saved) storeSet('FSTAB_TEXT', text);
+      if(!response.ok) throw new Error(data.error||'Nie udało się zapisać /etc/fstab');
+      storeSet('FSTAB_TEXT', text);
+      onClose();
+    } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
   return (
     <Modal title="Edytor /etc/fstab" sub="Zmiany aktywują się po wykonaniu mount -a lub po restarcie" onClose={onClose} width={920}
       footer={<>
-        <button className="btn sm ghost" onClick={check}>Sprawdź składnię</button>
-        <button className="btn sm" onClick={async()=>{const cur=text; setText(cur); alert('Kopia w schowku')}}>Kopia zapasowa</button>
+        <button className="btn sm ghost" disabled={busy||loading} onClick={check}>Sprawdź składnię</button>
+        <button className="btn sm" disabled={loading} onClick={async()=>{try{await navigator.clipboard.writeText(text);setMessage('Skopiowano zawartość do schowka.')}catch(e){setError('Nie można skopiować do schowka.')}}}>Kopiuj</button>
         <div style={{flex:1}}/>
         <button className="btn sm ghost" onClick={onClose}>Anuluj</button>
-        <button className="btn sm primary" onClick={save}>Zapisz i mount -a</button>
+        <button className="btn sm primary" disabled={busy||loading} onClick={save}>{busy?'Przetwarzanie…':'Zapisz i mount -a'}</button>
       </>}>
-      <textarea value={text} onChange={e=>setText(e.target.value)} spellCheck={false}
+      {error&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',color:'var(--err)',borderRadius:5,marginBottom:10,whiteSpace:'pre-wrap'}}>{error}</div>}
+      {message&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--ok) 35%,var(--line))',color:'var(--ok)',borderRadius:5,marginBottom:10,whiteSpace:'pre-wrap'}}>{message}</div>}
+      <textarea value={loading?'Ładowanie /etc/fstab…':text} onChange={e=>setText(e.target.value)} disabled={loading||busy} spellCheck={false}
         style={{width:'100%',minHeight:360,background:'var(--bg-1)',border:'1px solid var(--line)',color:'var(--fg)',padding:'12px 14px',borderRadius:5,fontSize:12,fontFamily:'var(--font-mono)',lineHeight:1.55,outline:'none',resize:'vertical'}}/>
       <div className="dim" style={{fontSize:11,marginTop:8}}>Format: <span className="mono">device · mount point · fs · opcje · dump · pass</span></div>
     </Modal>
@@ -1263,6 +1358,8 @@ const AddMountModal = ({ onClose }) => {
   const [opts,   setOpts]   = React.useState('rw,relatime');
   const [auto,   setAuto]   = React.useState(true);
   const [fstab,  setFstab]  = React.useState(true);
+  const [busy,   setBusy]   = React.useState(false);
+  const [error,  setError]  = React.useState('');
 
   const fsOpts = ['auto','ext4','ext3','ext2','xfs','btrfs','zfs','ntfs','exfat','vfat','nfs','cifs'];
   const ok = device.trim().length > 2 && mp.trim().length > 1;
@@ -1274,14 +1371,20 @@ const AddMountModal = ({ onClose }) => {
   };
 
   const doMount = async () => {
-    await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({device, target:mp, fs:fs==='auto'?'':fs, options:opts, persist:auto&&fstab})});
-    if(r.ok)onClose();else{const d=await r.json();alert(d.error||'Montowanie nie powiodło się')}
+    setBusy(true);setError('');
+    try {
+      const r = await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({device, target:mp, fs:fs==='auto'?'':fs, options:opts, persist:auto&&fstab})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error||'Montowanie nie powiodło się');
+      onClose();
+    } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
   return (
     <Modal title="Dodaj punkt montowania" sub="Ręczna konfiguracja montowania urządzenia lub zasobu sieciowego" onClose={onClose} width={700}
-      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm" disabled={!ok} onClick={testMount}>Testuj połączenie</button><button className="btn sm primary" disabled={!ok} onClick={doMount}>Zamontuj</button></>}>
+      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm" disabled={!ok||busy} onClick={testMount}>Testuj połączenie</button><button className="btn sm primary" disabled={!ok||busy} onClick={doMount}>{busy?'Montowanie…':'Zamontuj'}</button></>}>
+	  {error&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',color:'var(--err)',borderRadius:5,marginBottom:12}}>{error}</div>}
       <div className="grid" style={{gridTemplateColumns:'1fr 1fr',gap:12}}>
         <Field label="Urządzenie / źródło" hint="np. /dev/sdb1, UUID=…, 192.168.1.5:/share">
           <input style={inputCss} value={device} onChange={e=>setDevice(e.target.value)} placeholder="/dev/sdb1"/>

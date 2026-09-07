@@ -244,9 +244,12 @@ function _parsePools(raw) {
     const availGB = typeof p.avail === 'number' ? p.avail : (totalGB - usedGB);
 
     return {
-      id:     p.name || 'pool'+i,
+      id:     p.id || p.name || 'pool'+i,
       name:   p.name || 'pool'+i,
       type:   p.type || 'ZFS',
+	  kind:   p.kind || 'zfs',
+	  mount:  p.mount || '',
+	  device: p.device || '',
       total:  totalGB,  // GB
       used:   usedGB,   // GB
       avail:  availGB,  // GB — prawdziwe wolne z "zfs list"
@@ -273,9 +276,9 @@ function _parseMounts(raw) {
       opts:    m.options || m.Options || 'rw',
       size:    `${(m.total_gb || 0).toFixed(1)} GB`,
       used:    m.used_gb || 0,
-      auto:    true,
+      auto:    !!m.in_fstab,
       type:    (m.fs||'').toLowerCase() === 'zfs' ? 'ZFS' : (m.fs||'').toUpperCase().slice(0,5),
-      inFstab: true,
+      inFstab: !!m.in_fstab,
     }));
 }
 
@@ -302,7 +305,7 @@ async function _syncOnce() {
   const [overview, containers, pools, network, smb, ssh, nfs, ftp, logs] = await Promise.all([
     _get('/api/overview'),
     _get('/services/docker/containers'),
-    _get('/api/zfs/pools'),
+    _get('/api/storage/pools'),
     _get('/api/network'),
     _get('/services/samba/status'),
     _get('/services/ssh/status'),
@@ -332,7 +335,7 @@ async function _syncOnce() {
   }
 
   const p = _parsePools(pools);
-  if (p.length) storeSet('POOLS', p);
+  storeSet('POOLS', p);
 
   const c = _parseContainers(containers);
   if (c.length) {

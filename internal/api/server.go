@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -11,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"fmt"
 )
 
 type Config struct {
@@ -70,11 +70,11 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) routes() {
 	// public
-	s.mux.HandleFunc("/api/login",             s.handleLogin)
+	s.mux.HandleFunc("/api/login", s.handleLogin)
 	s.mux.HandleFunc("/api/login/verify-totp", s.handleVerifyTOTP)
-	s.mux.HandleFunc("/api/logout",     s.handleLogout)
+	s.mux.HandleFunc("/api/logout", s.handleLogout)
 	s.mux.HandleFunc("/api/check-auth", s.handleCheckAuth)
-	s.mux.HandleFunc("/api/status",     s.handlePublicStatus) // bez auth — dla strony logowania
+	s.mux.HandleFunc("/api/status", s.handlePublicStatus) // bez auth — dla strony logowania
 
 	a := func(p string, fn http.HandlerFunc) { s.mux.HandleFunc(p, s.auth_(fn)) }
 
@@ -103,10 +103,10 @@ func (s *Server) routes() {
 	a("/system/updates/install", s.handleUpdatesInstall)
 	a("/system/updates/changelog", s.handleUpdatesChangelog)
 	a("/system/updates/details", s.handleUpdatesDetails)
-	a("/system/updates/install-log",    s.handleUpdatesInstallLog)
-	a("/system/updates/history",        s.handleUpdatesHistory)
-	a("/system/updates/auto-config",    s.handleUpdatesAutoConfig)
-	a("/system/updates/reboot-required",s.handleUpdatesRebootRequired)
+	a("/system/updates/install-log", s.handleUpdatesInstallLog)
+	a("/system/updates/history", s.handleUpdatesHistory)
+	a("/system/updates/auto-config", s.handleUpdatesAutoConfig)
+	a("/system/updates/reboot-required", s.handleUpdatesRebootRequired)
 	a("/system/cron-jobs", s.handleCronJobs)
 	a("/api/system/cron-ddns", s.handleCronDDNS)
 	a("/system/cron-jobs/", s.handleCronJobAction)
@@ -118,13 +118,13 @@ func (s *Server) routes() {
 	a("/api/processes", s.handleProcesses)
 	a("/api/system-logs", s.handleSystemLogs)
 
-        // Bays
-	a("/api/bays/info",     s.handleBaysInfo)
-	a("/api/bays/tools",    s.handleBaysTools)
-	a("/api/bays/scan",     s.handleBaysScan)
-	a("/api/bays/all-off",  s.handleBaysAllOff)
-	a("/api/bays",          s.handleBays)
-	a("/api/bays/",         s.handleBayLED)
+	// Bays
+	a("/api/bays/info", s.handleBaysInfo)
+	a("/api/bays/tools", s.handleBaysTools)
+	a("/api/bays/scan", s.handleBaysScan)
+	a("/api/bays/all-off", s.handleBaysAllOff)
+	a("/api/bays", s.handleBays)
+	a("/api/bays/", s.handleBayLED)
 
 	// storage
 	a("/api/storage/devices", s.handleStorageDevices)
@@ -133,6 +133,7 @@ func (s *Server) routes() {
 	a("/api/storage/check-device", s.handleStorageCheckDevice)
 	a("/api/storage/rescan", s.handleStorageRescan)
 	a("/api/storage/mounts", s.handleMounts)
+	a("/api/storage/pools", s.handleStoragePools)
 	a("/api/mounts", s.handleMounts)
 	a("/api/storage/mount", s.handleStorageMount)
 	a("/api/storage/unmount", s.handleStorageUnmount)
@@ -167,7 +168,7 @@ func (s *Server) routes() {
 	a("/api/storage/smart/force-reallocation", s.handleStorageSMARTAction)
 	a("/api/storage/smart/fix-physical-issues", s.handleStorageSMARTAction)
 	a("/api/storage/smart/run-test", s.handleStorageSMARTRunTest)
-        a("/api/storage/smart-debug", s.handleStorageSMARTDebug)
+	a("/api/storage/smart-debug", s.handleStorageSMARTDebug)
 	a("/api/zfs/pools", s.handleZFSPools)
 	a("/api/zfs/snapshots", s.handleZFSSnapshots)
 	a("/api/zfs/snapshots/", s.handleZFSSnapshotAction)
@@ -200,20 +201,20 @@ func (s *Server) routes() {
 	a("/api/modules", s.handleModules)
 
 	// KVM / libvirt
-	a("/api/kvm/status",    s.handleKVMStatus)
-	a("/api/kvm/vms",       s.handleKVMList)
-	a("/api/kvm/action",    s.handleKVMAction)
-	a("/api/kvm/create",    s.handleKVMCreate)
+	a("/api/kvm/status", s.handleKVMStatus)
+	a("/api/kvm/vms", s.handleKVMList)
+	a("/api/kvm/action", s.handleKVMAction)
+	a("/api/kvm/create", s.handleKVMCreate)
 	a("/api/kvm/snapshots", s.handleKVMSnapshots)
-	a("/api/kvm/install",   s.handleKVMInstall)
-	a("/api/kvm/isos",      s.handleKVMISOs)
-	a("/api/kvm/config",    s.handleKVMConfig)
+	a("/api/kvm/install", s.handleKVMInstall)
+	a("/api/kvm/isos", s.handleKVMISOs)
+	a("/api/kvm/config", s.handleKVMConfig)
 	a("/api/kvm/novnc-diag", s.handleKVMNoVNCDiag)
 	a("/api/kvm/iso-download", s.handleKVMISODownload)
-	a("/api/kvm/vnc-config",  s.handleKVMVNCConfig)
+	a("/api/kvm/vnc-config", s.handleKVMVNCConfig)
 	a("/api/kvm/vnc-proxy", s.handleKVMVNCProxy)
-	a("/api/kvm/networks",  s.handleKVMNetworks)
-	a("/api/kvm/delete",    s.handleKVMDelete)
+	a("/api/kvm/networks", s.handleKVMNetworks)
+	a("/api/kvm/delete", s.handleKVMDelete)
 	a("/api/kvm/templates", s.handleKVMTemplates)
 	a("/api/kvm/template-deploy", s.handleKVMTemplateDeploy)
 	a("/api/kvm/template-jobs", s.handleKVMTemplateJobs)
@@ -224,105 +225,105 @@ func (s *Server) routes() {
 	a("/api/system/fail2ban-status", s.handleFail2BanStatus)
 
 	// Network detail — bandwidth, container traffic, firewall
-	a("/api/network/bandwidth",       s.handleNetworkBandwidth)
-	a("/api/network/containers",      s.handleContainerNetwork)
-	a("/api/network/firewall/rules",  s.handleFirewallRulesDirect)
+	a("/api/network/bandwidth", s.handleNetworkBandwidth)
+	a("/api/network/containers", s.handleContainerNetwork)
+	a("/api/network/firewall/rules", s.handleFirewallRulesDirect)
 
 	// Temperatury i wentylatory
-	a("/api/temps",              s.handleTemps)
-	a("/api/temps/install",      s.handleTempsInstall)
-	a("/api/fans/control",       s.handleFanControl)
-	a("/api/fans/auto",          s.handleFanAuto)
-	a("/api/fans/auto/status",   s.handleFanAutoStatus)
-	a("/api/fans/config",        s.handleFanConfig)
-	a("/api/fans/debug",         s.handleFanDebug)
+	a("/api/temps", s.handleTemps)
+	a("/api/temps/install", s.handleTempsInstall)
+	a("/api/fans/control", s.handleFanControl)
+	a("/api/fans/auto", s.handleFanAuto)
+	a("/api/fans/auto/status", s.handleFanAutoStatus)
+	a("/api/fans/config", s.handleFanConfig)
+	a("/api/fans/debug", s.handleFanDebug)
 
 	// UPS
-	a("/api/ups/status",  s.handleUPSStatus)
-	a("/api/ups/info",    s.handleUPSDetails)
+	a("/api/ups/status", s.handleUPSStatus)
+	a("/api/ups/info", s.handleUPSDetails)
 	a("/api/ups/command", s.handleUPSCommand)
-	a("/api/ups/config",  s.handleUPSConfig)
-	a("/api/ups/ports",        s.handleUPSPorts)
-	a("/api/ups/events",       s.handleUPSEvents)
-	a("/api/ups/upsmon",       s.handleUPSUpsmonConf)
-	a("/api/ups/notif-channels",  s.handleUPSNotifChannels)
-	a("/api/ups/voltage-history",   s.handleUPSVoltageHistory)
-	a("/api/ups/voltage-export",    s.handleUPSVoltageExport)
-	a("/api/ups/nut-config",        s.handleUPSNutConfig)
-	a("/api/ups/upsmon-config",     s.handleUPSUpsmonConfig)
-	a("/api/ups/slaves",            s.handleUPSSlaves)
-	a("/api/ups/selftests",         s.handleUPSSelftests)
-	a("/api/ups/rules",             s.handleUPSRules)
-	a("/api/ups/simulate",          s.handleUPSSimulate)
-	a("/api/ups/client-config",     s.handleUPSClientConfig)
-	a("/api/ups/service",           s.handleUPSServiceAction)
+	a("/api/ups/config", s.handleUPSConfig)
+	a("/api/ups/ports", s.handleUPSPorts)
+	a("/api/ups/events", s.handleUPSEvents)
+	a("/api/ups/upsmon", s.handleUPSUpsmonConf)
+	a("/api/ups/notif-channels", s.handleUPSNotifChannels)
+	a("/api/ups/voltage-history", s.handleUPSVoltageHistory)
+	a("/api/ups/voltage-export", s.handleUPSVoltageExport)
+	a("/api/ups/nut-config", s.handleUPSNutConfig)
+	a("/api/ups/upsmon-config", s.handleUPSUpsmonConfig)
+	a("/api/ups/slaves", s.handleUPSSlaves)
+	a("/api/ups/selftests", s.handleUPSSelftests)
+	a("/api/ups/rules", s.handleUPSRules)
+	a("/api/ups/simulate", s.handleUPSSimulate)
+	a("/api/ups/client-config", s.handleUPSClientConfig)
+	a("/api/ups/service", s.handleUPSServiceAction)
 	// ClamAV antivirus
-	a("/api/clamav/status",       s.handleClamStatus)
-	a("/api/clamav/scan",         s.handleClamScan)
-	a("/api/clamav/scan/",        s.handleClamScanItem)
-	a("/api/clamav/history",      s.handleClamHistory)
-	a("/api/clamav/quarantine",   s.handleClamQuarantine)
-	a("/api/clamav/signatures",   s.handleClamSignatures)
-	a("/api/clamav/schedules",    s.handleClamSchedules)
-	a("/api/clamav/logs",         s.handleClamLogs)
-	a("/api/clamav/config",       s.handleClamConfig)
-	a("/api/clamav/service",      s.handleClamService)
-	a("/api/clamav/onaccess",     s.handleClamOnAccess)
-	a("/api/clamav/virustotal",   s.handleClamVirusTotal)
-	a("/api/clamav/freshclam",    s.handleClamFreshclam)
+	a("/api/clamav/status", s.handleClamStatus)
+	a("/api/clamav/scan", s.handleClamScan)
+	a("/api/clamav/scan/", s.handleClamScanItem)
+	a("/api/clamav/history", s.handleClamHistory)
+	a("/api/clamav/quarantine", s.handleClamQuarantine)
+	a("/api/clamav/signatures", s.handleClamSignatures)
+	a("/api/clamav/schedules", s.handleClamSchedules)
+	a("/api/clamav/logs", s.handleClamLogs)
+	a("/api/clamav/config", s.handleClamConfig)
+	a("/api/clamav/service", s.handleClamService)
+	a("/api/clamav/onaccess", s.handleClamOnAccess)
+	a("/api/clamav/virustotal", s.handleClamVirusTotal)
+	a("/api/clamav/freshclam", s.handleClamFreshclam)
 
 	// Sprzęt
-	a("/api/hardware",           s.handleHardware)
-	a("/api/hardware/install",   s.handleHardwareInstall)
+	a("/api/hardware", s.handleHardware)
+	a("/api/hardware/install", s.handleHardwareInstall)
 
 	// IPMI / BMC
-	a("/api/ipmi",             s.handleIPMI)
-	a("/api/ipmi/install",     s.handleIPMIInstall)
-	a("/api/ipmi/sel/clear",   s.handleIPMISELClear)
+	a("/api/ipmi", s.handleIPMI)
+	a("/api/ipmi/install", s.handleIPMIInstall)
+	a("/api/ipmi/sel/clear", s.handleIPMISELClear)
 
 	// Poczta
-	a("/api/mail/status",          s.handleMailStatus)
-	a("/api/mail/queue",           s.handleMailQueue)
-	a("/api/mail/queue/flush",     s.handleMailQueueFlush)
-	a("/api/mail/queue/action",    s.handleMailQueueAction)
-	a("/api/mail/queue/detail/",   s.handleMailQueueDetail)
-	a("/api/mail/domains",         s.handleMailDomains)
-	a("/api/mail/domains/",        s.handleMailDomainDelete)
-	a("/api/mail/accounts",        s.handleMailAccounts)
-	a("/api/mail/accounts/",       s.handleMailAccountDelete)
-	a("/api/mail/service",         s.handleMailService)
-	a("/api/mail/config",          s.handleMailConfig)
-	a("/api/mail/install",         s.handleMailInstall)
-	a("/api/mail/postfix/config",   s.handlePostfixConfig)
-	a("/api/mail/postfix/sasl",     s.handlePostfixSASL)
-	a("/api/mail/postfix/profile",  s.handlePostfixApplyProfile)
-	a("/api/mail/postfix/diag",     s.handlePostfixDiag)
-	a("/api/mail/postfix/fix",      s.handlePostfixFix)
-	a("/api/mail/dns-diag",         s.handleMailDNSDiag)
-	a("/api/mail/aliases",          s.handleMailAlias)
-	a("/api/mail/accounts/debug",    s.handleMailAccountsDebug)
-	a("/api/mail/accounts/password",  s.handleMailAccountPassword)
-	a("/api/mail/dovecot/setup",       s.handleDovecotSetupPassdb)
+	a("/api/mail/status", s.handleMailStatus)
+	a("/api/mail/queue", s.handleMailQueue)
+	a("/api/mail/queue/flush", s.handleMailQueueFlush)
+	a("/api/mail/queue/action", s.handleMailQueueAction)
+	a("/api/mail/queue/detail/", s.handleMailQueueDetail)
+	a("/api/mail/domains", s.handleMailDomains)
+	a("/api/mail/domains/", s.handleMailDomainDelete)
+	a("/api/mail/accounts", s.handleMailAccounts)
+	a("/api/mail/accounts/", s.handleMailAccountDelete)
+	a("/api/mail/service", s.handleMailService)
+	a("/api/mail/config", s.handleMailConfig)
+	a("/api/mail/install", s.handleMailInstall)
+	a("/api/mail/postfix/config", s.handlePostfixConfig)
+	a("/api/mail/postfix/sasl", s.handlePostfixSASL)
+	a("/api/mail/postfix/profile", s.handlePostfixApplyProfile)
+	a("/api/mail/postfix/diag", s.handlePostfixDiag)
+	a("/api/mail/postfix/fix", s.handlePostfixFix)
+	a("/api/mail/dns-diag", s.handleMailDNSDiag)
+	a("/api/mail/aliases", s.handleMailAlias)
+	a("/api/mail/accounts/debug", s.handleMailAccountsDebug)
+	a("/api/mail/accounts/password", s.handleMailAccountPassword)
+	a("/api/mail/dovecot/setup", s.handleDovecotSetupPassdb)
 
 	// Webmail IMAP
-	a("/api/webmail/login",    s.handleWebmailLogin)
+	a("/api/webmail/login", s.handleWebmailLogin)
 	a("/api/webmail/messages", s.handleWebmailMessages)
-	a("/api/webmail/message",  s.handleWebmailMessage)
-	a("/api/webmail/counts",   s.handleWebmailCounts)
-	a("/api/webmail/send",     s.handleWebmailSend)
-	a("/api/webmail/delete",   s.handleWebmailDelete)
-	a("/api/webmail/move",     s.handleWebmailMove)
-	a("/api/webmail/diag",     s.handleWebmailDiag)
-	a("/api/webmail/debug",    s.handleWebmailDebug)
+	a("/api/webmail/message", s.handleWebmailMessage)
+	a("/api/webmail/counts", s.handleWebmailCounts)
+	a("/api/webmail/send", s.handleWebmailSend)
+	a("/api/webmail/delete", s.handleWebmailDelete)
+	a("/api/webmail/move", s.handleWebmailMove)
+	a("/api/webmail/diag", s.handleWebmailDiag)
+	a("/api/webmail/debug", s.handleWebmailDebug)
 
 	// DHCP
-	a("/api/network/dhcp/leases",  s.handleDHCPLeases)
-	a("/api/network/dhcp/config",  s.handleDHCPConfig)
+	a("/api/network/dhcp/leases", s.handleDHCPLeases)
+	a("/api/network/dhcp/config", s.handleDHCPConfig)
 	a("/api/network/dhcp/install", s.handleDHCPInstall)
 
 	// DNS
-	a("/api/network/dns/status",   s.handleDNSStatus)
-	a("/api/network/dns/hosts",    s.handleDNSHosts)
+	a("/api/network/dns/status", s.handleDNSStatus)
+	a("/api/network/dns/hosts", s.handleDNSHosts)
 	a("/api/network/dns/upstream", s.handleDNSUpstream)
 
 	a("/network/dynamic-dns", s.handleDynDNS)
@@ -344,8 +345,8 @@ func (s *Server) routes() {
 	a("/api/vpn/openvpn/", s.handleVPNOpenVPNItem)
 	a("/api/vpn/ipsec", s.handleVPNIPSec)
 	a("/api/vpn/install-wireguard", s.handleVPNInstallWireGuard)
-	a("/api/vpn/install-openvpn",   s.handleVPNInstallOpenVPN)
-	a("/api/vpn/install-ipsec",     s.handleVPNInstallIPSec)
+	a("/api/vpn/install-openvpn", s.handleVPNInstallOpenVPN)
+	a("/api/vpn/install-ipsec", s.handleVPNInstallIPSec)
 	// Peer CRUD
 	a("/api/vpn/peers", s.handleVPNPeerCreate)
 	a("/api/vpn/peers/", s.handleVPNPeerRouter)
@@ -375,7 +376,7 @@ func (s *Server) routes() {
 	a("/services/docker/images/history/", s.handleDockerImageHistory)
 	a("/services/docker/images/cleanup", s.handleDockerImageCleanup)
 	a("/services/docker/networks", s.handleDockerNetworks)
-	a("/api/docker/networks",    s.handleDockerNetworks)
+	a("/api/docker/networks", s.handleDockerNetworks)
 	a("/services/docker/networks/prune", s.handleDockerNetworkPrune)
 	a("/services/docker/networks/", s.handleDockerNetworkItem)
 	a("/services/docker/volumes", s.handleDockerVolumes)
@@ -404,8 +405,8 @@ func (s *Server) routes() {
 	a("/services/docker/build/github", s.handleDockerBuildGitHub)
 	a("/services/docker/build/", s.handleDockerBuildItem)
 	a("/services/docker/composer/deploy-stream", s.handleDockerComposeStream)
-        a("/services/docker/templates", s.handleDockerTemplates)
-        a("/services/docker/templates/install", s.handleDockerTemplateInstall)
+	a("/services/docker/templates", s.handleDockerTemplates)
+	a("/services/docker/templates/install", s.handleDockerTemplateInstall)
 	a("/api/services/config", s.handleServicesConfig)
 
 	// samba
@@ -465,9 +466,9 @@ func (s *Server) routes() {
 	a("/api/nfs-server/exports/", s.handleNFSServerExportItem)
 	a("/api/nfs-server/stats", s.handleNFSServerStats)
 	a("/api/nfs-server/logs", s.handleNFSServerLogs)
-	a("/api/nfs-server/test",    s.handleNFSServerTest)
+	a("/api/nfs-server/test", s.handleNFSServerTest)
 	a("/api/nfs-server/clients", s.handleNFSServerClients)
-	a("/api/nfs-server/config",  s.handleNFSServerConfig)
+	a("/api/nfs-server/config", s.handleNFSServerConfig)
 	a("/api/nfs-server/install", s.handleNFSServerInstall)
 
 	// webdav
@@ -555,23 +556,22 @@ func (s *Server) routes() {
 
 	// routers — Xiaomi MiWiFi, Cudy/OpenWrt ubus, MikroTik RouterOS
 	a("/api/routers/models", s.handleRouterModels)
-	a("/api/routers/probe",  s.handleRouterProbe)
-	a("/api/routers/dedup",  s.handleRouterDedup)
+	a("/api/routers/probe", s.handleRouterProbe)
+	a("/api/routers/dedup", s.handleRouterDedup)
 	a("/api/routers", s.handleRouters)
 	a("/api/routers/", s.handleRouterItem)
 
-
 	// 2FA TOTP
-	a("/api/totp/status",  s.handleTOTPStatus)
-	a("/api/totp/setup",   s.handleTOTPSetup)
+	a("/api/totp/status", s.handleTOTPStatus)
+	a("/api/totp/setup", s.handleTOTPSetup)
 	a("/api/totp/disable", s.handleTOTPDisable)
-	a("/api/totp/toggle",  s.handleTOTPGlobalToggle)
+	a("/api/totp/toggle", s.handleTOTPGlobalToggle)
 
 	// Metryki historyczne
 	a("/api/metrics", s.handleMetrics)
 
 	// Alert fire (dla startup.go)
-	a("/api/notifications/fire",          s.handleNotifFire)
+	a("/api/notifications/fire", s.handleNotifFire)
 	a("/api/notifications/default-rules", s.handleNotifDefaultRules)
 
 	// dashboard — jeden endpoint zamiast 14
@@ -579,43 +579,43 @@ func (s *Server) routes() {
 	a("/api/docker/compose-file", s.handleDockerComposeFile)
 
 	// proxy routes management — nimbus built-in reverse proxy
-	a("/api/proxy/routes",  s.handleProxyRoutes)
+	a("/api/proxy/routes", s.handleProxyRoutes)
 	a("/api/proxy/routes/", s.handleProxyRouteItem)
-	a("/api/proxy/status",  s.handleProxyStatus)
+	a("/api/proxy/status", s.handleProxyStatus)
 	a("/api/proxy/preview", s.handleProxyPreview)
 
 	// startup tasks
 	a("/api/startup/config", s.handleStartupConfig)
-	a("/api/startup/log",    s.handleStartupLog)
-	a("/api/startup/",       s.handleStartupAction)
-	a("/api/startup/nfs",     s.handleStartupNFSEntries)
+	a("/api/startup/log", s.handleStartupLog)
+	a("/api/startup/", s.handleStartupAction)
+	a("/api/startup/nfs", s.handleStartupNFSEntries)
 
 	// media - wszystkie endpointy
 	a("/api/media/health", s.handleMediaHealth)
-	a("/api/media/config", s.handleMediaConfig)           // GET/POST konfiguracja
-	a("/api/media/status/all", s.handleMediaStatusAll)    // status wszystkich
-	a("/api/media/status/", s.handleMediaStatusSingle)    // status pojedynczego
-	a("/api/media/libraries/", s.handleMediaLibraries)    // biblioteki
-	a("/api/media/sync", s.handleMediaSync)               // synchronizacja (opcjonalnie)
-	a("/api/media/{id}/", s.handleMediaItem)                   // /api/media/:id/:action
-	
+	a("/api/media/config", s.handleMediaConfig)        // GET/POST konfiguracja
+	a("/api/media/status/all", s.handleMediaStatusAll) // status wszystkich
+	a("/api/media/status/", s.handleMediaStatusSingle) // status pojedynczego
+	a("/api/media/libraries/", s.handleMediaLibraries) // biblioteki
+	a("/api/media/sync", s.handleMediaSync)            // synchronizacja (opcjonalnie)
+	a("/api/media/{id}/", s.handleMediaItem)           // /api/media/:id/:action
+
 	// notifications
-	a("/api/notifications/channels",  s.handleNotifChannels)
+	a("/api/notifications/channels", s.handleNotifChannels)
 	a("/api/notifications/channels/", s.handleNotifChannelItem)
-	a("/api/notifications/rules",     s.handleNotifRules)
-	a("/api/notifications/rules/",    s.handleNotifRuleItem)
-	a("/api/notifications/history",   s.handleNotifHistory)
+	a("/api/notifications/rules", s.handleNotifRules)
+	a("/api/notifications/rules/", s.handleNotifRuleItem)
+	a("/api/notifications/history", s.handleNotifHistory)
 
 	// File manager
-	a("/api/files/list",     s.handleFilesList)
-	a("/api/files/mkdir",    s.handleFilesMkdir)
-	a("/api/files/delete",   s.handleFilesDelete)
-	a("/api/files/rename",   s.handleFilesRename)
-	a("/api/files/chmod",    s.handleFilesChmod)
-	a("/api/files/preview",  s.handleFilesPreview)
+	a("/api/files/list", s.handleFilesList)
+	a("/api/files/mkdir", s.handleFilesMkdir)
+	a("/api/files/delete", s.handleFilesDelete)
+	a("/api/files/rename", s.handleFilesRename)
+	a("/api/files/chmod", s.handleFilesChmod)
+	a("/api/files/preview", s.handleFilesPreview)
 	a("/api/files/download", s.handleFilesDownload)
-	a("/api/files/upload",   s.handleFilesUpload)
-	a("/api/files/mounts",   s.handleFilesMounts)
+	a("/api/files/upload", s.handleFilesUpload)
+	a("/api/files/mounts", s.handleFilesMounts)
 
 	// ZFS pool create
 	a("/api/zfs/pool/create", s.handleZFSPoolCreate)
@@ -657,15 +657,15 @@ func (s *Server) routes() {
 	}
 
 	// Package manager
-	a("/api/packages/installed",   s.handlePkgInstalled)
-	a("/api/packages/search",      s.handlePkgSearch)
-	a("/api/packages/show",        s.handlePkgShow)
-	a("/api/packages/install",     s.handlePkgInstall)
-	a("/api/packages/remove",      s.handlePkgRemove)
+	a("/api/packages/installed", s.handlePkgInstalled)
+	a("/api/packages/search", s.handlePkgSearch)
+	a("/api/packages/show", s.handlePkgShow)
+	a("/api/packages/install", s.handlePkgInstall)
+	a("/api/packages/remove", s.handlePkgRemove)
 	a("/api/packages/mark-manual", s.handlePkgMarkManual)
-	a("/api/packages/autoremove",  s.handlePkgAutoremove)
-	a("/api/packages/update",      s.handlePkgUpdate)
-	a("/api/packages/stats",       s.handlePkgStats)
+	a("/api/packages/autoremove", s.handlePkgAutoremove)
+	a("/api/packages/update", s.handlePkgUpdate)
+	a("/api/packages/stats", s.handlePkgStats)
 
 	// service status helper
 	a("/services/status/", s.handleServiceStatusHelper)
@@ -690,17 +690,20 @@ func (s *Server) auth_(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "bad request", http.StatusBadRequest); return
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
 	}
 	if req.Username == "" || req.Password == "" {
-		jsonErr(w, "username and password required", http.StatusBadRequest); return
+		jsonErr(w, "username and password required", http.StatusBadRequest)
+		return
 	}
 
 	token, userInfo, err := s.auth.Login(req.Username, req.Password)
@@ -741,25 +744,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVerifyTOTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodPost {
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	var req struct {
 		TmpToken string `json:"tmp_token"`
 		Code     string `json:"code"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.TmpToken == "" || req.Code == "" {
-		jsonErr(w, "tmp_token i code są wymagane", http.StatusBadRequest); return
+		jsonErr(w, "tmp_token i code są wymagane", http.StatusBadRequest)
+		return
 	}
 
 	// Sprawdź tymczasowy token
 	username := totpGetPendingUser(req.TmpToken)
 	if username == "" {
-		jsonErr(w, "invalid or expired token", http.StatusUnauthorized); return
+		jsonErr(w, "invalid or expired token", http.StatusUnauthorized)
+		return
 	}
 
 	// Weryfikuj kod TOTP
 	if !totpVerify(username, req.Code) {
-		jsonErr(w, "invalid_totp", http.StatusUnauthorized); return
+		jsonErr(w, "invalid_totp", http.StatusUnauthorized)
+		return
 	}
 
 	// Usuń tymczasowy token
@@ -768,7 +777,8 @@ func (s *Server) handleVerifyTOTP(w http.ResponseWriter, r *http.Request) {
 	// Utwórz prawdziwą sesję
 	token, userInfo, err := s.auth.LoginDirect(username)
 	if err != nil {
-		jsonErr(w, "session error: "+err.Error(), http.StatusInternalServerError); return
+		jsonErr(w, "session error: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -794,7 +804,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCheckAuth(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie("nimbus_session")
 	if err != nil || !s.auth.Valid(c.Value) {
-		jsonErr(w, "unauthorized", http.StatusUnauthorized); return
+		jsonErr(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 	username := s.auth.SessionUser(c.Value)
 	jsonOK(w, map[string]any{
@@ -831,15 +842,19 @@ func (s *Server) handleNoVNC(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
-	if p == "/" { p = "/index.html" }
+	if p == "/" {
+		p = "/index.html"
+	}
 	base := filepath.Clean(s.cfg.WebDir)
 	clean := filepath.Clean(filepath.Join(base, p))
 	if clean != base && !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
-		http.Error(w, "forbidden", http.StatusForbidden); return
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 	info, err := os.Stat(clean)
 	if err != nil || info.IsDir() {
-		http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "index.html")); return
+		http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "index.html"))
+		return
 	}
 	if strings.HasSuffix(clean, ".jsx") {
 		w.Header().Set("Content-Type", "application/javascript")

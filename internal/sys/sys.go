@@ -163,20 +163,20 @@ func Memory() MemInfo {
 // ─── Network ────────────────────────────────────────────────────────────────
 
 type NetIface struct {
-	Name  string  `json:"name"`
-	RxB   uint64  `json:"rx_bytes"`
-	TxB   uint64  `json:"tx_bytes"`
-	Rx    float64 `json:"rx"`
-	Tx    float64 `json:"tx"`
-	State string  `json:"state"`
-	IP    string  `json:"ip"`
-	MAC   string  `json:"mac"`
-	Speed string  `json:"speed"`
-	SpeedMbps int64 `json:"speed_mbps"`
-	AdminUp bool `json:"admin_up"`
-	Carrier bool `json:"carrier"`
-	OperState string `json:"oper_state"`
-	VLAN  string  `json:"vlan"`
+	Name      string  `json:"name"`
+	RxB       uint64  `json:"rx_bytes"`
+	TxB       uint64  `json:"tx_bytes"`
+	Rx        float64 `json:"rx"`
+	Tx        float64 `json:"tx"`
+	State     string  `json:"state"`
+	IP        string  `json:"ip"`
+	MAC       string  `json:"mac"`
+	Speed     string  `json:"speed"`
+	SpeedMbps int64   `json:"speed_mbps"`
+	AdminUp   bool    `json:"admin_up"`
+	Carrier   bool    `json:"carrier"`
+	OperState string  `json:"oper_state"`
+	VLAN      string  `json:"vlan"`
 }
 
 type netCounterSample struct {
@@ -232,8 +232,12 @@ func NetInterfaces() []NetIface {
 		var rxRate, txRate float64
 		if prev, ok := netCounterPrev[name]; ok && now.After(prev.at) {
 			seconds := now.Sub(prev.at).Seconds()
-			if rxB >= prev.rx { rxRate = float64(rxB-prev.rx) / seconds / 1_000_000 }
-			if txB >= prev.tx { txRate = float64(txB-prev.tx) / seconds / 1_000_000 }
+			if rxB >= prev.rx {
+				rxRate = float64(rxB-prev.rx) / seconds / 1_000_000
+			}
+			if txB >= prev.tx {
+				txRate = float64(txB-prev.tx) / seconds / 1_000_000
+			}
 		}
 		netCounterPrev[name] = netCounterSample{rx: rxB, tx: txB, at: now}
 
@@ -245,7 +249,11 @@ func NetInterfaces() []NetIface {
 		adminUp := flags&0x1 != 0
 		carrierData, carrierErr := os.ReadFile("/sys/class/net/" + name + "/carrier")
 		carrier := carrierErr == nil && strings.TrimSpace(string(carrierData)) == "1"
-		if adminUp && (carrier || operstate == "unknown") { state = "up" } else if adminUp { state = "no-carrier" }
+		if adminUp && (carrier || operstate == "unknown") {
+			state = "up"
+		} else if adminUp {
+			state = "no-carrier"
+		}
 
 		ip := ""
 		macData, _ := os.ReadFile("/sys/class/net/" + name + "/address")
@@ -262,7 +270,10 @@ func NetInterfaces() []NetIface {
 		case speedMbps > 0:
 			speed = fmt.Sprintf("%d Mb/s", speedMbps)
 		}
-		if !carrier && operstate != "unknown" { speed = "Brak linku"; speedMbps = 0 }
+		if !carrier && operstate != "unknown" {
+			speed = "Brak linku"
+			speedMbps = 0
+		}
 
 		// Get IP via /proc/net/if_inet6 or ip command
 		out, _ := exec.Command("ip", "-brief", "addr", "show", name).Output()
@@ -285,20 +296,20 @@ func NetInterfaces() []NetIface {
 		}
 
 		ifaces = append(ifaces, NetIface{
-			Name:  name,
-			RxB:   rxB,
-			TxB:   txB,
-			Rx:    rxRate,
-			Tx:    txRate,
-			State: state,
-			IP:    ip,
-			MAC:   mac,
-			Speed: speed,
+			Name:      name,
+			RxB:       rxB,
+			TxB:       txB,
+			Rx:        rxRate,
+			Tx:        txRate,
+			State:     state,
+			IP:        ip,
+			MAC:       mac,
+			Speed:     speed,
 			SpeedMbps: speedMbps,
-			AdminUp: adminUp,
-			Carrier: carrier,
+			AdminUp:   adminUp,
+			Carrier:   carrier,
 			OperState: operstate,
-			VLAN:  vlan,
+			VLAN:      vlan,
 		})
 	}
 	return ifaces
@@ -345,8 +356,8 @@ func NetSpeed1s(iface string) NetSpeed {
 // ─── Disks ──────────────────────────────────────────────────────────────────
 
 type DiskStat struct {
-	Device string
-	ReadKB uint64
+	Device  string
+	ReadKB  uint64
 	WriteKB uint64
 }
 
@@ -402,7 +413,7 @@ func Mounts() []MountPoint {
 		if len(fields) < 4 {
 			continue
 		}
-		dev, mp, fs, opts := fields[0], fields[1], fields[2], fields[3]
+		dev, mp, fs, opts := unescapeMountField(fields[0]), unescapeMountField(fields[1]), fields[2], unescapeMountField(fields[3])
 		if fs == "proc" || fs == "sysfs" || fs == "devtmpfs" || fs == "cgroup" || fs == "cgroup2" ||
 			fs == "tmpfs" || fs == "devpts" || fs == "securityfs" || fs == "pstore" ||
 			fs == "mqueue" || fs == "hugetlbfs" || fs == "debugfs" || fs == "tracefs" ||
@@ -440,11 +451,20 @@ func Mounts() []MountPoint {
 				timer := time.AfterFunc(3*time.Second, func() { cmd.Process.Kill() })
 				out2, err := cmd.Output()
 				timer.Stop()
-				if err != nil { ch <- dfResult{}; return }
+				if err != nil {
+					ch <- dfResult{}
+					return
+				}
 				lines := strings.Split(strings.TrimSpace(string(out2)), "\n")
-				if len(lines) < 2 { ch <- dfResult{}; return }
+				if len(lines) < 2 {
+					ch <- dfResult{}
+					return
+				}
 				fields := strings.Fields(lines[1])
-				if len(fields) < 3 { ch <- dfResult{}; return }
+				if len(fields) < 3 {
+					ch <- dfResult{}
+					return
+				}
 				var total, used, free uint64
 				fmt.Sscanf(fields[0], "%d", &total)
 				fmt.Sscanf(fields[1], "%d", &used)
@@ -468,7 +488,7 @@ func Mounts() []MountPoint {
 		var stat syscallStatfs
 		if err := statfs(mp, &stat); err == nil {
 			total := stat.Bsize * int64(stat.Blocks)
-			free  := stat.Bsize * int64(stat.Bfree)
+			free := stat.Bsize * int64(stat.Bfree)
 			out = append(out, MountPoint{
 				Device:  dev,
 				MountAt: mp,
@@ -478,9 +498,19 @@ func Mounts() []MountPoint {
 				UsedB:   uint64(total - free),
 				FreeB:   uint64(free),
 			})
+		} else {
+			// Sam błąd odczytu statystyk nie oznacza, że montowanie nie istnieje.
+			// Zachowaj je na liście (z zerowym rozmiarem), aby dało się nim
+			// zarządzać w panelu i dodać je do /etc/fstab.
+			out = append(out, MountPoint{Device: dev, MountAt: mp, FS: fs, Options: opts})
 		}
 	}
 	return out
+}
+
+func unescapeMountField(v string) string {
+	replacer := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return replacer.Replace(v)
 }
 
 // ─── Processes ──────────────────────────────────────────────────────────────
@@ -717,11 +747,11 @@ func fallbackSyslog(n int) []LogEntry {
 // ─── Docker ─────────────────────────────────────────────────────────────────
 
 type Container struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Image  string `json:"image"`
-	State  string `json:"state"`
-	Status string `json:"uptime"`
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	Image  string  `json:"image"`
+	State  string  `json:"state"`
+	Status string  `json:"uptime"`
 	CPU    float64 `json:"cpu"`
 	Mem    float64 `json:"mem"`
 	Ports  string  `json:"ports"`
@@ -814,167 +844,167 @@ func DockerAction(name, action string) error {
 // ─── ZFS ────────────────────────────────────────────────────────────────────
 
 type ZFSPool struct {
-    Name   string  `json:"name"`
-    State  string  `json:"health"`
-    Used   float64 `json:"used"`    // w GB
-    Avail  float64 `json:"avail"`   // w GB
-    Total  float64 `json:"total"`   // w GB
-    Type   string  `json:"type"`
-    UsedTB  float64 `json:"used_tb"`  // w TB dla wygody
-    AvailTB float64 `json:"avail_tb"`
-    TotalTB float64 `json:"total_tb"`
+	Name    string  `json:"name"`
+	State   string  `json:"health"`
+	Used    float64 `json:"used"`  // w GB
+	Avail   float64 `json:"avail"` // w GB
+	Total   float64 `json:"total"` // w GB
+	Type    string  `json:"type"`
+	UsedTB  float64 `json:"used_tb"` // w TB dla wygody
+	AvailTB float64 `json:"avail_tb"`
+	TotalTB float64 `json:"total_tb"`
 }
 
 type ZFSIOStats struct {
-    Pool    string
-    Reads   float64 // operacje odczytu na sekundę
-    Writes  float64 // operacje zapisu na sekundę
-    ReadMB  float64 // MB/s odczytu
-    WriteMB float64 // MB/s zapisu
+	Pool    string
+	Reads   float64 // operacje odczytu na sekundę
+	Writes  float64 // operacje zapisu na sekundę
+	ReadMB  float64 // MB/s odczytu
+	WriteMB float64 // MB/s zapisu
 }
 
 func ZFSPools() ([]ZFSPool, error) {
-    zpoolPath := findZpoolPath()
-    if zpoolPath == "" {
-        return nil, fmt.Errorf("zpool not found")
-    }
-    
-    out, err := exec.Command(zpoolPath, "list", "-H", "-o", "name,health,alloc,free,size").Output()
-    if err != nil {
-        return nil, fmt.Errorf("zpool list failed: %w", err)
-    }
-    
-    var pools []ZFSPool
-    for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-        if line == "" {
-            continue
-        }
-        fields := strings.Fields(line)
-        if len(fields) < 5 {
-            continue
-        }
-        
-        health := "ok"
-        if fields[1] != "ONLINE" {
-            health = strings.ToLower(fields[1])
-        }
-        
-        // Zachowaj oryginalne wartości w GB
-        allocGB := parseZFSSizeToGB(fields[2])  // ALLOC
-        freeGB := parseZFSSizeToGB(fields[3])   // FREE  
-        sizeGB := parseZFSSizeToGB(fields[4])   // SIZE
-        
-        pools = append(pools, ZFSPool{
-            Name:    fields[0],
-            State:   health,
-            Used:    allocGB,
-            Avail:   freeGB,
-            Total:   sizeGB,
-            UsedTB:  allocGB / 1024,
-            AvailTB: freeGB / 1024,
-            TotalTB: sizeGB / 1024,
-            Type:    "ZFS",
-        })
-    }
-    
-    return pools, nil
+	zpoolPath := findZpoolPath()
+	if zpoolPath == "" {
+		return nil, fmt.Errorf("zpool not found")
+	}
+
+	out, err := exec.Command(zpoolPath, "list", "-H", "-o", "name,health,alloc,free,size").Output()
+	if err != nil {
+		return nil, fmt.Errorf("zpool list failed: %w", err)
+	}
+
+	var pools []ZFSPool
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+
+		health := "ok"
+		if fields[1] != "ONLINE" {
+			health = strings.ToLower(fields[1])
+		}
+
+		// Zachowaj oryginalne wartości w GB
+		allocGB := parseZFSSizeToGB(fields[2]) // ALLOC
+		freeGB := parseZFSSizeToGB(fields[3])  // FREE
+		sizeGB := parseZFSSizeToGB(fields[4])  // SIZE
+
+		pools = append(pools, ZFSPool{
+			Name:    fields[0],
+			State:   health,
+			Used:    allocGB,
+			Avail:   freeGB,
+			Total:   sizeGB,
+			UsedTB:  allocGB / 1024,
+			AvailTB: freeGB / 1024,
+			TotalTB: sizeGB / 1024,
+			Type:    "ZFS",
+		})
+	}
+
+	return pools, nil
 }
 
 func ZFSPoolIOStats() (map[string]ZFSIOStats, error) {
-    zpoolPath := "/usr/sbin/zpool"
-    if _, err := os.Stat(zpoolPath); os.IsNotExist(err) {
-        zpoolPath = "/sbin/zpool"
-    }
-    
-    out, err := exec.Command(zpoolPath, "iostat", "-Hp", "1", "1").Output()
-    if err != nil {
-        out, err = exec.Command(zpoolPath, "iostat", "-H", "1", "1").Output()
-        if err != nil {
-            return nil, err
-        }
-    }
-    
-    stats := make(map[string]ZFSIOStats)
-    lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-    
-    for _, line := range lines {
-        if line == "" || strings.HasPrefix(line, "pool") {
-            continue
-        }
-        
-        fields := strings.Fields(line)
-        if len(fields) < 7 {
-            continue
-        }
-        
-        poolName := fields[0]
+	zpoolPath := "/usr/sbin/zpool"
+	if _, err := os.Stat(zpoolPath); os.IsNotExist(err) {
+		zpoolPath = "/sbin/zpool"
+	}
 
-        var reads, writes, readBW, writeBW float64
-        
-        if len(fields) >= 11 {
-            // Nowy format z większą ilością kolumn
-            reads, _ = strconv.ParseFloat(fields[5], 64)
-            writes, _ = strconv.ParseFloat(fields[6], 64)
-            readBW, _ = strconv.ParseFloat(fields[7], 64)
-            writeBW, _ = strconv.ParseFloat(fields[8], 64)
-        } else if len(fields) >= 9 {
-            reads, _ = strconv.ParseFloat(fields[3], 64)
-            writes, _ = strconv.ParseFloat(fields[4], 64)
-            readBW, _ = strconv.ParseFloat(fields[5], 64)
-            writeBW, _ = strconv.ParseFloat(fields[6], 64)
-        }
-        
-        stats[poolName] = ZFSIOStats{
-            Pool:    poolName,
-            Reads:   reads,
-            Writes:  writes,
-            ReadMB:  readBW / (1024 * 1024),
-            WriteMB: writeBW / (1024 * 1024),
-        }
-    }
-    
-    return stats, nil
+	out, err := exec.Command(zpoolPath, "iostat", "-Hp", "1", "1").Output()
+	if err != nil {
+		out, err = exec.Command(zpoolPath, "iostat", "-H", "1", "1").Output()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	stats := make(map[string]ZFSIOStats)
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "pool") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+
+		poolName := fields[0]
+
+		var reads, writes, readBW, writeBW float64
+
+		if len(fields) >= 11 {
+			// Nowy format z większą ilością kolumn
+			reads, _ = strconv.ParseFloat(fields[5], 64)
+			writes, _ = strconv.ParseFloat(fields[6], 64)
+			readBW, _ = strconv.ParseFloat(fields[7], 64)
+			writeBW, _ = strconv.ParseFloat(fields[8], 64)
+		} else if len(fields) >= 9 {
+			reads, _ = strconv.ParseFloat(fields[3], 64)
+			writes, _ = strconv.ParseFloat(fields[4], 64)
+			readBW, _ = strconv.ParseFloat(fields[5], 64)
+			writeBW, _ = strconv.ParseFloat(fields[6], 64)
+		}
+
+		stats[poolName] = ZFSIOStats{
+			Pool:    poolName,
+			Reads:   reads,
+			Writes:  writes,
+			ReadMB:  readBW / (1024 * 1024),
+			WriteMB: writeBW / (1024 * 1024),
+		}
+	}
+
+	return stats, nil
 }
 
 // Nowa funkcja - zwraca wartość w GB
 func parseZFSSizeToGB(s string) float64 {
-    if len(s) == 0 {
-        return 0
-    }
-    
-    s = strings.TrimSpace(s)
-    if s == "0" || s == "-" {
-        return 0
-    }
-    
-    suffix := s[len(s)-1]
-    numStr := s[:len(s)-1]
-    v, _ := strconv.ParseFloat(numStr, 64)
-    
-    switch suffix {
-    case 'T':
-        return v * 1024  // TB -> GB
-    case 'G':
-        return v          // już GB
-    case 'M':
-        return v / 1024  // MB -> GB
-    case 'K':
-        return v / 1024 / 1024  // KB -> GB
-    }
-    return v
+	if len(s) == 0 {
+		return 0
+	}
+
+	s = strings.TrimSpace(s)
+	if s == "0" || s == "-" {
+		return 0
+	}
+
+	suffix := s[len(s)-1]
+	numStr := s[:len(s)-1]
+	v, _ := strconv.ParseFloat(numStr, 64)
+
+	switch suffix {
+	case 'T':
+		return v * 1024 // TB -> GB
+	case 'G':
+		return v // już GB
+	case 'M':
+		return v / 1024 // MB -> GB
+	case 'K':
+		return v / 1024 / 1024 // KB -> GB
+	}
+	return v
 }
 
 func findZpoolPath() string {
-    paths := []string{"/usr/sbin/zpool", "/sbin/zpool", "/usr/bin/zpool", "/bin/zpool"}
-    for _, path := range paths {
-        if _, err := os.Stat(path); err == nil {
-            return path
-        }
-    }
-    if p, err := exec.LookPath("zpool"); err == nil {
-        return p
-    }
-    return ""
+	paths := []string{"/usr/sbin/zpool", "/sbin/zpool", "/usr/bin/zpool", "/bin/zpool"}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	if p, err := exec.LookPath("zpool"); err == nil {
+		return p
+	}
+	return ""
 }
 
 func parseZFSSize(s string) float64 {
