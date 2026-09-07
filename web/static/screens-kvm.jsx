@@ -22,6 +22,8 @@ const kvmApi = {
   isoDeleteDownload: (id) => fetch('/api/kvm/iso-download?id='+id, {method:'DELETE',credentials:'include'}),
   install:   ()         => fetch('/api/kvm/install',   {method:'POST',credentials:'include'}),
   templates: ()         => fetch('/api/kvm/templates', {credentials:'include'}).then(r=>r.json()),
+	templateSave: (data,edit=false) => fetch('/api/kvm/templates',{method:edit?'PUT':'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Błąd zapisu');return d}),
+	templateDelete: id => fetch('/api/kvm/templates?id='+encodeURIComponent(id),{method:'DELETE',credentials:'include'}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Błąd usuwania');return d}),
   templateDeploy: data  => fetch('/api/kvm/template-deploy', {method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Błąd wdrażania');return d}),
   templateJobs: ()      => fetch('/api/kvm/template-jobs', {credentials:'include'}).then(r=>r.json()),
 };
@@ -32,21 +34,35 @@ const KVMTemplatesPanel = ({ onReady }) => {
   const [templates,setTemplates]=React.useState([]), [jobs,setJobs]=React.useState([]);
   const [networks,setNetworks]=React.useState([]);
   const [chosen,setChosen]=React.useState(null), [error,setError]=React.useState('');
+	const [editor,setEditor]=React.useState(null), [editorError,setEditorError]=React.useState('');
   const [form,setForm]=React.useState({name:'',network:'default',cpu:2,ram:2048,disk:20,sshKey:''});
+	const loadTemplates=()=>kvmApi.templates().then(d=>setTemplates(d.templates||[])).catch(()=>{});
   const loadJobs=()=>kvmApi.templateJobs().then(d=>setJobs(d.jobs||[])).catch(()=>{});
-  React.useEffect(()=>{kvmApi.templates().then(d=>setTemplates(d.templates||[]));kvmApi.networks().then(d=>setNetworks(d.networks||[])).catch(()=>{});loadJobs();const t=setInterval(loadJobs,1800);return()=>clearInterval(t)},[]);
+	React.useEffect(()=>{loadTemplates();kvmApi.networks().then(d=>setNetworks(d.networks||[])).catch(()=>{});loadJobs();const t=setInterval(loadJobs,1800);return()=>clearInterval(t)},[]);
   React.useEffect(()=>{if(jobs.some(j=>j.status==='done'))onReady&&onReady()},[jobs.map(j=>j.status).join(',')]);
   const select=t=>{setChosen(t);setForm(f=>({...f,name:t.id+'-01',cpu:t.min_cpu,ram:t.min_ram,disk:t.min_disk}))};
   const deploy=async()=>{setError('');try{await kvmApi.templateDeploy({template:chosen.id,...form});setChosen(null);loadJobs()}catch(e){setError(e.message)}};
 	const fieldStyle={width:'100%',marginTop:6,background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:7,padding:'9px 11px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none'};
 	const labelStyle={display:'block',fontSize:'var(--fs-xs)',fontWeight:600,color:'var(--fg-muted)'};
+	const emptyTemplate={id:'',name:'',version:'',family:'linux',icon:'💿',description:'',url:'',format:'qcow2',min_cpu:1,min_ram:1024,min_disk:10};
+	const saveTemplate=async()=>{setEditorError('');try{await kvmApi.templateSave(editor,!!editor.custom);setEditor(null);loadTemplates()}catch(e){setEditorError(e.message)}};
+	const deleteTemplate=async t=>{if(!confirm(`Usunąć szablon ${t.name}?`))return;try{await kvmApi.templateDelete(t.id);loadTemplates()}catch(e){alert(e.message)}};
   return <div className="col" style={{gap:'var(--gutter)'}}>
-    <div className="card" style={{padding:18}}><div className="card-title">Gotowe systemy</div><div className="card-sub">Oficjalne obrazy cloud QCOW2 · szybkie wdrożenie · cloud-init · QEMU Guest Agent</div></div>
-    <div className="grid grid-3">{templates.map(t=><button key={t.id} className="card" onClick={()=>select(t)} style={{padding:18,textAlign:'left',cursor:'pointer',border:chosen?.id===t.id?'1px solid var(--accent)':undefined}}>
+	<div className="card" style={{padding:18,display:'flex',justifyContent:'space-between',alignItems:'center',gap:16}}><div><div className="card-title">Gotowe systemy</div><div className="card-sub">Wbudowane i własne obrazy QCOW2 · konfiguracja w /etc/nimbus/kvm-templates.json</div></div><button className="btn primary" onClick={()=>setEditor({...emptyTemplate})}>＋ Dodaj system</button></div>
+	<div className="grid grid-3">{templates.map(t=><div key={t.id} className="card" onClick={()=>select(t)} style={{padding:18,textAlign:'left',cursor:'pointer',border:chosen?.id===t.id?'1px solid var(--accent)':undefined,position:'relative'}}>
       <div className="row" style={{justifyContent:'space-between'}}><span style={{fontSize:28}}>{t.icon}</span><span className="badge">{t.version}</span></div>
       <div style={{fontWeight:700,marginTop:12}}>{t.name}</div><div className="card-sub" style={{marginTop:5,minHeight:34}}>{t.description}</div>
       <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:12}}>{t.min_cpu} vCPU · {Math.round(t.min_ram/1024*10)/10} GB RAM · {t.min_disk} GB</div>
-    </button>)}</div>
+	  {t.custom&&<div className="row" style={{gap:5,marginTop:12}}><button className="btn sm" onClick={e=>{e.stopPropagation();setEditor({...t})}}>Edytuj</button><button className="btn sm danger" onClick={e=>{e.stopPropagation();deleteTemplate(t)}}>Usuń</button></div>}
+	</div>)}</div>
+	{editor&&<KVMModal title={editor.custom?'Edytuj własny system':'Dodaj własny system'} sub="Szablon zostanie zapisany w /etc/nimbus/kvm-templates.json" onClose={()=>{setEditor(null);setEditorError('')}} width={700} footer={<><button className="btn" onClick={()=>setEditor(null)}>Anuluj</button><button className="btn primary" onClick={saveTemplate}>Zapisz system</button></>}>
+	  <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:14}}>
+	    {[['ID systemu','id','ubuntu-custom'],['Nazwa','name','Ubuntu Custom'],['Wersja','version','24.04'],['Rodzina','family','ubuntu'],['Ikona','icon','💿'],['Format','format','qcow2']].map(([l,k,p])=><label key={k} style={labelStyle}>{l}<input style={fieldStyle} disabled={editor.custom&&k==='id'} value={editor[k]||''} placeholder={p} onChange={e=>setEditor({...editor,[k]:e.target.value})}/></label>)}
+	    <label style={{...labelStyle,gridColumn:'1/-1'}}>Opis<input style={fieldStyle} value={editor.description||''} onChange={e=>setEditor({...editor,description:e.target.value})}/></label>
+	    <label style={{...labelStyle,gridColumn:'1/-1'}}>Adres obrazu QCOW2<input style={fieldStyle} value={editor.url||''} placeholder="https://serwer/system.qcow2" onChange={e=>setEditor({...editor,url:e.target.value})}/></label>
+	    {[['Minimalne vCPU','min_cpu',1],['Minimalny RAM (MB)','min_ram',256],['Minimalny dysk (GB)','min_disk',1]].map(([l,k,min])=><label key={k} style={labelStyle}>{l}<input style={fieldStyle} type="number" min={min} value={editor[k]} onChange={e=>setEditor({...editor,[k]:+e.target.value})}/></label>)}
+	  </div>{editorError&&<div style={{color:'var(--err)',marginTop:12}}>{editorError}</div>}
+	</KVMModal>}
 	{chosen&&<KVMModal title={`Wdróż ${chosen.name} ${chosen.version}`} sub="Obraz zostanie pobrany raz i zachowany jako baza kolejnych maszyn." onClose={()=>{setChosen(null);setError('')}} width={680}
 	  footer={<><button className="btn" onClick={()=>{setChosen(null);setError('')}}>Anuluj</button><button className="btn primary" onClick={deploy} disabled={!form.name||!form.network}>Pobierz i uruchom system</button></>}>
 	  <div style={{display:'flex',gap:14,alignItems:'center',padding:'12px 14px',background:'color-mix(in oklch,var(--accent) 7%,var(--bg-2))',border:'1px solid color-mix(in oklch,var(--accent) 22%,var(--line))',borderRadius:9,marginBottom:18}}><span style={{fontSize:34}}>{chosen.icon}</span><div><div style={{fontWeight:700}}>{chosen.name} {chosen.version}</div><div className="card-sub" style={{marginTop:3}}>{chosen.description}</div></div></div>

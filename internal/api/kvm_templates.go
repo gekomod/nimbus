@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,15 +14,14 @@ import (
 )
 
 type VMTemplate struct {
-	ID, Name, Version, Family, Icon, Description, URL, Format string
-	MinCPU, MinRAM, MinDisk int
+	ID string `json:"id"`; Name string `json:"name"`; Version string `json:"version"`; Family string `json:"family"`
+	Icon string `json:"icon"`; Description string `json:"description"`; URL string `json:"url"`; Format string `json:"format"`
+	MinCPU int `json:"min_cpu"`; MinRAM int `json:"min_ram"`; MinDisk int `json:"min_disk"`
+	Custom bool `json:"custom,omitempty"`
 }
 
-func (t VMTemplate) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]any{
-	"id":t.ID,"name":t.Name,"version":t.Version,"family":t.Family,"icon":t.Icon,
-	"description":t.Description,"url":t.URL,"format":t.Format,"min_cpu":t.MinCPU,
-	"min_ram":t.MinRAM,"min_disk":t.MinDisk,
-}) }
+const vmTemplatesPath = "/etc/nimbus/kvm-templates.json"
+var vmTemplatesMu sync.Mutex
 
 var vmTemplates = []VMTemplate{
 	{ID:"ubuntu-2404", Name:"Ubuntu Server", Version:"24.04 LTS", Family:"ubuntu", Icon:"🟠", Description:"Cloud image · cloud-init · QEMU Guest Agent", URL:"https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img", Format:"qcow2", MinCPU:2, MinRAM:2048, MinDisk:20},
@@ -29,6 +29,11 @@ var vmTemplates = []VMTemplate{
 	{ID:"rocky-9", Name:"Rocky Linux", Version:"9", Family:"rocky", Icon:"🟢", Description:"Generic cloud image dla serwerów", URL:"https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2", Format:"qcow2", MinCPU:2, MinRAM:2048, MinDisk:20},
 	{ID:"alpine-320", Name:"Alpine Linux", Version:"3.20", Family:"alpine", Icon:"🔷", Description:"Lekki system do małych usług", URL:"https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.3-x86_64-bios-cloudinit-r0.qcow2", Format:"qcow2", MinCPU:1, MinRAM:512, MinDisk:2},
 }
+
+func loadCustomVMTemplates() []VMTemplate { vmTemplatesMu.Lock();defer vmTemplatesMu.Unlock();var v []VMTemplate;b,e:=os.ReadFile(vmTemplatesPath);if e==nil{json.Unmarshal(b,&v)};for i:=range v{v[i].Custom=true};return v }
+func saveCustomVMTemplates(v []VMTemplate) error { vmTemplatesMu.Lock();defer vmTemplatesMu.Unlock();if err:=os.MkdirAll(filepath.Dir(vmTemplatesPath),0755);err!=nil{return err};b,err:=json.MarshalIndent(v,"","  ");if err!=nil{return err};return os.WriteFile(vmTemplatesPath,b,0644) }
+func allVMTemplates() []VMTemplate { out:=append([]VMTemplate{},vmTemplates...);return append(out,loadCustomVMTemplates()...) }
+func validateVMTemplate(t *VMTemplate) error { t.ID=safeVMName(strings.ToLower(t.ID));if t.ID==""||t.Name==""{return fmt.Errorf("ID i nazwa są wymagane")};u,e:=url.ParseRequestURI(t.URL);if e!=nil||u.Scheme!="https"&&u.Scheme!="http"{return fmt.Errorf("wymagany poprawny adres HTTP/HTTPS obrazu")};if t.Format==""{t.Format="qcow2"};if t.Format!="qcow2"{return fmt.Errorf("obsługiwany format obrazu: qcow2")};if t.MinCPU<1{t.MinCPU=1};if t.MinRAM<256{t.MinRAM=256};if t.MinDisk<1{t.MinDisk=1};if t.Icon==""{t.Icon="💿"};t.Custom=true;return nil }
 
 type templateJob struct {
 	ID string `json:"id"`; Template string `json:"template"`; Name string `json:"name"`
@@ -43,8 +48,19 @@ func safeVMName(v string) string {
 }
 
 func (s *Server) handleKVMTemplates(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { jsonErr(w,"method not allowed",405); return }
-	jsonOK(w, map[string]any{"templates":vmTemplates})
+	switch r.Method {
+	case http.MethodGet: jsonOK(w,map[string]any{"templates":allVMTemplates(),"custom_path":vmTemplatesPath})
+	case http.MethodPost:
+		var t VMTemplate;if json.NewDecoder(r.Body).Decode(&t)!=nil{jsonErr(w,"nieprawidłowe dane",400);return};if err:=validateVMTemplate(&t);err!=nil{jsonErr(w,err.Error(),400);return}
+		all:=allVMTemplates();for _,x:=range all{if x.ID==t.ID{jsonErr(w,"szablon o tym ID już istnieje",409);return}}
+		custom:=loadCustomVMTemplates();custom=append(custom,t);if err:=saveCustomVMTemplates(custom);err!=nil{jsonErr(w,err.Error(),500);return};jsonOK(w,t)
+	case http.MethodPut:
+		var t VMTemplate;if json.NewDecoder(r.Body).Decode(&t)!=nil{jsonErr(w,"nieprawidłowe dane",400);return};if err:=validateVMTemplate(&t);err!=nil{jsonErr(w,err.Error(),400);return}
+		custom:=loadCustomVMTemplates();found:=false;for i:=range custom{if custom[i].ID==t.ID{custom[i]=t;found=true;break}};if !found{jsonErr(w,"można edytować tylko własny szablon",404);return};if err:=saveCustomVMTemplates(custom);err!=nil{jsonErr(w,err.Error(),500);return};jsonOK(w,t)
+	case http.MethodDelete:
+		id:=safeVMName(strings.ToLower(r.URL.Query().Get("id")));if id==""{jsonErr(w,"ID jest wymagane",400);return};custom:=loadCustomVMTemplates();next:=custom[:0];found:=false;for _,t:=range custom{if t.ID==id{found=true;continue};next=append(next,t)};if !found{jsonErr(w,"można usunąć tylko własny szablon",404);return};if err:=saveCustomVMTemplates(next);err!=nil{jsonErr(w,err.Error(),500);return};jsonOK(w,map[string]string{"status":"ok"})
+	default: jsonErr(w,"method not allowed",405)
+	}
 }
 
 func (s *Server) handleKVMTemplateJobs(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +74,7 @@ func (s *Server) handleKVMTemplateDeploy(w http.ResponseWriter, r *http.Request)
 	var q struct { Template, Name, Network, SSHKey string; CPU, RAM, Disk int }
 	if json.NewDecoder(r.Body).Decode(&q)!=nil { jsonErr(w,"nieprawidłowe dane",400); return }
 	q.Name=safeVMName(q.Name); if q.Name=="" { jsonErr(w,"nazwa VM jest wymagana",400); return }
-	var tpl *VMTemplate; for i:=range vmTemplates { if vmTemplates[i].ID==q.Template { tpl=&vmTemplates[i]; break } }
+	templates:=allVMTemplates();var tpl *VMTemplate; for i:=range templates { if templates[i].ID==q.Template { tpl=&templates[i]; break } }
 	if tpl==nil { jsonErr(w,"nieznany szablon",400); return }
 	if q.CPU<tpl.MinCPU { q.CPU=tpl.MinCPU }; if q.RAM<tpl.MinRAM { q.RAM=tpl.MinRAM }; if q.Disk<tpl.MinDisk { q.Disk=tpl.MinDisk }; if q.Network=="" { q.Network="default" }
 	if out,err:=runCmd("virsh","dominfo",q.Name); err==nil && out!="" { jsonErr(w,"VM o tej nazwie już istnieje",409); return }
