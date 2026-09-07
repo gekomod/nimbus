@@ -26,6 +26,8 @@ const kvmApi = {
   templateJobs: ()      => fetch('/api/kvm/template-jobs', {credentials:'include'}).then(r=>r.json()),
 };
 
+const KVMModal = window.Modal;
+
 const KVMTemplatesPanel = ({ onReady }) => {
   const [templates,setTemplates]=React.useState([]), [jobs,setJobs]=React.useState([]);
   const [networks,setNetworks]=React.useState([]);
@@ -36,6 +38,8 @@ const KVMTemplatesPanel = ({ onReady }) => {
   React.useEffect(()=>{if(jobs.some(j=>j.status==='done'))onReady&&onReady()},[jobs.map(j=>j.status).join(',')]);
   const select=t=>{setChosen(t);setForm(f=>({...f,name:t.id+'-01',cpu:t.min_cpu,ram:t.min_ram,disk:t.min_disk}))};
   const deploy=async()=>{setError('');try{await kvmApi.templateDeploy({template:chosen.id,...form});setChosen(null);loadJobs()}catch(e){setError(e.message)}};
+	const fieldStyle={width:'100%',marginTop:6,background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:7,padding:'9px 11px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none'};
+	const labelStyle={display:'block',fontSize:'var(--fs-xs)',fontWeight:600,color:'var(--fg-muted)'};
   return <div className="col" style={{gap:'var(--gutter)'}}>
     <div className="card" style={{padding:18}}><div className="card-title">Gotowe systemy</div><div className="card-sub">Oficjalne obrazy cloud QCOW2 · szybkie wdrożenie · cloud-init · QEMU Guest Agent</div></div>
     <div className="grid grid-3">{templates.map(t=><button key={t.id} className="card" onClick={()=>select(t)} style={{padding:18,textAlign:'left',cursor:'pointer',border:chosen?.id===t.id?'1px solid var(--accent)':undefined}}>
@@ -43,11 +47,20 @@ const KVMTemplatesPanel = ({ onReady }) => {
       <div style={{fontWeight:700,marginTop:12}}>{t.name}</div><div className="card-sub" style={{marginTop:5,minHeight:34}}>{t.description}</div>
       <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:12}}>{t.min_cpu} vCPU · {Math.round(t.min_ram/1024*10)/10} GB RAM · {t.min_disk} GB</div>
     </button>)}</div>
-    {chosen&&<div className="card" style={{padding:20}}><div className="row" style={{justifyContent:'space-between'}}><div><div className="card-title">Wdróż {chosen.name} {chosen.version}</div><div className="card-sub">Obraz zostanie pobrany raz i zachowany jako baza kolejnych VM.</div></div><button className="icon-btn" onClick={()=>setChosen(null)}>×</button></div>
-      <div className="grid grid-4" style={{marginTop:16}}><label>Nazwa VM<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>Sieć<select value={form.network} onChange={e=>setForm({...form,network:e.target.value})}>{(networks.length?networks:[{name:'default'}]).map(n=><option key={n.name||n} value={n.name||n}>{n.name||n}</option>)}</select></label><label>vCPU<input type="number" min={chosen.min_cpu} value={form.cpu} onChange={e=>setForm({...form,cpu:+e.target.value})}/></label><label>RAM MB<input type="number" min={chosen.min_ram} step="512" value={form.ram} onChange={e=>setForm({...form,ram:+e.target.value})}/></label></div>
-      <div className="grid grid-2" style={{marginTop:12}}><label>Dysk GB<input type="number" min={chosen.min_disk} value={form.disk} onChange={e=>setForm({...form,disk:+e.target.value})}/></label><label>Klucz publiczny SSH (opcjonalnie)<input value={form.sshKey} onChange={e=>setForm({...form,sshKey:e.target.value})} placeholder="ssh-ed25519 AAAA…"/></label></div>
-      {error&&<div style={{color:'var(--err)',marginTop:10}}>{error}</div>}<button className="btn primary" onClick={deploy} style={{marginTop:16}}>Pobierz i uruchom system</button>
-    </div>}
+	{chosen&&<KVMModal title={`Wdróż ${chosen.name} ${chosen.version}`} sub="Obraz zostanie pobrany raz i zachowany jako baza kolejnych maszyn." onClose={()=>{setChosen(null);setError('')}} width={680}
+	  footer={<><button className="btn" onClick={()=>{setChosen(null);setError('')}}>Anuluj</button><button className="btn primary" onClick={deploy} disabled={!form.name||!form.network}>Pobierz i uruchom system</button></>}>
+	  <div style={{display:'flex',gap:14,alignItems:'center',padding:'12px 14px',background:'color-mix(in oklch,var(--accent) 7%,var(--bg-2))',border:'1px solid color-mix(in oklch,var(--accent) 22%,var(--line))',borderRadius:9,marginBottom:18}}><span style={{fontSize:34}}>{chosen.icon}</span><div><div style={{fontWeight:700}}>{chosen.name} {chosen.version}</div><div className="card-sub" style={{marginTop:3}}>{chosen.description}</div></div></div>
+	  <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:14}}>
+	    <label style={labelStyle}>Nazwa maszyny<input style={fieldStyle} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>
+	    <label style={labelStyle}>Sieć<select style={fieldStyle} value={form.network} onChange={e=>setForm({...form,network:e.target.value})}>{(networks.length?networks:[{name:'default'}]).map(n=><option key={n.name||n} value={n.name||n}>{n.name||n}</option>)}</select></label>
+	    <label style={labelStyle}>Procesory vCPU<input style={fieldStyle} type="number" min={chosen.min_cpu} value={form.cpu} onChange={e=>setForm({...form,cpu:+e.target.value})}/></label>
+	    <label style={labelStyle}>Pamięć RAM (MB)<input style={fieldStyle} type="number" min={chosen.min_ram} step="512" value={form.ram} onChange={e=>setForm({...form,ram:+e.target.value})}/></label>
+	    <label style={labelStyle}>Rozmiar dysku (GB)<input style={fieldStyle} type="number" min={chosen.min_disk} value={form.disk} onChange={e=>setForm({...form,disk:+e.target.value})}/></label>
+	    <label style={{...labelStyle,gridColumn:'1/-1'}}>Klucz publiczny SSH <span className="dim">(opcjonalnie)</span><textarea style={{...fieldStyle,minHeight:74,resize:'vertical'}} value={form.sshKey} onChange={e=>setForm({...form,sshKey:e.target.value})} placeholder="ssh-ed25519 AAAA…"/></label>
+	  </div>
+	  <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:14,padding:'9px 11px',background:'var(--bg-2)',borderRadius:7}}>Minimum: {chosen.min_cpu} vCPU · {Math.round(chosen.min_ram/1024*10)/10} GB RAM · {chosen.min_disk} GB dysku</div>
+	  {error&&<div style={{color:'var(--err)',marginTop:12,padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',borderRadius:7}}>{error}</div>}
+	</KVMModal>}
     {jobs.length>0&&<div className="card"><div style={{padding:16,borderBottom:'1px solid var(--line)'}}><div className="card-title">Wdrożenia</div></div>{jobs.sort((a,b)=>new Date(b.started)-new Date(a.started)).map(j=><div key={j.id} style={{padding:'14px 16px',borderBottom:'1px solid var(--line)'}}><div className="row" style={{justifyContent:'space-between'}}><b>{j.name}</b><span className={`badge ${j.status==='done'?'ok':j.status==='error'?'err':'warn'}`}>{j.status==='done'?'GOTOWE':j.status==='error'?'BŁĄD':j.progress+'%'}</span></div><div className="card-sub" style={{marginTop:4}}>{j.error||j.step}</div><div style={{height:4,background:'var(--line)',borderRadius:4,marginTop:9}}><div style={{height:'100%',width:j.progress+'%',background:j.status==='error'?'var(--err)':'var(--accent)',borderRadius:4}}/></div></div>)}</div>}
   </div>
 };
