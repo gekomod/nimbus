@@ -24,7 +24,11 @@ import (
 	"time"
 )
 
-const ssacliTimeout = 15 * time.Second
+const ssacliTimeout = 8 * time.Second
+
+// Kontrolery Smart Array źle znoszą kilka równoległych procesów ssacli.
+// Jedna kolejka chroni kontroler i resztę API przed lawiną blokujących wywołań.
+var ssacliMu sync.Mutex
 
 // ── Typy ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +83,8 @@ type LEDResult struct {
 // ── ssacli z timeout ──────────────────────────────────────────────────────────
 
 func ssacliRun(toolPath string, args ...string) (string, error) {
+	ssacliMu.Lock()
+	defer ssacliMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), ssacliTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, toolPath, args...).CombinedOutput()
@@ -212,7 +218,7 @@ func bestTool(tools []ToolInfo) string {
 			}
 		}
 	}
-	return "mock"
+	return ""
 }
 
 // ── Cache skanowania zatok (10s) ─────────────────────────────────────────────
@@ -477,17 +483,9 @@ func scanViaSSACLI() []BaySlot {
 			s.Temp     = pd.temp
 			s.Smart    = pd.smart
 
-			// Godziny pracy z SMART
-			if s.Bay != "" {
-				if smart := getSMARTData(s.Bay, s.Serial); smart != nil {
-					if h, ok := smart["hours"].(float64); ok && h > 0 {
-						s.Hours = int(h)
-					}
-					if t, ok := smart["temp"].(float64); ok && t > 0 && s.Temp == 0 {
-						s.Temp = t
-					}
-				}
-			}
+			// SMART jest pobierany przez główny endpoint Storage i cache'owany.
+			// Nie odpytujemy każdego dysku podczas skanu zatok — na Smart Array
+			// potrafiło to zająć kilkadziesiąt sekund i blokować cały panel.
 		}
 		slots[i] = s
 	}
@@ -622,7 +620,7 @@ func applyLED(slot BaySlot, action, tool string, enc EnclosureInfo) LEDResult {
 		tool = enc.Tool
 	}
 	if tool == "" || tool == "mock" {
-		return mockLED(slot, action)
+		return LEDResult{Error: "brak obsługiwanego narzędzia LED dla tego kontrolera"}
 	}
 
 	var res LEDResult
@@ -687,11 +685,15 @@ func ssacliLED(slot BaySlot, action string, ctrlSlot int, tool string) LEDResult
 	if action == "locate-on" || action == "fault-on" {
 		ledVal = "on"
 	}
-	cmd, out, err := runLEDCmd(tool,
+	args := []string{
 		"ctrl", fmt.Sprintf("slot=%d", ctrlSlot),
 		"pd", pdAddr,
 		"modify", fmt.Sprintf("led=%s", ledVal),
-	)
+	}
+	toolPath := findSSACLITool()
+	if toolPath == "" { return LEDResult{Error:"ssacli/hpssacli nie jest dostępne"} }
+	out, err := ssacliRun(toolPath, args...)
+	cmd := tool + " " + strings.Join(args, " ")
 	res := LEDResult{Command: cmd, Output: out}
 	if err != nil {
 		if strings.Contains(out, "Error") || strings.Contains(out, "not found") {
@@ -842,8 +844,8 @@ func (s *Server) handleBaysTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBays(w http.ResponseWriter, r *http.Request) {
-	slots := scanBays()
 	enc := detectEnclosure()
+	slots := scanBays()
 	occupied := 0
 	for _, sl := range slots {
 		if sl.Occupied {
@@ -855,6 +857,7 @@ func (s *Server) handleBays(w http.ResponseWriter, r *http.Request) {
 		"total":    len(slots),
 		"occupied": occupied,
 		"tool":     enc.Tool,
+		"enclosure": enc,
 	})
 }
 

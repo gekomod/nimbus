@@ -86,14 +86,13 @@ const Storage = () => {
       .then(data => {
         if (!data || !data.devices) return;
 
-        // Dysk "nieprzypisany" = brak puli ZFS ORAZ brak zamontowanych partycji ORAZ brak fs
+        // Niezamontowany dysk z istniejącym FS też musi trafić tutaj — aby dało się go zamontować.
         // has_mounted_parts pochodzi z backendu (storage.go sprawdza children lsblk)
         const isUnassigned = (d) =>
           d.type === 'disk' &&
           !d.pool &&
           !d.has_mounted_parts &&
-          !d.mount &&
-          (!d.fs || d.fs === '');
+          !d.mount;
 
         const allDisks   = data.devices.filter(d => d.type === 'disk');
         const unassigned = allDisks.filter(d => isUnassigned(d));
@@ -121,6 +120,7 @@ const Storage = () => {
           type:     d.tran === 'nvme' ? 'NVMe' : d.rota ? 'HDD' : 'SSD',
           state:    d.fs ? 'foreign' : 'unformatted',
           fs:       d.fs     || '—',
+          device:   d.mount_device || '/dev/'+d.bay,
           hours:    d.hours  || 0,
           detected: 'przed chwilą',
           smart:    d.smart  || 'ok',
@@ -128,7 +128,7 @@ const Storage = () => {
         setDevices(data.devices);
       }).catch(()=>{});
     load();
-    const id = setInterval(load, 15000);
+    const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, []);
 
@@ -699,7 +699,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
           pct:     m.percent || 0,
           auto:    true,
           type:    (m.fs||'').toLowerCase()==='zfs'?'ZFS':(m.fs||'').toUpperCase().slice(0,5),
-          inFstab: true,
+          inFstab: !!m.in_fstab,
         }));
         setMounts(parsed);
         storeSet('MOUNTS', parsed);
@@ -1114,10 +1114,12 @@ const FormatModal = ({ disk, onClose }) => {
   const [trim,    setTrim]    = React.useState(disk.type==='NVMe'||disk.type==='SSD');
   const [encrypt, setEncrypt] = React.useState(false);
   const [confirm, setConfirm] = React.useState('');
+  const [busy,setBusy]=React.useState(false),[error,setError]=React.useState('');
 
   const fsOptions = [
     {v:'zfs',   t:'ZFS',   d:'Migawki, kompresja, parytet (jako pula)'},
     {v:'ext4',  t:'EXT4',  d:'Uniwersalny, dobry dla pojedynczych dysków'},
+    {v:'ext3',  t:'EXT3',  d:'Zgodność ze starszymi systemami Linux'},
     {v:'xfs',   t:'XFS',   d:'Duże pliki, wysoka wydajność I/O'},
     {v:'btrfs', t:'Btrfs', d:'Migawki, kompresja, sumy kontrolne'},
     {v:'exfat', t:'exFAT', d:'Wymienne, kompatybilność z Windows/macOS'},
@@ -1126,27 +1128,23 @@ const FormatModal = ({ disk, onClose }) => {
 
   const doFormat = async () => {
     if (!ok) return;
-    // Wywołaj API format
-    await fetch('/api/storage/format',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({device:'/dev/'+disk.bay, fs, label})}).catch(()=>{});
-    // Opcjonalnie mount
-    if (fs !== 'zfs' && mp) {
-      // mkfs powyżej działa na całym dysku (bez tabeli partycji), więc montujemy
-      // też cały dysk — NIE "/dev/sdX1" (taka partycja nigdy nie powstała).
-      await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({command:`mkdir -p ${mp} && mount /dev/${disk.bay} ${mp}`})}).catch(()=>{});
-    }
-    onClose();
+    setBusy(true);setError('');
+    try {
+      let r=await fetch('/api/storage/format',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay, fs, label})});
+      let d=await r.json();if(!r.ok)throw new Error(d.error||'Formatowanie nie powiodło się');
+      if(fs!=='zfs'&&mp){r=await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay,target:mp,fs,options:trim?'rw,relatime,discard':'rw,relatime',persist:true})});d=await r.json();if(!r.ok)throw new Error(d.error||'Dysk sformatowano, ale montowanie nie powiodło się')}
+      onClose();
+    } catch(e){setError(e.message)} finally{setBusy(false)}
   };
 
   return (
     <Modal title={`Formatuj ${disk.bay}`} sub={`${disk.model} · ${disk.size} · ${disk.serial} · obecnie: ${disk.fs}`} onClose={onClose} width={680}
-      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" disabled={!ok} style={!ok?{opacity:0.4,cursor:'not-allowed'}:{}} onClick={doFormat}>Sformatuj i zamontuj</button></>}>
+      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" disabled={!ok||busy} style={!ok?{opacity:0.4,cursor:'not-allowed'}:{}} onClick={doFormat}>{busy?'Przetwarzanie…':'Sformatuj i zamontuj'}</button></>}>
       <div style={{padding:'10px 12px',background:'color-mix(in oklch,var(--err) 8%,var(--bg-2))',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',borderRadius:5,marginBottom:16,fontSize:'var(--fs-sm)'}}>
         <b style={{color:'var(--err)'}}>Uwaga:</b> wszystkie dane na dysku zostaną nieodwracalnie usunięte.
       </div>
       <Field label="System plików">
-        <div className="grid" style={{gridTemplateColumns:'repeat(5,1fr)',gap:6}}>
+        <div className="grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(88px,1fr))',gap:6}}>
           {fsOptions.map(o => (
             <div key={o.v} onClick={()=>setFs(o.v)} style={{padding:'10px 8px',border:'1px solid '+(fs===o.v?'var(--accent)':'var(--line)'),background:fs===o.v?'color-mix(in oklch,var(--accent) 10%,transparent)':'var(--bg-1)',borderRadius:5,cursor:'pointer',textAlign:'center'}}>
               <div className="mono" style={{fontWeight:500,fontSize:'var(--fs-sm)'}}>{o.t}</div>
@@ -1155,6 +1153,7 @@ const FormatModal = ({ disk, onClose }) => {
         </div>
         <div className="dim" style={{fontSize:11,marginTop:6}}>{fsOptions.find(o=>o.v===fs).d}</div>
       </Field>
+      {error&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',color:'var(--err)',borderRadius:5,marginBottom:12}}>{error}</div>}
       <div className="grid" style={{gridTemplateColumns:'1fr 1fr',gap:12}}>
         <Field label="Etykieta"><input style={inputCss} value={label} onChange={e=>setLabel(e.target.value)}/></Field>
         <Field label="Punkt montowania"><input style={inputCss} value={mp} onChange={e=>setMp(e.target.value)}/></Field>
@@ -1186,23 +1185,25 @@ const MountModal = ({ disk, onClose }) => {
   const [mp,   setMp]   = React.useState(`/mnt/${(disk.bay||'').replace('-','_')}`);
   const [opts, setOpts] = React.useState(disk.fs==='ntfs'?'rw,uid=1000,gid=1000,umask=000':'rw,relatime');
   const [auto, setAuto] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error,setError]= React.useState('');
+
+  const device = disk.device || '/dev/'+disk.bay;
 
   const doMount = async () => {
-    await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({device:'/dev/'+disk.bay+'1', target:mp, options:opts})}).catch(()=>{});
-    if (auto) {
-      // Dodaj do fstab
-      const fstabLine = `/dev/${disk.bay}1   ${mp}   ${disk.fs||'auto'}   ${opts}   0   2\n`;
-      const cur = await fetch('/api/storage/fstab-content',{credentials:'include'}).then(r=>r.json()).catch(()=>({content:''}));
-      await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({content:(cur.content||'')+fstabLine})}).catch(()=>{});
-    }
-    onClose();
+    setBusy(true);setError('');
+    try {
+      const r=await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({device, target:mp, fs:disk.fs&&disk.fs!=='—'?disk.fs:'', options:opts, persist:auto})});
+      const d=await r.json();if(!r.ok)throw new Error(d.error||'Montowanie nie powiodło się');
+      onClose();
+    } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
   return (
     <Modal title={`Zamontuj ${disk.bay}`} sub={`${disk.model} · ${disk.size} · system plików: ${disk.fs}`} onClose={onClose}
-      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" onClick={doMount}>Zamontuj</button></>}>
+      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" disabled={busy||!mp.startsWith('/mnt/')} onClick={doMount}>{busy?'Montowanie…':'Zamontuj'}</button></>}>
+      <Field label="Wykryte urządzenie"><input style={inputCss} value={device} readOnly/></Field>
       <Field label="Punkt montowania"><input style={inputCss} value={mp} onChange={e=>setMp(e.target.value)}/></Field>
       <Field label="Opcje montowania" hint="Oddziel przecinkami. Dla NTFS dodaj uid/gid by uzyskać zapis."><input style={inputCss} value={opts} onChange={e=>setOpts(e.target.value)}/></Field>
       <Field label="">
@@ -1211,9 +1212,10 @@ const MountModal = ({ disk, onClose }) => {
           <div className={"toggle "+(auto?'on':'')} onClick={()=>setAuto(!auto)}/>
         </div>
       </Field>
+      {error&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',background:'color-mix(in oklch,var(--err) 8%,var(--bg-2))',color:'var(--err)',borderRadius:5,marginBottom:12}}>{error}</div>}
       <Field label="Wpis fstab">
         <pre className="mono" style={{margin:0,padding:'10px 12px',background:'var(--bg-1)',border:'1px solid var(--line)',borderRadius:5,fontSize:11,color:'var(--fg-muted)'}}>
-{`/dev/${disk.bay}1   ${mp}   ${disk.fs||'auto'}   ${opts}   0   2`}
+{`UUID=<automatycznie>   ${mp}   ${disk.fs||'auto'}   ${opts}   0   2`}
         </pre>
       </Field>
     </Modal>
@@ -1262,24 +1264,19 @@ const AddMountModal = ({ onClose }) => {
   const [auto,   setAuto]   = React.useState(true);
   const [fstab,  setFstab]  = React.useState(true);
 
-  const fsOpts = ['ext4','xfs','btrfs','zfs','ntfs','exfat','vfat','nfs','cifs'];
+  const fsOpts = ['auto','ext4','ext3','ext2','xfs','btrfs','zfs','ntfs','exfat','vfat','nfs','cifs'];
   const ok = device.trim().length > 2 && mp.trim().length > 1;
   const fstabLine = `${device||'<urządzenie>'}   ${mp}   ${fs}   ${opts}   0   2`;
 
   const testMount = async () => {
-    const r = await fetch('/api/storage/check-device',{credentials:'include',headers:{'Content-Type':'application/json'}}).then(r=>r.json()).catch(()=>null);
-    alert(r ? 'Urządzenie dostępne' : 'Urządzenie niedostępne');
+    const r = await fetch('/api/storage/check-device?device='+encodeURIComponent(device),{credentials:'include'}).then(r=>r.json()).catch(()=>null);
+    alert(r?.exists ? 'Urządzenie dostępne' : 'Urządzenie niedostępne'+(r?.error?' — '+r.error:''));
   };
 
   const doMount = async () => {
     await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({device, target:mp, fs, options:opts})}).catch(()=>{});
-    if (fstab) {
-      const cur = await fetch('/api/storage/fstab-content',{credentials:'include'}).then(r=>r.json()).catch(()=>({content:''}));
-      await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({content:(cur.content||'')+'\n'+fstabLine+'\n'})}).catch(()=>{});
-    }
-    onClose();
+      body:JSON.stringify({device, target:mp, fs:fs==='auto'?'':fs, options:opts, persist:auto&&fstab})});
+    if(r.ok)onClose();else{const d=await r.json();alert(d.error||'Montowanie nie powiodło się')}
   };
 
   return (
@@ -1572,13 +1569,11 @@ const BayLedsView = () => {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [infoRes, baysRes] = await Promise.all([
-        fetch('/api/bays/info', { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/bays',      { credentials: 'include' }).then(r => r.json()),
-      ]);
+      const baysRes = await fetch('/api/bays', { credentials: 'include' }).then(r => r.json());
+      const infoRes = baysRes.enclosure || {tool:baysRes.tool,tools:[]};
       setEnclosure(infoRes);
       // Ustaw tool z serwera jeśli jeszcze nie ustawiony przez użytkownika
-      setTool(prev => prev || infoRes.tool || 'mock');
+      setTool(prev => prev || infoRes.tool || '');
       const list = baysRes.slots || [];
       setSlots(list);
       // Wybierz pierwszy zajęty slot domyślnie
@@ -1715,21 +1710,10 @@ const BayLedsView = () => {
                   <div className="dim" style={{ fontSize: 10, lineHeight: 1.4 }}>{t.note}</div>
                 </div>
               ))}
-              {/* Zawsze dostępny tryb demo */}
-              <div onClick={() => setTool('mock')}
-                style={{
-                  padding: '8px 10px', borderRadius: 5, cursor: 'pointer',
-                  border: '1px solid ' + (tool === 'mock' ? 'var(--accent)' : 'var(--line)'),
-                  background: tool === 'mock' ? 'color-mix(in oklch, var(--accent) 10%, transparent)' : 'var(--bg-1)',
-                }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                  <span className="mono" style={{ fontWeight: 500, fontSize: 'var(--fs-sm)' }}>mock</span>
-                  <span className="badge info" style={{ fontSize: 9 }}>demo</span>
-                </div>
-                <div className="dim" style={{ fontSize: 10 }}>Tryb offline — podgląd UI bez sprzętu</div>
-              </div>
             </div>
           </Field>
+
+          {!tool && <div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--warn) 35%,var(--line))',color:'var(--warn)',borderRadius:5}}>Nie wykryto narzędzia do sterowania LED. Dla HP Smart Array zainstaluj <span className="mono">ssacli</span>.</div>}
 
           {!faultOK && (
             <div style={{ padding: '8px 10px', background: 'color-mix(in oklch, var(--warn) 8%, var(--bg-2))',
@@ -1865,11 +1849,11 @@ const BayLedsView = () => {
               {/* Przyciski sterowania */}
               <div className="row gap-sm" style={{ flexWrap: 'wrap' }}>
                 <button className="btn sm"
-                  disabled={!bay.occupied || ledBusy}
+                  disabled={!bay.occupied || !tool || ledBusy}
                   style={!bay.occupied ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
                   onClick={() => applyLed('locate-on')}>Lokalizuj (ON)</button>
                 <button className="btn sm"
-                  disabled={!bay.occupied || ledBusy}
+                  disabled={!bay.occupied || !tool || ledBusy}
                   style={!bay.occupied ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
                   onClick={() => applyLed('locate-off')}>Locate OFF</button>
                 <button className="btn sm"
