@@ -139,9 +139,13 @@ function _parseIfaces(raw) {
     mac:   i.MAC   || i.mac   || '—',
     state: i.State || i.state || 'down',
     speed: i.Speed || i.speed || '—',
-    // RxB/TxB są w bajtach łącznie — przelicz na MB/s (szacunkowe)
-    rx:    i.rx    || (i.RxB  ? Math.round(i.RxB / 1048576 / 3600) : 0),
-    tx:    i.tx    || (i.TxB  ? Math.round(i.TxB / 1048576 / 3600) : 0),
+    speed_mbps: i.speed_mbps || 0,
+    admin_up: i.admin_up === true,
+    carrier: i.carrier === true,
+    oper_state: i.oper_state || i.state || 'unknown',
+    // Szybkość chwilowa pochodzi z backendu; liczników całkowitych nie udajemy jako MB/s.
+    rx:    i.rx || 0,
+    tx:    i.tx || 0,
     vlan:  i.vlan  || '—',
   }));
 }

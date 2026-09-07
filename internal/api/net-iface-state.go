@@ -11,17 +11,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 )
 
 // ifaceLinkState zwraca "up" lub "down" — używa /sys/class/net (nie wymaga zewnętrznych komend)
 func ifaceLinkState(name string) string {
-	// Samo istnienie katalogu /sys/class/net/<iface> = interfejs istnieje = działa
-	// (WireGuard ma zawsze operstate="unknown" ale to normalne)
-	if _, err := os.Stat("/sys/class/net/" + name); err == nil {
-		return "up"
-	}
-	return "down"
+	flagsData, err := os.ReadFile("/sys/class/net/" + name + "/flags")
+	if err != nil { return "down" }
+	flags, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(string(flagsData), "0x")), 16, 32)
+	if err != nil || flags&0x1 == 0 { return "down" }
+	oper, _ := os.ReadFile("/sys/class/net/" + name + "/operstate")
+	if strings.TrimSpace(string(oper)) == "down" { return "no-carrier" }
+	return "up"
 }
 
 // networkOverviewWithRealStates opakowuje handleNetworkOverview i koryguje
@@ -64,7 +66,6 @@ func (s *Server) networkOverviewWithRealStates(inner http.HandlerFunc) http.Hand
 				}
 				real := ifaceLinkState(name)
 				if real != "" {
-					iface["State"] = real
 					iface["state"] = real
 				}
 			}

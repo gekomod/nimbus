@@ -6,8 +6,16 @@ import (
 	"net/http"
 	"nimbus/internal/sys"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
+
+var ifaceNameRE = regexp.MustCompile(`^[a-zA-Z0-9_.:-]{1,32}$`)
+
+func validIface(name string) bool {
+	return ifaceNameRE.MatchString(name) && name != "lo"
+}
 
 func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"hostname": sys.Hostname(), "interfaces": sys.NetInterfaces()})
@@ -24,6 +32,7 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 	iface  := parts[0]
 	sub    := ""
 	if len(parts) > 1 { sub = parts[1] }
+	if !validIface(iface) { jsonErr(w, "nieprawidłowa nazwa interfejsu", http.StatusBadRequest); return }
 
 	if sub == "speedtest" {
 		if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
@@ -39,16 +48,50 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 		stats, _ := runCmd("ip", "-s", "link", "show", "dev", iface)
 		jsonOK(w, map[string]any{"interface": iface, "addr": addr, "stats": stats})
 	case http.MethodPost:
-		var req struct { Action, IP, Prefix string }
-		json.NewDecoder(r.Body).Decode(&req)
+		var req struct { Action, IP, Prefix, Mode, Gateway, DNS, VLAN string; MTU int }
+		if json.NewDecoder(r.Body).Decode(&req) != nil { jsonErr(w,"nieprawidłowe dane",400); return }
+		if _, err := os.Stat("/sys/class/net/"+iface); err != nil { jsonErr(w,"interfejs nie istnieje",404); return }
+		var out string; var err error
 		switch req.Action {
-		case "up":   runCmd("ip", "link", "set", iface, "up")
-		case "down": runCmd("ip", "link", "set", iface, "down")
+		case "up":   out, err = runCmd("ip", "link", "set", "dev", iface, "up")
+		case "down": out, err = runCmd("ip", "link", "set", "dev", iface, "down")
 		case "set-ip":
-			runCmd("ip", "addr", "flush", "dev", iface)
-			if req.Prefix != "" { runCmd("ip", "addr", "add", req.IP+"/"+req.Prefix, "dev", iface) } else { runCmd("ip", "addr", "add", req.IP, "dev", iface) }
+			if req.IP == "" { jsonErr(w,"adres IP jest wymagany",400); return }
+			if req.Prefix == "" { req.Prefix="24" }
+			out, err = runCmd("ip", "addr", "replace", req.IP+"/"+req.Prefix, "dev", iface)
+		case "configure":
+			target := iface
+			if req.VLAN != "" {
+				vid, e := strconv.Atoi(req.VLAN); if e != nil || vid < 1 || vid > 4094 { jsonErr(w,"VLAN musi mieć wartość 1–4094",400); return }
+				target = iface+"."+req.VLAN
+				if _, e := os.Stat("/sys/class/net/"+target); e != nil { if out,err=runCmd("ip","link","add","link",iface,"name",target,"type","vlan","id",req.VLAN);err!=nil{break} }
+			}
+			if req.MTU > 0 { if req.MTU < 576 || req.MTU > 9216 { jsonErr(w,"MTU poza zakresem 576–9216",400);return }; if out,err=runCmd("ip","link","set","dev",target,"mtu",strconv.Itoa(req.MTU));err!=nil{break} }
+			if out,err=runCmd("ip","link","set","dev",target,"up");err!=nil{break}
+			if req.Mode == "dhcp" {
+				attempted := false
+				for _, client := range []struct{name string; args []string}{
+					{"networkctl", []string{"renew", target}},
+					{"nmcli", []string{"device", "connect", target}},
+					{"dhclient", []string{"-v", target}},
+				} {
+					if !isInstalled(client.name) { continue }
+					attempted = true
+					out,err=runCmd(client.name,client.args...)
+					if err == nil { break }
+				}
+				if !attempted { err=fmt.Errorf("brak klienta DHCP: networkctl, nmcli lub dhclient") }
+			} else {
+				if req.IP == "" { jsonErr(w,"adres IP jest wymagany",400);return }; if req.Prefix==""{req.Prefix="24"}
+				if out,err=runCmd("ip","addr","replace",req.IP+"/"+req.Prefix,"dev",target);err!=nil{break}
+				if req.Gateway!="" { out,err=runCmd("ip","route","replace","default","via",req.Gateway,"dev",target);if err!=nil{break} }
+				if req.DNS!="" && isInstalled("resolvectl") { dnsArgs:=append([]string{"dns",target},strings.Fields(strings.ReplaceAll(req.DNS,","," "))...);out,err=runCmd("resolvectl",dnsArgs...) }
+			}
+		default: jsonErr(w,"nieznana akcja",400); return
 		}
-		jsonOK(w, map[string]string{"status": "ok"})
+		if err != nil { jsonErr(w,strings.TrimSpace(out+" "+err.Error()),500);return }
+		real := ifaceLinkState(iface)
+		jsonOK(w, map[string]string{"status": "ok", "state":real, "output":out})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -58,6 +101,7 @@ func (s *Server) handleNetworkInterfaceAdd(w http.ResponseWriter, r *http.Reques
 	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	var req struct { Name, Type string }
 	json.NewDecoder(r.Body).Decode(&req)
+	if !validIface(req.Name) { jsonErr(w,"nieprawidłowa nazwa interfejsu",400);return }
 	if req.Type == "" { req.Type = "dummy" }
 	if _, err := runCmd("ip", "link", "add", req.Name, "type", req.Type); err != nil { jsonErr(w, err.Error(), http.StatusInternalServerError); return }
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -66,7 +110,8 @@ func (s *Server) handleNetworkInterfaceAdd(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleNetworkInterfaceRemove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	iface := pathSuffix(r, "/network/interfaces/remove/")
-	runCmd("ip", "link", "delete", iface)
+	if !validIface(iface) { jsonErr(w,"nieprawidłowa nazwa interfejsu",400);return }
+	if _, err := runCmd("ip", "link", "delete", iface); err != nil { jsonErr(w,err.Error(),500);return }
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 

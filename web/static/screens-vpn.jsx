@@ -13,7 +13,11 @@ const VPN_STATE_META = {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const vpnApi = (path, opts = {}) =>
-  fetch(path, { credentials: "include", ...opts }).then(r => r.json());
+  fetch(path, { credentials: "include", ...opts }).then(async r => {
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);
+    return d;
+  });
 
 const vpnPost = (path, body) => vpnApi(path, {
   method: "POST",
@@ -384,6 +388,7 @@ const OpenVPNPanel = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState("");
+	const [error, setError] = useState("");
 
   useEffect(() => {
     vpnApi("/api/vpn/openvpn").then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
@@ -391,7 +396,9 @@ const OpenVPNPanel = () => {
 
   const doAction = async (id, act) => {
     setAction(act + id);
-    await vpnApi(`/api/vpn/openvpn/${id}/${act}`, { method: "POST", credentials: "include" }).catch(() => {});
+	setError("");
+	try { await vpnApi(`/api/vpn/openvpn/${id}/${act}`, { method: "POST", credentials: "include" }); }
+	catch (e) { setError(e.message || "Operacja OpenVPN nie powiodła się"); }
     const d = await vpnApi("/api/vpn/openvpn").catch(() => null);
     if (d) setData(d);
     setAction("");
@@ -404,6 +411,7 @@ const OpenVPNPanel = () => {
   return (
     <div className="col" style={{ gap: "var(--gutter)" }}>
       <div className="card">
+		{error && <div className="alert danger" style={{margin:12}}>{error}</div>}
         <div className="card-head">
           <div>
             <div className="card-title">🔒 OpenVPN</div>
@@ -483,6 +491,7 @@ const IPSecPanel = () => {
   const [data, setData]   = useState(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction]   = useState("");
+	const [error, setError] = useState("");
 
   useEffect(() => {
     vpnApi("/api/vpn/ipsec").then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
@@ -490,7 +499,9 @@ const IPSecPanel = () => {
 
   const doAction = async (act) => {
     setAction(act);
-    await vpnApi(`/api/vpn/ipsec/${act}`, { method: "POST", credentials: "include" }).catch(() => {});
+	setError("");
+	try { await vpnApi(`/api/vpn/ipsec/${act}`, { method: "POST", credentials: "include" }); }
+	catch (e) { setError(e.message || "Operacja IPSec nie powiodła się"); }
     const d = await vpnApi("/api/vpn/ipsec").catch(() => null);
     if (d) setData(d);
     setAction("");
@@ -501,6 +512,7 @@ const IPSecPanel = () => {
   return (
     <div className="col" style={{ gap: "var(--gutter)" }}>
       <div className="card">
+		{error && <div className="alert danger" style={{margin:12}}>{error}</div>}
         <div className="card-head">
           <div>
             <div className="card-title">🛡 IPSec · strongSwan</div>
@@ -1461,9 +1473,9 @@ const Vpn = () => {
   useEffect(() => { reloadOverview(); }, [reloadOverview]);
 
   // overview === null → jeszcze ładujemy, nie znamy stanu
-  const wgInstalled   = overview === null ? null : (overview?.wireguard?.installed !== false);
-  const ovpnInstalled = overview === null ? null : (overview?.openvpn?.installed  !== false);
-  const ipsecInstalled= overview === null ? null : (overview?.ipsec?.installed    !== false);
+  const wgInstalled   = overview === null ? null : overview?.wireguard?.installed === true;
+  const ovpnInstalled = overview === null ? null : overview?.openvpn?.installed  === true;
+  const ipsecInstalled= overview === null ? null : overview?.ipsec?.installed    === true;
 
   const MODULES = [
     {

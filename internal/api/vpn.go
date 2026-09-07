@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -225,7 +226,7 @@ func nextPeerIP(iface string) string {
 	base := "10.8.0"
 	if wgi.Address != "" {
 		ip := strings.Split(wgi.Address, "/")[0]
-		base = ip[:strings.LastIndex(ip, ".")]
+		if idx := strings.LastIndex(ip, "."); idx > 0 { base = ip[:idx] }
 	}
 	used := map[string]bool{}
 	if wgi.Address != "" { used[strings.Split(wgi.Address, "/")[0]] = true }
@@ -394,6 +395,12 @@ func (s *Server) handleVPNWireguardCreate(w http.ResponseWriter, r *http.Request
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Interface == "" { req.Interface = "wg0" }
 	if req.MTU == 0 { req.MTU = 1420 }
+	if !validIface(req.Interface) { jsonErr(w,"nieprawidłowa nazwa interfejsu",400);return }
+	if !isBase64Key(req.PrivateKey) { jsonErr(w,"nieprawidłowy klucz prywatny WireGuard",400);return }
+	if _,_,err := net.ParseCIDR(req.Address); err != nil { jsonErr(w,"adres WireGuard musi być zapisany jako IP/prefix",400);return }
+	port,err := strconv.Atoi(req.ListenPort); if err != nil || port < 1 || port > 65535 { jsonErr(w,"port musi mieć wartość 1–65535",400);return }
+	if req.MTU < 576 || req.MTU > 9216 { jsonErr(w,"MTU poza zakresem 576–9216",400);return }
+	if req.NatIface != "" && !validIface(req.NatIface) { jsonErr(w,"nieprawidłowy interfejs NAT",400);return }
 
 	// Auto-wykryj interfejs wyjściowy jeśli nie podano
 	natIface := req.NatIface
@@ -423,6 +430,7 @@ func (s *Server) handleVPNWireguardCreate(w http.ResponseWriter, r *http.Request
 	runCmd("bash", "-c", "grep -q ip_forward /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf")
 
 	path := "/etc/wireguard/" + req.Interface + ".conf"
+	if err := os.MkdirAll("/etc/wireguard", 0700); err != nil { jsonErr(w,err.Error(),500);return }
 	if err := os.WriteFile(path, []byte(cfg), 0600); err != nil { jsonErr(w, err.Error(), 500); return }
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
@@ -478,6 +486,7 @@ func (s *Server) handleVPNWireguardIface(w http.ResponseWriter, r *http.Request)
 	suffix := pathSuffix(r, "/api/vpn/wireguard/")
 	parts := strings.SplitN(suffix, "/", 2)
 	iface := parts[0]; action := ""
+	if !regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`).MatchString(iface) { jsonErr(w,"nieprawidłowa nazwa interfejsu",400);return }
 	if len(parts) > 1 { action = parts[1] }
 	switch action {
 	case "up", "start":
@@ -502,7 +511,8 @@ func (s *Server) handleVPNWireguardIface(w http.ResponseWriter, r *http.Request)
 	case "restart":
 		exec.Command("wg-quick", "down", iface).CombinedOutput()
 		cmd := exec.Command("wg-quick", "up", iface)
-		out, _ := cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
+		if err != nil { jsonErr(w, strings.TrimSpace(string(out)), 500); return }
 		jsonOK(w, map[string]any{"status": "ok", "output": strings.TrimSpace(string(out))})
 	case "backup":
 		data, err := os.ReadFile("/etc/wireguard/" + iface + ".conf")
@@ -609,14 +619,16 @@ func (s *Server) handleVPNPeerCreate(w http.ResponseWriter, r *http.Request) {
 	// Dodaj peer live
 	cmd := exec.Command("wg", "set", req.Iface, "peer", pub, "allowed-ips", peerIP+"/32", "preshared-key", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(psk + "\n")
-	cmd.Run()
+	if err := cmd.Run(); err != nil { jsonErr(w,"nie można dodać peera do aktywnego interfejsu: "+err.Error(),500);return }
 
 	// Dołącz do conf
 	peerBlock := "\n[Peer]\n# " + req.Name + "\nPublicKey = " + pub + "\nPresharedKey = " + psk + "\nAllowedIPs = " + peerIP + "/32\n"
 	if req.Endpoint != "" { peerBlock += "Endpoint = " + req.Endpoint + "\n" }
 	confPath := "/etc/wireguard/" + req.Iface + ".conf"
 	f, err := os.OpenFile(confPath, os.O_APPEND|os.O_WRONLY, 0600)
-	if err == nil { f.WriteString(peerBlock); f.Close() }
+	if err != nil { jsonErr(w,"nie można otworzyć konfiguracji interfejsu: "+err.Error(),500);return }
+	if _, err = f.WriteString(peerBlock); err != nil { f.Close();jsonErr(w,"nie można zapisać peera: "+err.Error(),500);return }
+	f.Close()
 
 	// Metadane
 	id := "peer-" + randomHex(4)
@@ -742,7 +754,7 @@ func (s *Server) handleVPNPeerQR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVPNOpenVPN(w http.ResponseWriter, r *http.Request) {
-	active := serviceActive("openvpn") || serviceActive("openvpn@server")
+	active := serviceActive("openvpn") || serviceActive("openvpn@server") || serviceActive("openvpn-server@server")
 	cfgs, _ := runCmd("bash", "-c", "ls /etc/openvpn/*.conf /etc/openvpn/server/*.conf 2>/dev/null")
 	jsonOK(w, map[string]any{"active": active, "configs": strings.Split(strings.TrimSpace(cfgs), "\n")})
 }
@@ -751,16 +763,17 @@ func (s *Server) handleVPNOpenVPNItem(w http.ResponseWriter, r *http.Request) {
 	suffix := pathSuffix(r, "/api/vpn/openvpn/")
 	parts := strings.SplitN(suffix, "/", 2)
 	id := parts[0]; action := ""; if len(parts) > 1 { action = parts[1] }
-	svc := "openvpn@" + id
+	if !ifaceNameRE.MatchString(id) { jsonErr(w,"nieprawidłowa nazwa konfiguracji",400);return }
+	svc := "openvpn-server@" + id
+	legacySvc := "openvpn@" + id
 	switch action {
-	case "start":   runCmd("systemctl", "start", svc)
-	case "stop":    runCmd("systemctl", "stop", svc)
-	case "restart": runCmd("systemctl", "restart", svc)
-	case "status":  jsonOK(w, map[string]any{"active": serviceActive(svc)}); return
+	case "start", "stop", "restart":
+		out, err := runCmd("systemctl", action, svc); if err != nil { out,err=runCmd("systemctl",action,legacySvc) }; if err != nil { jsonErr(w,out,500);return }
+	case "status":  jsonOK(w, map[string]any{"active": serviceActive(svc)||serviceActive(legacySvc)}); return
 	default:
 		switch r.Method {
-		case http.MethodGet:    jsonOK(w, map[string]any{"id": id, "active": serviceActive(svc)}); return
-		case http.MethodDelete: runCmd("systemctl", "stop", svc); runCmd("systemctl", "disable", svc)
+		case http.MethodGet:    jsonOK(w, map[string]any{"id": id, "active": serviceActive(svc)||serviceActive(legacySvc)}); return
+		case http.MethodDelete: runCmd("systemctl", "stop", svc); runCmd("systemctl", "disable", svc); runCmd("systemctl","stop",legacySvc); runCmd("systemctl","disable",legacySvc)
 		}
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -768,21 +781,22 @@ func (s *Server) handleVPNOpenVPNItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVPNIPSec(w http.ResponseWriter, r *http.Request) {
 	out, _ := runCmd("ipsec", "status")
-	jsonOK(w, map[string]any{"active": serviceActive("strongswan") || serviceActive("ipsec"), "status": out})
+	jsonOK(w, map[string]any{"active": serviceActive("strongswan") || serviceActive("strongswan-starter") || serviceActive("ipsec"), "status": out})
 }
 
 func (s *Server) handleVPNIPSecAction(w http.ResponseWriter, r *http.Request) {
 	action := pathSuffix(r, "/api/vpn/ipsec/")
+	var out string
+	var err error
 	switch action {
-	case "start":   runCmd("ipsec", "start")
-	case "stop":    runCmd("ipsec", "stop")
-	case "restart": runCmd("ipsec", "restart")
-	case "reload":  runCmd("ipsec", "reload")
+	case "start", "stop", "restart", "reload": out,err=runCmd("ipsec", action)
 	case "status":
 		out, _ := runCmd("ipsec", "status")
 		jsonOK(w, map[string]string{"output": out}); return
+	default: jsonErr(w,"nieznana akcja",400);return
 	}
-	jsonOK(w, map[string]string{"status": "ok"})
+	if err != nil { jsonErr(w,out,500);return }
+	jsonOK(w, map[string]string{"status": "ok", "output":out})
 }
 
 // ─── Install / detection ───────────────────────────────────────────────────────
@@ -856,11 +870,11 @@ func (s *Server) handleVPNOverview(w http.ResponseWriter, r *http.Request) {
 		},
 		"openvpn": map[string]any{
 			"installed": ovpnInstalled,
-			"active":    ovpnInstalled && (serviceActive("openvpn") || serviceActive("openvpn@server")),
+			"active":    ovpnInstalled && (serviceActive("openvpn") || serviceActive("openvpn@server") || serviceActive("openvpn-server@server")),
 		},
 		"ipsec": map[string]any{
 			"installed": ipsecInstalled,
-			"active":    ipsecInstalled && (serviceActive("strongswan") || serviceActive("ipsec")),
+			"active":    ipsecInstalled && (serviceActive("strongswan") || serviceActive("strongswan-starter") || serviceActive("ipsec")),
 		},
 	})
 }

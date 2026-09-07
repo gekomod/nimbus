@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -171,8 +172,22 @@ type NetIface struct {
 	IP    string  `json:"ip"`
 	MAC   string  `json:"mac"`
 	Speed string  `json:"speed"`
+	SpeedMbps int64 `json:"speed_mbps"`
+	AdminUp bool `json:"admin_up"`
+	Carrier bool `json:"carrier"`
+	OperState string `json:"oper_state"`
 	VLAN  string  `json:"vlan"`
 }
+
+type netCounterSample struct {
+	rx, tx uint64
+	at     time.Time
+}
+
+var (
+	netCounterMu   sync.Mutex
+	netCounterPrev = map[string]netCounterSample{}
+)
 
 func NetInterfaces() []NetIface {
 	data, err := os.ReadFile("/proc/net/dev")
@@ -180,6 +195,9 @@ func NetInterfaces() []NetIface {
 		return nil
 	}
 	var ifaces []NetIface
+	now := time.Now()
+	netCounterMu.Lock()
+	defer netCounterMu.Unlock()
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	lineNo := 0
 	for scanner.Scan() {
@@ -211,25 +229,23 @@ func NetInterfaces() []NetIface {
 		}
 		rxB, _ := strconv.ParseUint(fields[0], 10, 64)
 		txB, _ := strconv.ParseUint(fields[8], 10, 64)
+		var rxRate, txRate float64
+		if prev, ok := netCounterPrev[name]; ok && now.After(prev.at) {
+			seconds := now.Sub(prev.at).Seconds()
+			if rxB >= prev.rx { rxRate = float64(rxB-prev.rx) / seconds / 1_000_000 }
+			if txB >= prev.tx { txRate = float64(txB-prev.tx) / seconds / 1_000_000 }
+		}
+		netCounterPrev[name] = netCounterSample{rx: rxB, tx: txB, at: now}
 
 		state := "down"
 		stateData, _ := os.ReadFile("/sys/class/net/" + name + "/operstate")
 		operstate := strings.TrimSpace(string(stateData))
-		if operstate == "up" {
-			state = "up"
-		} else if operstate == "unknown" {
-			// Interfejsy wirtualne (WireGuard, tunele, bridge, loopback) mają zawsze
-			// operstate="unknown" mimo że działają. Sprawdź flagę IFF_UP przez /sys/class/net/<iface>/flags
-			// Flagi to hex — bit 0x1 = IFF_UP
-			flagsData, err := os.ReadFile("/sys/class/net/" + name + "/flags")
-			if err == nil {
-				flagsStr := strings.TrimSpace(strings.TrimPrefix(string(flagsData), "0x"))
-				flags, err := strconv.ParseUint(flagsStr, 16, 32)
-				if err == nil && flags&0x1 != 0 {
-					state = "up"
-				}
-			}
-		}
+		flagsData, _ := os.ReadFile("/sys/class/net/" + name + "/flags")
+		flags, _ := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(string(flagsData), "0x")), 16, 32)
+		adminUp := flags&0x1 != 0
+		carrierData, carrierErr := os.ReadFile("/sys/class/net/" + name + "/carrier")
+		carrier := carrierErr == nil && strings.TrimSpace(string(carrierData)) == "1"
+		if adminUp && (carrier || operstate == "unknown") { state = "up" } else if adminUp { state = "no-carrier" }
 
 		ip := ""
 		macData, _ := os.ReadFile("/sys/class/net/" + name + "/address")
@@ -239,13 +255,14 @@ func NetInterfaces() []NetIface {
 		speedMbps, _ := strconv.ParseInt(strings.TrimSpace(string(speedData)), 10, 64)
 		speed := ""
 		switch {
-		case speedMbps >= 10000:
-			speed = "10 GbE"
+		case speedMbps >= 1000 && speedMbps%1000 == 0:
+			speed = fmt.Sprintf("%d Gb/s", speedMbps/1000)
 		case speedMbps >= 1000:
-			speed = "1 GbE"
+			speed = fmt.Sprintf("%.1f Gb/s", float64(speedMbps)/1000)
 		case speedMbps > 0:
-			speed = fmt.Sprintf("%d Mbps", speedMbps)
+			speed = fmt.Sprintf("%d Mb/s", speedMbps)
 		}
+		if !carrier && operstate != "unknown" { speed = "Brak linku"; speedMbps = 0 }
 
 		// Get IP via /proc/net/if_inet6 or ip command
 		out, _ := exec.Command("ip", "-brief", "addr", "show", name).Output()
@@ -271,10 +288,16 @@ func NetInterfaces() []NetIface {
 			Name:  name,
 			RxB:   rxB,
 			TxB:   txB,
+			Rx:    rxRate,
+			Tx:    txRate,
 			State: state,
 			IP:    ip,
 			MAC:   mac,
 			Speed: speed,
+			SpeedMbps: speedMbps,
+			AdminUp: adminUp,
+			Carrier: carrier,
+			OperState: operstate,
 			VLAN:  vlan,
 		})
 	}
