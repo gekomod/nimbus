@@ -6,10 +6,16 @@ package api
 // Na sprzęcie bez BMC (typowe desktopy/NUC) sekcja zwraca installed=true, bmc_present=false.
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ── Struktury ─────────────────────────────────────────────────────────────────
@@ -45,11 +51,11 @@ type IPMIBMC struct {
 }
 
 type IPMIChassis struct {
-	Intrusion    string `json:"intrusion"`
-	LastOpen     string `json:"lastOpen"`
-	FrontPanel   string `json:"frontPanel"`
-	PostCode     string `json:"postCode"`
-	PowerCycles  string `json:"powerCycles"`
+	Intrusion   string `json:"intrusion"`
+	LastOpen    string `json:"lastOpen"`
+	FrontPanel  string `json:"frontPanel"`
+	PostCode    string `json:"postCode"`
+	PowerCycles string `json:"powerCycles"`
 }
 
 type IPMIPowerMeta struct {
@@ -67,20 +73,79 @@ type IPMIEvent struct {
 	Src string `json:"src"`
 }
 
-// ── Wykrywanie ipmitool / BMC ──────────────────────────────────────────────────
-
-// ipmitoolAvailable() w temps.go sprawdza obecność przez `which ipmitool` —
-// wymaga to obecności binarki `which` w PATH usługi systemd. Tutaj używamy
-// isInstalled() (exec.LookPath, bez zewnętrznego procesu) jako dodatkowego,
-// bardziej niezawodnego sprawdzenia — jeśli oba się rozjadą, ufamy temu.
-func ipmiBinaryPresent() bool {
-	return isInstalled("ipmitool") || ipmitoolAvailable()
+type IPMIHistoryPoint struct {
+	T     int64   `json:"t"`
+	Temp  float64 `json:"temp"`
+	Fan   float64 `json:"fan"`
+	Power int     `json:"power"`
 }
 
-// ipmiRun uruchamia ipmitool z krótkim timeoutem logicznym (przez cmdSem);
-// zwraca pusty string i błąd gdy BMC nie odpowiada.
+type ipmiStaticSnapshot struct {
+	Present bool
+	BMC     IPMIBMC
+	At      time.Time
+}
+
+type ipmiLiveSnapshot struct {
+	Sensors []IPMISensor
+	Power   IPMIPower
+	Chassis IPMIChassis
+	At      time.Time
+}
+
+type ipmiSELSnapshot struct {
+	Entries int
+	Events  []IPMIEvent
+	Raw     []string
+	At      time.Time
+}
+
+var (
+	ipmiCacheMu     sync.RWMutex
+	ipmiRefreshMu   sync.Mutex
+	ipmiStaticCache ipmiStaticSnapshot
+	ipmiLiveCache   ipmiLiveSnapshot
+	ipmiSELCache    ipmiSELSnapshot
+	ipmiHistory     []IPMIHistoryPoint
+	ipmiFailures    int
+	ipmiRetryAfter  time.Time
+)
+
+const (
+	ipmiCommandTimeout = 3 * time.Second
+	ipmiStaticTTL      = 5 * time.Minute
+	ipmiLiveTTL        = 5 * time.Second
+	ipmiSELTTL         = time.Minute
+	ipmiFailurePause   = 30 * time.Second
+	ipmiHistoryLimit   = 720
+)
+
+// ── Wykrywanie ipmitool / BMC ──────────────────────────────────────────────────
+
+// Sprawdzamy binarkę bez uruchamiania zewnętrznego `which`, aby sam test
+// dostępności nie zajmował kolejki poleceń systemowych.
+func ipmiBinaryPresent() bool {
+	return isInstalled("ipmitool")
+}
+
+// ipmiRun ma własny krótki timeout. Ogólny runCmd dopuszcza długie operacje
+// administracyjne, ale zawieszone iLO/BMC nie może blokować panelu przez minuty.
 func ipmiRun(args ...string) (string, error) {
-	return runCmd("ipmitool", args...)
+	select {
+	case cmdSem <- struct{}{}:
+	case <-time.After(time.Second):
+		return "", fmt.Errorf("kolejka poleceń IPMI jest zajęta")
+	}
+	defer func() { <-cmdSem }()
+	ctx, cancel := context.WithTimeout(context.Background(), ipmiCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ipmitool", args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return strings.TrimSpace(string(out)), fmt.Errorf("brak odpowiedzi BMC po %s", ipmiCommandTimeout)
+	}
+	return strings.TrimSpace(string(out)), err
 }
 
 func ipmiBMCPresent() bool {
@@ -411,37 +476,62 @@ func parseSEL(out string) []IPMIEvent {
 	return events
 }
 
-// ── Handler główny ─────────────────────────────────────────────────────────────
-
-func (s *Server) handleIPMI(w http.ResponseWriter, r *http.Request) {
-	if !ipmiBinaryPresent() {
-		jsonOK(w, map[string]any{"installed": false})
-		return
+func getIPMIStatic(force bool) ipmiStaticSnapshot {
+	ipmiCacheMu.RLock()
+	cached := ipmiStaticCache
+	ipmiCacheMu.RUnlock()
+	cacheTTL := ipmiStaticTTL
+	if !cached.Present {
+		cacheTTL = 20 * time.Second
 	}
-	if !ipmiBMCPresent() {
-		jsonOK(w, map[string]any{"installed": true, "bmc_present": false})
-		return
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < cacheTTL {
+		return cached
 	}
 
-	sensorOut, _ := ipmiRun("sensor", "list")
-	sensors := parseIPMISensorList(sensorOut)
+	ipmiRefreshMu.Lock()
+	defer ipmiRefreshMu.Unlock()
+	ipmiCacheMu.RLock()
+	cached = ipmiStaticCache
+	ipmiCacheMu.RUnlock()
+	cacheTTL = ipmiStaticTTL
+	if !cached.Present {
+		cacheTTL = 20 * time.Second
+	}
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < cacheTTL {
+		return cached
+	}
 
-	mcOut, _ := ipmiRun("mc", "info")
+	now := time.Now()
+	mcOut, err := ipmiRun("mc", "info")
+	if err != nil {
+		if cached.Present {
+			return cached
+		}
+		// Negatywny wynik trzymamy krótko, żeby niedostępne iLO nie było
+		// odpytywane przy każdym renderze, ale szybko wykryć jego powrót.
+		cached = ipmiStaticSnapshot{Present: false, At: now}
+		ipmiCacheMu.Lock()
+		ipmiStaticCache = cached
+		ipmiCacheMu.Unlock()
+		return cached
+	}
 	product, mfr, fw := parseMCInfo(mcOut)
 	model := strings.TrimSpace(mfr + " " + product)
 	if model == "" {
 		model = "Kontroler BMC (IPMI 2.0)"
 	}
-
+	if fw == "" {
+		fw = "—"
+	}
 	ip, mac := "", ""
 	for _, ch := range []string{"1", "8", "0"} {
-		lanOut, err := ipmiRun("lan", "print", ch)
-		if err == nil {
-			ip2, mac2 := parseLanPrint(lanOut)
-			if ip2 != "" || mac2 != "" {
-				ip, mac = ip2, mac2
-				break
-			}
+		lanOut, lanErr := ipmiRun("lan", "print", ch)
+		if lanErr != nil {
+			continue
+		}
+		ip, mac = parseLanPrint(lanOut)
+		if ip != "" || mac != "" {
+			break
 		}
 	}
 	if ip == "" {
@@ -450,94 +540,249 @@ func (s *Server) handleIPMI(w http.ResponseWriter, r *http.Request) {
 	if mac == "" {
 		mac = "—"
 	}
-	if fw == "" {
-		fw = "—"
+	cached = ipmiStaticSnapshot{
+		Present: true,
+		BMC:     IPMIBMC{Model: model, IP: ip, MAC: mac, FW: fw, Uptime: "—"},
+		At:      now,
 	}
+	ipmiCacheMu.Lock()
+	ipmiStaticCache = cached
+	ipmiCacheMu.Unlock()
+	return cached
+}
 
-	chassisOut, _ := ipmiRun("chassis", "status")
-	chassisMap := parseChassisStatus(chassisOut)
+func chassisFromOutput(out string) (IPMIChassis, string) {
+	values := parseChassisStatus(out)
 	powerState := "OFF"
-	if strings.EqualFold(chassisMap["System Power"], "on") {
+	if strings.EqualFold(values["System Power"], "on") {
 		powerState = "ON"
 	}
 	intrusion := "OK — obudowa zamknięta"
-	if v, ok := chassisMap["Chassis Intrusion"]; ok {
-		if strings.EqualFold(v, "active") || strings.Contains(strings.ToLower(v), "detect") {
-			intrusion = "WYKRYTO — obudowa otwierana"
-		} else {
-			intrusion = "OK — obudowa zamknięta"
-		}
+	if v, ok := values["Chassis Intrusion"]; ok &&
+		(strings.EqualFold(v, "active") || strings.Contains(strings.ToLower(v), "detect")) {
+		intrusion = "WYKRYTO — obudowa otwierana"
 	}
 	frontPanel := "OK"
-	if v, ok := chassisMap["Front-Panel Lockout"]; ok && !strings.EqualFold(v, "inactive") {
+	if v, ok := values["Front-Panel Lockout"]; ok && !strings.EqualFold(v, "inactive") {
 		frontPanel = v
 	}
+	return IPMIChassis{
+		Intrusion: intrusion, LastOpen: "—", FrontPanel: frontPanel,
+		PostCode: "—", PowerCycles: "—",
+	}, powerState
+}
 
-	totalW := parseDCMIPower(func() string { o, _ := ipmiRun("dcmi", "power", "reading"); return o }())
+func appendIPMIHistory(live ipmiLiveSnapshot) {
+	hottest, fanTotal, fanCount := 0.0, 0.0, 0
+	for _, sensor := range live.Sensors {
+		switch sensor.Unit {
+		case "°C":
+			if sensor.Val > hottest {
+				hottest = sensor.Val
+			}
+		case "RPM":
+			fanTotal += sensor.Val
+			fanCount++
+		}
+	}
+	fanAverage := 0.0
+	if fanCount > 0 {
+		fanAverage = round2(fanTotal / float64(fanCount))
+	}
+	point := IPMIHistoryPoint{T: live.At.Unix(), Temp: hottest, Fan: fanAverage, Power: live.Power.TotalW}
+	if len(ipmiHistory) > 0 && ipmiHistory[len(ipmiHistory)-1].T == point.T {
+		ipmiHistory[len(ipmiHistory)-1] = point
+	} else {
+		ipmiHistory = append(ipmiHistory, point)
+		if len(ipmiHistory) > ipmiHistoryLimit {
+			ipmiHistory = append([]IPMIHistoryPoint(nil), ipmiHistory[len(ipmiHistory)-ipmiHistoryLimit:]...)
+		}
+	}
+}
 
-	psuOut, _ := ipmiRun("sdr", "type", "Power Supply")
-	psuStatuses := parsePSUStatus(psuOut)
+func getIPMILive(force bool) (ipmiLiveSnapshot, bool, error) {
+	ipmiCacheMu.RLock()
+	cached, retryAfter := ipmiLiveCache, ipmiRetryAfter
+	ipmiCacheMu.RUnlock()
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < ipmiLiveTTL {
+		return cached, false, nil
+	}
+	if !force && time.Now().Before(retryAfter) && !cached.At.IsZero() {
+		return cached, true, nil
+	}
+	if !force && time.Now().Before(retryAfter) {
+		return ipmiLiveSnapshot{}, true, fmt.Errorf("BMC chwilowo wstrzymane po kolejnych błędach odczytu")
+	}
+
+	ipmiRefreshMu.Lock()
+	defer ipmiRefreshMu.Unlock()
+	ipmiCacheMu.RLock()
+	cached, retryAfter = ipmiLiveCache, ipmiRetryAfter
+	ipmiCacheMu.RUnlock()
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < ipmiLiveTTL {
+		return cached, false, nil
+	}
+	if !force && time.Now().Before(retryAfter) && !cached.At.IsZero() {
+		return cached, true, nil
+	}
+	if !force && time.Now().Before(retryAfter) {
+		return ipmiLiveSnapshot{}, true, fmt.Errorf("BMC chwilowo wstrzymane po kolejnych błędach odczytu")
+	}
+
+	sensorOut, err := ipmiRun("sensor", "list")
+	if err != nil || strings.TrimSpace(sensorOut) == "" {
+		ipmiCacheMu.Lock()
+		ipmiFailures++
+		if ipmiFailures >= 3 {
+			ipmiRetryAfter = time.Now().Add(ipmiFailurePause)
+		}
+		ipmiCacheMu.Unlock()
+		if !cached.At.IsZero() {
+			return cached, true, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("BMC nie zwrócił listy czujników")
+		}
+		return ipmiLiveSnapshot{}, true, err
+	}
+
+	chassisOut, _ := ipmiRun("chassis", "status")
+	chassis, powerState := chassisFromOutput(chassisOut)
+	totalW := 0
+	if dcmiOut, dcmiErr := ipmiRun("dcmi", "power", "reading"); dcmiErr == nil {
+		totalW = parseDCMIPower(dcmiOut)
+	}
 	psu1 := IPMIPSU{Status: "—", In: "—", Out: "—"}
 	psu2 := IPMIPSU{Status: "—", In: "—", Out: "—"}
-	if len(psuStatuses) > 0 {
-		psu1.Status = psuStatuses[0]
-	}
-	if len(psuStatuses) > 1 {
-		psu2.Status = psuStatuses[1]
-	}
-	if totalW > 0 {
-		half := totalW / 2
-		if psu1.Status != "—" {
-			psu1.Out = strconv.Itoa(half) + "W"
+	if psuOut, psuErr := ipmiRun("sdr", "type", "Power Supply"); psuErr == nil {
+		statuses := parsePSUStatus(psuOut)
+		if len(statuses) > 0 {
+			psu1.Status = statuses[0]
 		}
-		if psu2.Status != "—" {
-			psu2.Out = strconv.Itoa(totalW-half) + "W"
+		if len(statuses) > 1 {
+			psu2.Status = statuses[1]
 		}
 	}
-
-	selInfoOut, _ := ipmiRun("sel", "info")
-	selEntries := parseSELEntryCount(selInfoOut)
-
-	selOut, _ := ipmiRun("sel", "elist")
-	if strings.TrimSpace(selOut) == "" || strings.Contains(selOut, "no entries") {
-		selOut, _ = ipmiRun("sel", "list")
+	live := ipmiLiveSnapshot{
+		Sensors: parseIPMISensorList(sensorOut),
+		Power:   IPMIPower{State: powerState, TotalW: totalW, PSU1: psu1, PSU2: psu2},
+		Chassis: chassis,
+		At:      time.Now(),
 	}
-	events := parseSEL(selOut)
+	ipmiCacheMu.Lock()
+	ipmiLiveCache = live
+	ipmiFailures = 0
+	ipmiRetryAfter = time.Time{}
+	appendIPMIHistory(live)
+	ipmiCacheMu.Unlock()
+	return live, false, nil
+}
 
-	// Jeśli BMC zgłasza wpisy w SEL (sel info: Entries > 0), ale parser nie
-	// wyciągnął z nich ani jednego zdarzenia — format tej konkretnej wersji
-	// firmware najwyraźniej różni się od zakładanego. Zamiast pokazywać puste
-	// "brak zdarzeń", zwróć surowe linie, żeby dane nie znikały bez śladu.
-	var selRaw []string
-	if len(events) == 0 && selEntries > 0 {
-		for _, l := range strings.Split(selOut, "\n") {
-			l = strings.TrimSpace(l)
-			if l != "" {
-				selRaw = append(selRaw, l)
+func getIPMISEL(force bool) ipmiSELSnapshot {
+	ipmiCacheMu.RLock()
+	cached := ipmiSELCache
+	ipmiCacheMu.RUnlock()
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < ipmiSELTTL {
+		return cached
+	}
+
+	ipmiRefreshMu.Lock()
+	defer ipmiRefreshMu.Unlock()
+	ipmiCacheMu.RLock()
+	cached = ipmiSELCache
+	ipmiCacheMu.RUnlock()
+	if !force && !cached.At.IsZero() && time.Since(cached.At) < ipmiSELTTL {
+		return cached
+	}
+
+	infoOut, infoErr := ipmiRun("sel", "info")
+	listOut, listErr := ipmiRun("sel", "elist")
+	if strings.TrimSpace(listOut) == "" || strings.Contains(strings.ToLower(listOut), "no entries") {
+		listOut, listErr = ipmiRun("sel", "list")
+	}
+	if infoErr != nil && listErr != nil && !cached.At.IsZero() {
+		return cached
+	}
+	entries := parseSELEntryCount(infoOut)
+	events := parseSEL(listOut)
+	var raw []string
+	if len(events) == 0 && entries > 0 {
+		for _, line := range strings.Split(listOut, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				raw = append(raw, line)
 			}
 		}
+	}
+	cached = ipmiSELSnapshot{Entries: entries, Events: events, Raw: raw, At: time.Now()}
+	ipmiCacheMu.Lock()
+	ipmiSELCache = cached
+	ipmiCacheMu.Unlock()
+	return cached
+}
+
+// ── Handler główny ─────────────────────────────────────────────────────────────
+
+func (s *Server) handleIPMI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !ipmiBinaryPresent() {
+		jsonOK(w, map[string]any{"installed": false})
+		return
+	}
+	force := r.URL.Query().Get("refresh") == "1"
+	static := getIPMIStatic(force)
+	if !static.Present {
+		jsonOK(w, map[string]any{"installed": true, "bmc_present": false})
+		return
+	}
+	live, stale, liveErr := getIPMILive(force)
+	if liveErr != nil {
+		jsonErr(w, liveErr.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	sel := ipmiSELSnapshot{Entries: -1}
+	if r.URL.Query().Get("include") == "sel" {
+		sel = getIPMISEL(force)
+	} else {
+		ipmiCacheMu.RLock()
+		if !ipmiSELCache.At.IsZero() {
+			sel.Entries = ipmiSELCache.Entries
+		}
+		ipmiCacheMu.RUnlock()
+	}
+	ipmiCacheMu.RLock()
+	history := append([]IPMIHistoryPoint(nil), ipmiHistory...)
+	failures := ipmiFailures
+	retryAfter := ipmiRetryAfter
+	ipmiCacheMu.RUnlock()
+	redundancy := "—"
+	if live.Power.PSU1.Status == "OK" && live.Power.PSU2.Status == "OK" {
+		redundancy = "Aktywna"
+	} else if live.Power.PSU1.Status != "—" || live.Power.PSU2.Status != "—" {
+		redundancy = "Brak redundancji"
 	}
 
 	jsonOK(w, map[string]any{
 		"installed":   true,
 		"bmc_present": true,
-		"sensors":     sensors,
-		"sel_entries": selEntries,
-		"sel_raw":     selRaw,
-		"power": IPMIPower{
-			State: powerState, TotalW: totalW, PSU1: psu1, PSU2: psu2,
-		},
-		"bmc": IPMIBMC{
-			Model: model, IP: ip, MAC: mac, FW: fw, Uptime: "—",
-		},
-		"chassis": IPMIChassis{
-			Intrusion: intrusion, LastOpen: "—", FrontPanel: frontPanel,
-			PostCode: "—", PowerCycles: "—",
-		},
+		"sensors":     live.Sensors,
+		"sel_entries": sel.Entries,
+		"sel_raw":     sel.Raw,
+		"power":       live.Power,
+		"bmc":         static.BMC,
+		"chassis":     live.Chassis,
 		"power_meta": IPMIPowerMeta{
-			Volts: "—", Freq: "—", PF: 0, Redundancy: "—", TotalCapacityW: 0,
+			Volts: "—", Freq: "—", PF: 0, Redundancy: redundancy, TotalCapacityW: 0,
 		},
-		"events": events,
+		"events":       sel.Events,
+		"history":      history,
+		"last_updated": live.At.Unix(),
+		"stale":        stale,
+		"failures":     failures,
+		"retry_after":  retryAfter.Unix(),
 	})
 }
 
@@ -568,5 +813,8 @@ func (s *Server) handleIPMISELClear(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, out, http.StatusInternalServerError)
 		return
 	}
+	ipmiCacheMu.Lock()
+	ipmiSELCache = ipmiSELSnapshot{}
+	ipmiCacheMu.Unlock()
 	jsonOK(w, map[string]string{"status": "ok"})
 }

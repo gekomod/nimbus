@@ -1235,3 +1235,90 @@ hr.div { border: 0; border-top: 1px solid var(--line); margin: 0; }
   .skeleton::after { animation: none; }
 }
 
+/* ===== IPMI / iLO hardware console ===== */
+.ipmi-page { min-width: 0; }
+.ipmi-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.ipmi-toolbar > div:first-child { display:flex; flex-direction:column; gap:5px; }
+.ipmi-tabs { margin-bottom:0; overflow-x:auto; }
+.ipmi-tabs .tab { display:flex; align-items:center; gap:7px; white-space:nowrap; }
+.ipmi-kpi-grid { grid-template-columns:repeat(6,minmax(0,1fr)); }
+.ipmi-kpi { min-height:112px; border-top:2px solid var(--line); }
+.ipmi-kpi.ok { border-top-color:var(--ok); }
+.ipmi-kpi.warn { border-top-color:var(--warn); }
+.ipmi-kpi.crit { border-top-color:var(--err); }
+.ipmi-kpi .kpi-foot { position:relative; z-index:1; }
+.ipmi-error,.ipmi-stale { display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:6px; font-size:var(--fs-sm); }
+.ipmi-error { border:1px solid color-mix(in oklch,var(--err) 40%,var(--line)); color:var(--err); background:color-mix(in oklch,var(--err) 7%,var(--bg-1)); }
+.ipmi-error span,.ipmi-stale span { flex:1; }
+.ipmi-stale { border:1px solid color-mix(in oklch,var(--warn) 40%,var(--line)); color:var(--warn); background:color-mix(in oklch,var(--warn) 7%,var(--bg-1)); }
+.ipmi-trends { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+.ipmi-chart-label { display:flex; justify-content:space-between; color:var(--fg-muted); font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:.04em; }
+.ipmi-chart-label b { color:var(--fg); font-family:var(--font-mono); font-size:var(--fs-sm); }
+.ipmi-no-chart { min-height:120px; display:grid; place-items:center; color:var(--fg-dim); font-size:var(--fs-sm); border:1px dashed var(--line); border-radius:6px; margin-top:10px; text-align:center; padding:16px; }
+.ipmi-all-ok { min-height:145px; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; color:var(--ok); gap:6px; }
+.ipmi-all-ok span { color:var(--fg-dim); font-size:var(--fs-xs); }
+.ipmi-alert-row { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:9px; padding:9px 0; border-bottom:1px solid var(--line); }
+.ipmi-alert-row:last-child { border-bottom:0; }
+.ipmi-alert-row > div { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.ipmi-alert-row b { font-size:var(--fs-sm); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ipmi-alert-row div span { color:var(--fg-dim); font:var(--fs-xs) var(--font-mono); }
+.ipmi-legend { display:flex; gap:5px; font:10px var(--font-mono); }
+.ipmi-legend span { padding:3px 6px; border-radius:4px; }
+.ipmi-legend .ok { color:var(--ok); background:color-mix(in oklch,var(--ok) 12%,transparent); }
+.ipmi-legend .warn { color:var(--warn); background:color-mix(in oklch,var(--warn) 12%,transparent); }
+.ipmi-legend .crit { color:var(--err); background:color-mix(in oklch,var(--err) 12%,transparent); }
+.ipmi-chassis { border:1px solid var(--line-strong); border-radius:10px; padding:10px; background:linear-gradient(145deg,var(--bg-2),var(--bg-1)); box-shadow:inset 0 0 0 3px var(--bg-3); }
+.ipmi-chassis-title { display:flex; justify-content:space-between; padding:4px 8px 10px; color:var(--fg-muted); font-size:10px; letter-spacing:.08em; }
+.ipmi-chassis-grid { display:grid; grid-template-columns:1.35fr 1fr 1fr; grid-template-areas:'drives cpu1 cpu2' 'drives memory memory' 'array air psu'; gap:8px; }
+.ipmi-zone { position:relative; min-height:110px; display:grid; grid-template-columns:auto 1fr auto; grid-template-rows:auto auto; align-items:center; gap:5px 8px; padding:12px; border:1px solid var(--line); border-radius:7px; background:var(--bg-2); overflow:hidden; }
+.ipmi-zone::after { content:''; position:absolute; inset:0; pointer-events:none; opacity:.08; background:currentColor; }
+.ipmi-zone.ok { color:var(--ok); border-color:color-mix(in oklch,var(--ok) 35%,var(--line)); }
+.ipmi-zone.warn { color:var(--warn); border-color:color-mix(in oklch,var(--warn) 45%,var(--line)); }
+.ipmi-zone.crit { color:var(--err); border-color:color-mix(in oklch,var(--err) 55%,var(--line)); }
+.ipmi-zone.unknown { color:var(--fg-dim); }
+.ipmi-zone b { color:var(--fg); font-size:var(--fs-sm); }
+.ipmi-zone strong { font:600 18px var(--font-mono); }
+.ipmi-zone small { grid-column:2/4; color:var(--fg-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ipmi-zone.drives { grid-area:drives; min-height:228px; }
+.ipmi-zone.cpu1 { grid-area:cpu1; }.ipmi-zone.cpu2 { grid-area:cpu2; }.ipmi-zone.memory { grid-area:memory; }.ipmi-zone.array { grid-area:array; }.ipmi-zone.air { grid-area:air; }.ipmi-zone.psu { grid-area:psu; }
+.ipmi-bays { grid-column:1/4; display:grid; grid-template-columns:repeat(5,1fr); gap:4px; margin-top:8px; }
+.ipmi-bays i { display:block; height:13px; border:1px solid color-mix(in oklch,currentColor 50%,var(--line)); background:var(--bg-3); border-radius:2px; }
+.ipmi-temp-row { display:grid; grid-template-columns:1fr auto; gap:5px 10px; padding:8px 0; border-bottom:1px solid var(--line); }
+.ipmi-temp-row:last-child { border-bottom:0; }
+.ipmi-temp-row > div:first-child { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.ipmi-temp-row b { font-size:var(--fs-sm); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ipmi-temp-row span { color:var(--fg-dim); font-size:10px; }
+.ipmi-temp-row .bar { grid-column:1/3; }
+.ipmi-sensor-head { flex-wrap:wrap; }
+.ipmi-search { flex:none; width:260px; }
+.ipmi-filter-row { display:flex; flex-wrap:wrap; gap:5px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--bg-1); }
+.ipmi-filter-row .btn { display:flex; align-items:center; gap:6px; }
+.ipmi-filter-row .primary .badge { background:rgba(255,255,255,.16); color:inherit; }
+.ipmi-psu .card-body { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:14px; }
+.ipmi-psu.ok { border-color:color-mix(in oklch,var(--ok) 30%,var(--line)); }
+.ipmi-psu.warn { border-color:color-mix(in oklch,var(--warn) 35%,var(--line)); }
+.ipmi-psu-icon { width:46px; height:46px; border-radius:10px; display:grid; place-items:center; color:var(--ok); background:color-mix(in oklch,var(--ok) 12%,var(--bg-2)); }
+.ipmi-psu-icon.accent { color:var(--accent); background:var(--accent-soft); }
+.ipmi-psu h3,.ipmi-psu-icon+div h3 { margin:3px 0; font:600 20px var(--font-mono); }
+.ipmi-event { display:grid; grid-template-columns:145px auto 1fr; gap:12px; align-items:start; padding:10px 16px; border-bottom:1px solid var(--line); font-size:var(--fs-sm); }
+.ipmi-event > div { display:flex; flex-direction:column; gap:3px; }
+.ipmi-event > div span { color:var(--fg-dim); font-size:var(--fs-xs); }
+.ipmi-event.raw { display:block; color:var(--fg-muted); }
+.ipmi-bmc-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ipmi-bmc-grid > div { display:flex; flex-direction:column; gap:4px; padding:12px; background:var(--bg-2); border:1px solid var(--line); border-radius:6px; }
+.ipmi-bmc-grid span { color:var(--fg-dim); font-size:var(--fs-xs); text-transform:uppercase; }
+.ipmi-bmc-grid strong { font:500 var(--fs-sm) var(--font-mono); }
+.ipmi-bmc-actions { padding-top:0; display:flex; gap:8px; flex-wrap:wrap; }
+.ipmi-policy { display:grid; grid-template-columns:90px 1fr; align-items:center; gap:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+.ipmi-policy:last-child { border-bottom:0; }
+.ipmi-policy b { color:var(--accent); font-family:var(--font-mono); }
+.ipmi-policy span { color:var(--fg-muted); font-size:var(--fs-sm); }
+.ipmi-empty,.ipmi-loading { min-height:360px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:12px; }
+.ipmi-empty .card-sub { max-width:540px; line-height:1.6; }
+.ipmi-empty-icon { width:72px; height:72px; border-radius:18px; display:grid; place-items:center; color:var(--accent); background:var(--accent-soft); }
+.ipmi-loading { color:var(--fg-muted); }.ipmi-loading span { font-size:var(--fs-xs); color:var(--fg-dim); }
+.ipmi-spinner { width:24px; height:24px; border:2px solid var(--line-strong); border-top-color:var(--accent); border-radius:50%; animation:_spin .7s linear infinite; }
+@keyframes _spin { to { transform:rotate(360deg); } }
+@media(max-width:1500px){.ipmi-kpi-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:1000px){.ipmi-trends{grid-template-columns:1fr}.ipmi-chassis-grid{grid-template-columns:1fr 1fr;grid-template-areas:'drives drives' 'cpu1 cpu2' 'memory memory' 'array air' 'psu psu'}.ipmi-kpi-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:700px){.ipmi-kpi-grid{grid-template-columns:1fr}.ipmi-bmc-grid{grid-template-columns:1fr}.ipmi-event{grid-template-columns:1fr}.ipmi-search{width:100%}.ipmi-toolbar{align-items:flex-start}.ipmi-chassis-grid{display:flex;flex-direction:column}}

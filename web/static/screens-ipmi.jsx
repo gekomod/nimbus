@@ -1,290 +1,82 @@
-// ===== IPMI / Czujniki — API-driven (/api/ipmi) =====
-// Źródło danych: ipmitool (sensor list, mc info, lan print, chassis status,
-// dcmi power reading, sdr type "Power Supply", sel elist) przez backend Go.
+// ===== IPMI / Czujniki — konsola sprzętowa HP/iLO =====
+const IPMISparkline = window.Sparkline;
+const IPMILineChart = window.LineChart;
+const ipmiColors = {ok:'var(--ok)',warn:'var(--warn)',crit:'var(--err)',unknown:'var(--fg-dim)'};
+const ipmiRank = {crit:0,warn:1,unknown:2,ok:3};
 
-const Mini2 = ({ label, v, sub, color }) => (
-  <div className="kpi">
-    <div className="kpi-label">{label}</div>
-    <div className="kpi-value" style={{ color: color || 'var(--fg)' }}>{v}</div>
-    {sub && <div className="kpi-foot"><span>{sub}</span></div>}
-  </div>
-);
+const ipmiStatus = s => {
+  if(!s||!Number.isFinite(Number(s.val)))return 'unknown';
+  if(s.unit==='RPM')return Number(s.val)===0?'crit':Number(s.val)<Number(s.warn||0)?'warn':'ok';
+  if(s.unit==='°C')return Number(s.crit)>0&&Number(s.val)>=Number(s.crit)?'crit':Number(s.warn)>0&&Number(s.val)>=Number(s.warn)?'warn':'ok';
+  return 'ok';
+};
+const ipmiValue = s => !s||!Number.isFinite(Number(s.val))?'—':`${Number(s.val).toLocaleString('pl',{maximumFractionDigits:2})}${s.unit==='RPM'?' RPM':' '+s.unit}`;
 
-const KV = ({ k, v }) => (
-  <div className="row" style={{ justifyContent:'space-between', fontSize:'var(--fs-sm)' }}>
-    <span className="dim">{k}</span>
-    <span>{v}</span>
-  </div>
-);
+const IPMIStatusBadge=({status='unknown',text})=><span className={'badge '+(status==='crit'?'err':status==='warn'?'warn':status==='ok'?'ok':'')}><span className="dot"/>{text||(status==='crit'?'AWARIA':status==='warn'?'UWAGA':status==='ok'?'OK':'BRAK DANYCH')}</span>;
+const IPMIThreshold=({s})=>s.unit==='RPM'?<span>minimum {s.warn||'—'} RPM</span>:s.unit==='°C'?<span>uwaga {s.warn||'—'}°C · krytyczny {s.crit||'—'}°C</span>:<span>monitorowany przez BMC</span>;
 
-const sevColor = { ok: 'var(--ok)', warn: 'var(--warn)', crit: 'var(--err)' };
+const IPMIKPI=({icon,label,value,sub,status='ok',history})=><div className={'kpi ipmi-kpi '+status}>
+  <div className="kpi-label"><Icon name={icon} size={13}/>{label}</div><div className="kpi-value" style={{color:ipmiColors[status]}}>{value}</div><div className="kpi-foot"><span>{sub}</span></div>
+  {history&&history.length>1&&<IPMISparkline data={history} color={ipmiColors[status]}/>}
+</div>;
 
-const sensorStatus = (s) => {
-  if (s.unit === 'RPM') return s.val === 0 ? 'crit' : s.val < s.warn ? 'warn' : 'ok';
-  if (s.unit === '°C')  return s.val >= s.crit ? 'crit' : s.val >= s.warn ? 'warn' : 'ok';
-  // Napięcia/moc/prąd: porównuj po module — obsługuje też szyny ujemne (np. -12V),
-  // gdzie proste "val >= crit" fałszywie zgłaszałoby awarię przy każdym odczycie.
-  const av = Math.abs(s.val), ac = Math.abs(s.crit), aw = Math.abs(s.warn);
-  return av >= ac ? 'crit' : av >= aw ? 'warn' : 'ok';
+const IPMIEmpty=({missing,onInstall,busy})=><div className="card ipmi-empty"><div className="ipmi-empty-icon"><Icon name={missing?'package':'cpu'} size={34}/></div><div className="card-title">{missing?'Brak narzędzi IPMI':'Nie wykryto kontrolera BMC/iLO'}</div><div className="card-sub">{missing?'Zainstaluj ipmitool, aby odczytywać telemetrię sprzętową, zasilanie i dziennik SEL.':'Kontroler nie odpowiedział w wyznaczonym czasie. Nimbus ponowi próbę bez blokowania pozostałych modułów.'}</div>{missing&&<button className="btn primary" disabled={busy} onClick={onInstall}>{busy?'Instalowanie…':'Zainstaluj ipmitool'}</button>}</div>;
+
+const IPMIOverview=({I,g,history,onTab})=>{
+  const tempHist=history.map(p=>p.temp).filter(v=>v>0),powerHist=history.map(p=>p.power).filter(v=>v>0),fanHist=history.map(p=>p.fan).filter(v=>v>0);
+  const overall=g.alerts.some(a=>a.status==='crit')?'crit':g.alerts.length?'warn':'ok';
+  return <div className="col" style={{gap:'var(--gutter)'}}>
+    <div className="grid ipmi-kpi-grid">
+      <IPMIKPI icon="shield" label="Stan sprzętu" value={overall==='crit'?'AWARIA':overall==='warn'?'UWAGA':'OK'} sub={g.alerts.length?`${g.alerts.length} aktywnych alarmów`:'Wszystkie odczyty prawidłowe'} status={overall}/>
+      <IPMIKPI icon="thermometer" label="Najwyższa temperatura" value={g.hottest?`${g.hottest.val}°C`:'—'} sub={g.hottest?.name||`${g.temps.length} czujników`} status={g.hottest?ipmiStatus(g.hottest):'unknown'} history={tempHist}/>
+      <IPMIKPI icon="fan" label="Wentylatory" value={`${g.fans.filter(f=>ipmiStatus(f)==='ok').length}/${g.fans.length}`} sub={g.fans.length?'Sprawne wentylatory':'Brak danych RPM'} status={g.fans.some(f=>ipmiStatus(f)==='crit')?'crit':g.fans.some(f=>ipmiStatus(f)==='warn')?'warn':g.fans.length?'ok':'unknown'} history={fanHist}/>
+      <IPMIKPI icon="bolt" label="Pobór mocy" value={I.power?.totalW?`${I.power.totalW} W`:'—'} sub={I.power_meta?.redundancy||'DCMI'} history={powerHist}/>
+      <IPMIKPI icon="hdd" label="Zasilacze" value={`${g.psuOK}/2`} sub={g.psuOK===2?'Redundancja aktywna':g.psuOK===1?'Brak redundancji':'Brak poprawnych odczytów'} status={g.psuOK===2?'ok':g.psuOK===1?'warn':'unknown'}/>
+      <IPMIKPI icon="cpu" label="Połączenie iLO" value="ONLINE" sub={I.bmc?.ip||'Lokalny interfejs IPMI'}/>
+    </div>
+    <div className="grid grid-2-1">
+      <div className="card"><div className="card-head"><div><div className="card-title">Telemetria serwera</div><div className="card-sub">Historia bieżącej sesji</div></div><button className="btn sm" onClick={()=>onTab('map')}>Mapa cieplna</button></div><div className="card-body ipmi-trends">
+        <div><div className="ipmi-chart-label"><span>Temperatura maksymalna</span><b>{g.hottest?`${g.hottest.val}°C`:'—'}</b></div>{tempHist.length>1?<IPMILineChart series={[tempHist]} height={145} colors={['var(--warn)']}/>:<div className="ipmi-no-chart">Historia pojawi się po kolejnych odczytach</div>}</div>
+        <div><div className="ipmi-chart-label"><span>Pobór mocy</span><b>{I.power?.totalW?`${I.power.totalW} W`:'—'}</b></div>{powerHist.length>1?<IPMILineChart series={[powerHist]} height={145} colors={['var(--accent)']}/>:<div className="ipmi-no-chart">DCMI nie zwróciło jeszcze historii</div>}</div>
+      </div></div>
+      <div className="card"><div className="card-head"><div><div className="card-title">Aktywne alarmy</div><div className="card-sub">Krytyczne wyświetlane pierwsze</div></div><span className={'badge '+(g.alerts.length?'warn':'ok')}>{g.alerts.length}</span></div><div className="card-body col" style={{gap:8}}>{!g.alerts.length&&<div className="ipmi-all-ok"><Icon name="check" size={24}/><b>Sprzęt pracuje prawidłowo</b><span>Brak przekroczonych progów BMC</span></div>}{g.alerts.slice(0,6).map((a,i)=><div className="ipmi-alert-row" key={i}><span className={'disk-led '+(a.status==='crit'?'warn':'')}/><div><b>{a.name}</b><span>{ipmiValue(a)}</span></div><IPMIStatusBadge status={a.status}/></div>)}{g.alerts.length>6&&<button className="btn sm" onClick={()=>onTab('sensors')}>Pokaż wszystkie</button>}</div></div>
+    </div>
+  </div>;
 };
 
-const SensorBar = ({ s }) => {
-  const status = s.status || sensorStatus(s);
-  const pct = Math.min(100, Math.max(0, (s.val / (s.max || 1)) * 100));
-  return (
-    <div style={{padding:'10px 14px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:6}}>
-      <div className="row" style={{justifyContent:'space-between',marginBottom:6}}>
-        <span style={{fontSize:'var(--fs-sm)',fontWeight:500}}>{s.name}</span>
-        <span className="mono" style={{fontSize:'var(--fs-sm)',color:sevColor[status]}}>{s.val}{s.unit==='°C'?'°C':s.unit==='V'?'V':s.unit==='W'?'W':s.unit==='A'?'A':' RPM'}</span>
-      </div>
-      <div className="bar" style={{background:'var(--bg-3)'}}>
-        <i style={{width:pct+'%', background: status==='crit'?'var(--err)':status==='warn'?'var(--warn)':'var(--ok)'}}/>
-      </div>
-      <div className="row" style={{justifyContent:'space-between',marginTop:4,fontSize:10,color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>
-        <span>0</span><span>próg {s.warn}{s.unit==='RPM'?'':s.unit}</span><span>{s.max}</span>
-      </div>
-    </div>
-  );
+const zoneSensor=(sensors,words)=>{const m=sensors.filter(s=>s.unit==='°C'&&words.some(w=>s.name.toLowerCase().includes(w)));return m.length?m.reduce((a,b)=>Number(a.val)>Number(b.val)?a:b):null;};
+const IPMIHeatMap=({sensors})=>{
+  const zones=[['drives','Backplane · 25 zatok',['drive','storage','hdd','backplane','disk'],'hdd'],['cpu1','Procesor 1',['cpu 1','cpu1','processor 1','proc 1'],'cpu'],['cpu2','Procesor 2',['cpu 2','cpu2','processor 2','proc 2'],'cpu'],['memory','Pamięć / DIMM',['dimm','memory','mem'],'ram'],['array','Smart Array / PCIe',['array','raid','pci','pch','controller'],'disk'],['air','Powietrze / płyta',['ambient','inlet','system','board','exhaust','outlet'],'fan']].map(([id,name,words,icon])=>({id,name,icon,s:zoneSensor(sensors,words)}));
+  const temps=sensors.filter(s=>s.unit==='°C').sort((a,b)=>b.val-a.val);
+  return <div className="grid grid-2-1"><div className="card"><div className="card-head"><div><div className="card-title">Mapa cieplna HP ProLiant</div><div className="card-sub">Schemat funkcjonalny · telemetria BMC</div></div><div className="ipmi-legend"><span className="ok">OK</span><span className="warn">UWAGA</span><span className="crit">KRYTYCZNY</span></div></div><div className="card-body"><div className="ipmi-chassis"><div className="ipmi-chassis-title"><span>HP PROLIANT · 2U</span><span className="mono">AIRFLOW →</span></div><div className="ipmi-chassis-grid">{zones.map(z=>{const st=z.s?ipmiStatus(z.s):'unknown';return <div key={z.id} className={`ipmi-zone ${z.id} ${st}`}><Icon name={z.icon} size={20}/><b>{z.name}</b><strong>{z.s?`${z.s.val}°C`:'—'}</strong><small>{z.s?.name||'Brak osobnego czujnika'}</small>{z.id==='drives'&&<div className="ipmi-bays">{Array.from({length:25},(_,i)=><i key={i}/>)}</div>}</div>})}<div className="ipmi-zone psu ok"><Icon name="bolt" size={20}/><b>Zasilacze redundantne</b><strong>PSU 1 + PSU 2</strong><small>Tylna część obudowy</small></div></div></div></div></div>
+    <div className="card"><div className="card-head"><div><div className="card-title">Temperatury BMC</div><div className="card-sub">{temps.length} aktywnych odczytów</div></div></div><div className="card-body col" style={{gap:8}}>{temps.map((s,i)=>{const st=ipmiStatus(s),pct=Math.min(100,(s.val/(s.crit||100))*100);return <div className="ipmi-temp-row" key={i}><div><b>{s.name}</b><span><IPMIThreshold s={s}/></span></div><strong style={{color:ipmiColors[st]}}>{s.val}°C</strong><div className={'bar '+(st==='crit'?'err':st==='warn'?'warn':'ok')}><i style={{width:pct+'%'}}/></div></div>})}{!temps.length&&<div className="ipmi-no-chart">Brak czujników temperatury</div>}</div></div></div>;
 };
 
-// ── Stan gdy ipmitool niezainstalowany ────────────────────────────────────────
-const IPMINotInstalled = ({ onInstall, installing }) => (
-  <div className="card" style={{ padding:48, textAlign:'center' }}>
-    <Icon name="cpu" size={48} style={{ opacity:.2, display:'block', margin:'0 auto 20px' }}/>
-    <div style={{ fontWeight:700, fontSize:'var(--fs-lg)', marginBottom:10 }}>ipmitool nie jest zainstalowany</div>
-    <div style={{ color:'var(--fg-muted)', fontSize:'var(--fs-sm)', maxWidth:520, margin:'0 auto 24px', lineHeight:1.7 }}>
-      Aby odczytywać czujniki BMC, zasilanie i dziennik zdarzeń SEL, zainstaluj:<br/>
-      <code style={{ color:'var(--accent)' }}>ipmitool</code>
-    </div>
-    <button className="btn primary" onClick={onInstall} disabled={installing} style={{ padding:'9px 28px' }}>
-      {installing ? 'Instalowanie…' : 'Zainstaluj ipmitool'}
-    </button>
-  </div>
-);
-
-// ── Stan gdy ipmitool jest, ale brak fizycznego kontrolera BMC ───────────────
-const IPMINoBMC = () => (
-  <div className="card" style={{ padding:48, textAlign:'center' }}>
-    <Icon name="cpu" size={48} style={{ opacity:.2, display:'block', margin:'0 auto 20px' }}/>
-    <div style={{ fontWeight:700, fontSize:'var(--fs-lg)', marginBottom:10 }}>Nie wykryto kontrolera BMC</div>
-    <div style={{ color:'var(--fg-muted)', fontSize:'var(--fs-sm)', maxWidth:560, margin:'0 auto 4px', lineHeight:1.7 }}>
-      <code style={{ color:'var(--accent)' }}>ipmitool</code> jest zainstalowany, ale ten sprzęt nie zgłasza
-      kontrolera IPMI/BMC (brak <code>/dev/ipmi0</code>). Ta zakładka dotyczy serwerów z dedykowanym
-      chipem BMC (Dell iDRAC, HP iLO, Supermicro/ASRock Rack IPMI) — konsumenckie płyty główne
-      zwykle go nie mają.
-    </div>
-  </div>
-);
-
-const IPMIUnreachable = ({ onRetry }) => (
-  <div className="card" style={{ padding:48, textAlign:'center' }}>
-    <Icon name="close" size={40} style={{ opacity:.25, display:'block', margin:'0 auto 20px', color:'var(--err)' }}/>
-    <div style={{ fontWeight:700, fontSize:'var(--fs-lg)', marginBottom:10 }}>Brak odpowiedzi z /api/ipmi</div>
-    <div style={{ color:'var(--fg-muted)', fontSize:'var(--fs-sm)', maxWidth:560, margin:'0 auto 20px', lineHeight:1.7 }}>
-      To zwykle znaczy, że backend Nimbusa nie został przebudowany/zrestartowany po aktualizacji
-      i stara binarka jeszcze nie zna tego endpointu. Na serwerze wykonaj:<br/>
-      <code style={{ color:'var(--accent)' }}>make go</code> (lub <code style={{ color:'var(--accent)' }}>go build ./cmd/nimbus</code>),
-      a następnie <code style={{ color:'var(--accent)' }}>systemctl restart nimbus</code>.
-    </div>
-    <button className="btn primary" onClick={onRetry} style={{ padding:'9px 28px' }}>Spróbuj ponownie</button>
-  </div>
-);
-
-const IPMI = () => {
-  const [data,       setData]       = React.useState(null);
-  const [loading,    setLoading]    = React.useState(true);
-  const [unreachable,setUnreachable]= React.useState(false);
-  const [installing, setInstalling] = React.useState(false);
-  const [clearing,   setClearing]   = React.useState(false);
-
-  const load = async () => {
-    try {
-      const r = await fetch('/api/ipmi', { credentials:'include' });
-      if (!r.ok) { setUnreachable(true); return; }
-      const d = await r.json();
-      setData(d);
-      setUnreachable(false);
-    } catch (e) { setUnreachable(true); }
-    finally { setLoading(false); }
-  };
-
-  React.useEffect(() => {
-    load();
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
-  }, []);
-
-  const install = async () => {
-    setInstalling(true);
-    try {
-      await fetch('/api/ipmi/install', { method:'POST', credentials:'include' });
-      await load();
-    } finally { setInstalling(false); }
-  };
-
-  const clearSEL = async () => {
-    setClearing(true);
-    try {
-      const r = await fetch('/api/ipmi/sel/clear', { method:'POST', credentials:'include' });
-      if (r.ok) {
-        window.toast && window.toast.success('Dziennik SEL wyczyszczony');
-        await load();
-      } else {
-        window.toast && window.toast.error('Nie udało się wyczyścić SEL');
-      }
-    } finally { setClearing(false); }
-  };
-
-  if (loading) return (
-    <div style={{ padding:60, textAlign:'center', color:'var(--fg-dim)' }}>
-      <div style={{ width:18, height:18, border:'2px solid var(--line-strong)', borderTopColor:'var(--accent)',
-        borderRadius:'50%', animation:'_spin .6s linear infinite', margin:'0 auto 12px' }}/>
-      <div style={{ fontFamily:'var(--font-mono)', fontSize:'var(--fs-sm)' }}>Odczyt kontrolera BMC…</div>
-    </div>
-  );
-
-  if (unreachable && !data) return <IPMIUnreachable onRetry={load}/>;
-  if (!data?.installed) return <IPMINotInstalled onInstall={install} installing={installing}/>;
-  if (!data?.bmc_present) return <IPMINoBMC/>;
-
-  const I = data;
-  const sensors = I.sensors || [];
-  const temps = sensors.filter(s => s.unit === '°C');
-  const fans  = sensors.filter(s => s.unit === 'RPM');
-  const volts = sensors.filter(s => s.unit === 'V');
-  const others = sensors.filter(s => s.unit !== '°C' && s.unit !== 'RPM' && s.unit !== 'V');
-  const alarmable = sensors.filter(s => s.unit !== 'W' && s.unit !== 'A');
-  const critCount = alarmable.filter(s => sensorStatus(s) === 'crit').length;
-  const warnCount = alarmable.filter(s => sensorStatus(s) === 'warn').length;
-  const events = I.events || [];
-
-  return (
-    <div className="col" style={{gap:'var(--gutter)'}}>
-      <div className="grid grid-4">
-        <Mini2 label="STAN OGÓLNY" v={critCount>0?'AWARIA':warnCount>0?'UWAGA':'OK'} color={critCount>0?'var(--err)':warnCount>0?'var(--warn)':'var(--ok)'}/>
-        <Mini2 label="POBÓR MOCY" v={I.power?.totalW ? I.power.totalW+' W' : '—'}/>
-        <Mini2 label="ZASILACZE" v={[I.power?.psu1?.status, I.power?.psu2?.status].filter(s=>s && s!=='—').length + '/2 OK'} color="var(--ok)"/>
-        <Mini2 label="LICZBA CZUJNIKÓW" v={sensors.length}/>
-      </div>
-
-      <div className="grid grid-2-1">
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Kontroler BMC</div><div className="card-sub">{I.bmc?.model}</div></div></div>
-          <div className="card-body col" style={{gap:8}}>
-            <KV k="Adres IP" v={<span className="mono">{I.bmc?.ip}</span>}/>
-            <KV k="MAC" v={<span className="mono dim">{I.bmc?.mac}</span>}/>
-            <KV k="Wersja firmware" v={<span className="mono">{I.bmc?.fw}</span>}/>
-            <KV k="Protokoły" v={<span className="row gap-sm"><span className="chip accent">IPMI 2.0</span></span>}/>
-            <hr className="div"/>
-            <div className="row gap-sm">
-              {I.bmc?.ip && I.bmc.ip !== '—' && (
-                <button className="btn sm" onClick={() => window.open('https://'+I.bmc.ip, '_blank')}>Otwórz konsolę WebUI →</button>
-              )}
-              <button className="btn sm" onClick={load}><Icon name="refresh" size={11}/> Odśwież</button>
-            </div>
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-head"><div className="card-title">Zasilanie</div></div>
-          <div className="card-body col" style={{gap:10}}>
-            <KV k="Stan systemu" v={<span className={"badge " + (I.power?.state==='ON'?'ok':'dim')}><span className="dot pulse"/>{I.power?.state || '—'}</span>}/>
-            <div style={{padding:'8px 10px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:5}}>
-              <div className="row" style={{justifyContent:'space-between'}}><span className="mono" style={{fontWeight:500}}>PSU 1</span><span className={"badge " + (I.power?.psu1?.status==='OK'?'ok':'dim')}>{I.power?.psu1?.status || '—'}</span></div>
-              <div className="dim mono" style={{fontSize:11,marginTop:2}}>{I.power?.psu1?.in} → {I.power?.psu1?.out}</div>
-            </div>
-            <div style={{padding:'8px 10px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:5}}>
-              <div className="row" style={{justifyContent:'space-between'}}><span className="mono" style={{fontWeight:500}}>PSU 2</span><span className={"badge " + (I.power?.psu2?.status==='OK'?'ok':'dim')}>{I.power?.psu2?.status || '—'}</span></div>
-              <div className="dim mono" style={{fontSize:11,marginTop:2}}>{I.power?.psu2?.in} → {I.power?.psu2?.out}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {temps.length > 0 && (
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Temperatury</div><div className="card-sub">Czujniki BMC · {temps.length}</div></div></div>
-          <div className="card-body grid" style={{gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
-            {temps.map((s,i) => <SensorBar key={i} s={s}/>)}
-          </div>
-        </div>
-      )}
-
-      <div className="grid grid-2">
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Obudowa i zdarzenia sprzętowe</div></div></div>
-          <div className="card-body col" style={{gap:8}}>
-            <KV k="Czujnik intruzji" v={<span className={"badge " + (I.chassis?.intrusion?.startsWith('OK')?'ok':'err')}>{I.chassis?.intrusion}</span>}/>
-            <KV k="Panel przedni" v={<span className="badge ok">{I.chassis?.frontPanel}</span>}/>
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Moc i prąd</div><div className="card-sub">czujniki BMC · W / A</div></div></div>
-          <div className="card-body col" style={{gap:8}}>
-            {others.length === 0 && (
-              <div className="dim" style={{fontSize:'var(--fs-sm)'}}>Brak odczytów mocy/prądu</div>
-            )}
-            {others.map((s,i) => <KV key={i} k={s.name} v={<span className="mono">{s.val} {s.unit}</span>}/>)}
-          </div>
-        </div>
-      </div>
-
-      {fans.length > 0 && (
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Wentylatory</div><div className="card-sub">RPM na żywo (BMC)</div></div></div>
-          <div className="card-body col" style={{gap:10}}>
-            {fans.map((s,i) => <SensorBar key={i} s={s}/>)}
-          </div>
-        </div>
-      )}
-
-      {volts.length > 0 && (
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Napięcia</div><div className="card-sub">płyta główna</div></div></div>
-          <div className="card-body col" style={{gap:10}}>
-            {volts.map((s,i) => <SensorBar key={i} s={s}/>)}
-          </div>
-        </div>
-      )}
-
-      <div className="card">
-        <div className="card-head"><div><div className="card-title">Dziennik zdarzeń SEL (System Event Log)</div>
-          {typeof I.sel_entries === 'number' && I.sel_entries >= 0 && (
-            <div className="card-sub">BMC zgłasza {I.sel_entries} wpisów w SEL</div>
-          )}
-        </div>
-          <div className="card-actions">
-            <button className="btn sm ghost" onClick={clearSEL} disabled={clearing}>
-              {clearing ? 'Czyszczenie…' : 'Wyczyść SEL'}
-            </button>
-          </div>
-        </div>
-        <div className="card-body" style={{padding:0}}>
-          {events.length === 0 && (!I.sel_raw || I.sel_raw.length === 0) && (
-            <div style={{padding:'20px 18px',color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Brak zdarzeń w dzienniku SEL</div>
-          )}
-          {events.length === 0 && I.sel_raw && I.sel_raw.length > 0 && (
-            <div style={{padding:'14px 18px'}}>
-              <div style={{color:'var(--warn)',fontSize:'var(--fs-sm)',marginBottom:8}}>
-                BMC zgłasza {I.sel_entries} wpisów, ale format tego firmware różni się od zakładanego —
-                pokazuję surowe linie zamiast rozpoznanych zdarzeń:
-              </div>
-              {I.sel_raw.map((l,i) => (
-                <div key={i} className="mono dim" style={{fontSize:'var(--fs-xs)',padding:'3px 0',borderTop:i>0?'1px solid var(--line)':'none'}}>{l}</div>
-              ))}
-            </div>
-          )}
-          {events.map((e,i) => (
-            <div key={i} className="row" style={{ padding:'8px 18px',borderBottom: i<events.length-1?'1px solid var(--line)':'none',gap:12,fontSize:'var(--fs-sm)' }}>
-              <span className="mono dim" style={{width:130,flexShrink:0,fontSize:'var(--fs-xs)'}}>{e.t}</span>
-              <span className={"badge " + (e.sev==='crit'?'err':e.sev==='warn'?'warn':'info')} style={{flexShrink:0}}>{e.sev.toUpperCase()}</span>
-              <span style={{flex:1}}>{e.msg}</span>
-              <span className="chip" style={{flexShrink:0}}>{e.src}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
+const IPMISensors=({sensors})=>{
+  const [type,setType]=React.useState('all'),[query,setQuery]=React.useState('');
+  const types=[['all','Wszystkie'],['°C','Temperatura'],['RPM','Wentylatory'],['V','Napięcia'],['W','Moc'],['A','Prąd']];
+  const visible=sensors.filter(s=>(type==='all'||s.unit===type)&&s.name.toLowerCase().includes(query.toLowerCase())).map(s=>({...s,status:ipmiStatus(s)})).sort((a,b)=>ipmiRank[a.status]-ipmiRank[b.status]||a.name.localeCompare(b.name));
+  return <div className="card"><div className="card-head ipmi-sensor-head"><div><div className="card-title">Wszystkie czujniki</div><div className="card-sub">Alarmy zawsze wyświetlane na początku</div></div><div className="topbar-search ipmi-search"><Icon name="search" size={12}/><input placeholder="Szukaj czujnika…" value={query} onChange={e=>setQuery(e.target.value)}/></div></div><div className="ipmi-filter-row">{types.map(([id,label])=><button key={id} className={'btn sm '+(type===id?'primary':'ghost')} onClick={()=>setType(id)}>{label}<span className="badge">{sensors.filter(s=>id==='all'||s.unit===id).length}</span></button>)}</div><div style={{overflow:'auto'}}><table className="table"><thead><tr><th>Stan</th><th>Czujnik</th><th>Typ</th><th>Wartość</th><th>Zakres / próg</th><th>Wykorzystanie progu</th></tr></thead><tbody>{visible.map((s,i)=>{const denom=s.unit==='RPM'?(s.max||s.val*1.5):(s.crit||s.max||1),pct=Math.min(100,Math.max(0,Math.abs(s.val/denom)*100));return <tr key={i}><td><IPMIStatusBadge status={s.status}/></td><td><b>{s.name}</b></td><td><span className="chip">{s.unit==='°C'?'Temperatura':s.unit==='RPM'?'Wentylator':s.unit==='V'?'Napięcie':s.unit==='W'?'Moc':'Prąd'}</span></td><td className="mono" style={{color:ipmiColors[s.status],fontWeight:600}}>{ipmiValue(s)}</td><td className="mono dim"><IPMIThreshold s={s}/></td><td style={{minWidth:160}}><div className={'bar '+(s.status==='crit'?'err':s.status==='warn'?'warn':'ok')}><i style={{width:pct+'%'}}/></div></td></tr>})}{!visible.length&&<tr><td colSpan={6} className="dim" style={{textAlign:'center',padding:30}}>Brak czujników pasujących do filtra</td></tr>}</tbody></table></div></div>;
 };
 
-window.IPMI = IPMI;
+const IPMIPower=({I,history})=>{const h=history.map(p=>p.power).filter(v=>v>0),psus=[I.power?.psu1,I.power?.psu2];return <div className="col" style={{gap:'var(--gutter)'}}><div className="grid grid-3">{psus.map((psu,i)=>{const ok=psu?.status==='OK';return <div className={'card ipmi-psu '+(ok?'ok':'warn')} key={i}><div className="card-body"><div className="ipmi-psu-icon"><Icon name="bolt" size={24}/></div><div><span className="dim">ZASILACZ {i+1}</span><h3>{psu?.status||'—'}</h3><div className="mono dim">Wyjście: {psu?.out||'—'}</div></div><IPMIStatusBadge status={ok?'ok':psu?.status==='—'?'unknown':'warn'}/></div></div>})}<div className="card"><div className="card-body"><div className="ipmi-psu-icon accent"><Icon name="shield" size={24}/></div><div><span className="dim">REDUNDANCJA</span><h3>{I.power_meta?.redundancy||'—'}</h3><div className="mono dim">Stan systemu: {I.power?.state||'—'}</div></div></div></div></div><div className="card"><div className="card-head"><div><div className="card-title">Pobór mocy serwera</div><div className="card-sub">DCMI · historia bieżącej sesji</div></div><strong className="mono" style={{fontSize:22}}>{I.power?.totalW?`${I.power.totalW} W`:'—'}</strong></div><div className="card-body">{h.length>1?<IPMILineChart series={[h]} height={240} colors={['var(--accent)']}/>:<div className="ipmi-no-chart">Potrzebne są co najmniej dwa poprawne odczyty DCMI</div>}</div></div></div>};
+
+const IPMISEL=({I,clearing,onClear})=>{const [sev,setSev]=React.useState('all'),events=(I.events||[]).filter(e=>sev==='all'||e.sev===sev);return <div className="card"><div className="card-head"><div><div className="card-title">Dziennik zdarzeń sprzętowych SEL</div><div className="card-sub">{I.sel_entries>=0?`${I.sel_entries} wpisów zgłoszonych przez BMC`:'Liczba wpisów niedostępna'} · cache 60 sekund</div></div><div className="card-actions"><div className="segmented">{['all','crit','warn','info'].map(v=><button key={v} className={sev===v?'active':''} onClick={()=>setSev(v)}>{v==='all'?'Wszystkie':v.toUpperCase()}</button>)}</div><button className="btn sm ghost" disabled={clearing} onClick={onClear}>{clearing?'Czyszczenie…':'Wyczyść SEL'}</button></div></div><div className="card-body flush">{!events.length&&!(I.sel_raw||[]).length&&<div className="ipmi-all-ok"><Icon name="check" size={24}/><b>Brak zdarzeń sprzętowych</b><span>Dziennik SEL jest pusty</span></div>}{events.map((e,i)=><div className="ipmi-event" key={i}><span className="mono dim">{e.t}</span><IPMIStatusBadge status={e.sev==='info'?'unknown':e.sev}/><div><b>{e.msg}</b><span>{e.src}</span></div></div>)}{!events.length&&(I.sel_raw||[]).map((line,i)=><div className="ipmi-event raw" key={i}><span className="mono">{line}</span></div>)}</div></div>};
+
+const IPMIBMC=({I,onRefresh})=><div className="grid grid-2-1"><div className="card"><div className="card-head"><div><div className="card-title">Kontroler zarządzający iLO/BMC</div><div className="card-sub">{I.bmc?.model||'Kontroler IPMI'}</div></div><IPMIStatusBadge status="ok" text="POŁĄCZONO"/></div><div className="card-body ipmi-bmc-grid">{[['Adres IP',I.bmc?.ip],['Adres MAC',I.bmc?.mac],['Firmware',I.bmc?.fw],['Protokół','IPMI 2.0'],['Stan obudowy',I.chassis?.intrusion],['Panel przedni',I.chassis?.frontPanel]].map(([k,v])=><div key={k}><span>{k}</span><strong>{v||'—'}</strong></div>)}</div><div className="card-body ipmi-bmc-actions">{I.bmc?.ip&&I.bmc.ip!=='—'&&<button className="btn primary" onClick={()=>window.open('https://'+I.bmc.ip,'_blank','noopener')}>Otwórz konsolę iLO</button>}<button className="btn" onClick={onRefresh}><Icon name="refresh" size={12}/> Odśwież dane statyczne</button></div></div><div className="card"><div className="card-head"><div><div className="card-title">Bezpieczne odpytywanie</div><div className="card-sub">Ochrona przed zawieszonym BMC</div></div></div><div className="card-body col" style={{gap:12}}>{[['3 sekundy','maksymalny czas polecenia'],['5 sekund','cache czujników na żywo'],['5 minut','cache danych LAN i firmware'],['60 sekund','cache dziennika SEL']].map(([v,l])=><div className="ipmi-policy" key={v}><b>{v}</b><span>{l}</span></div>)}</div></div></div>;
+
+const IPMI=()=>{
+  const [tab,setTab]=React.useState('overview'),[data,setData]=React.useState(null),[loading,setLoading]=React.useState(true),[error,setError]=React.useState(''),[installing,setInstalling]=React.useState(false),[clearing,setClearing]=React.useState(false);
+  const load=React.useCallback(async(force=false)=>{if(force)setLoading(true);setError('');const q=new URLSearchParams();if(tab==='sel')q.set('include','sel');if(force)q.set('refresh','1');try{const r=await fetch('/api/ipmi'+(q.toString()?'?'+q:''),{credentials:'include'}),d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'Brak odpowiedzi z kontrolera BMC');setData(d);}catch(e){setError(e.message);}finally{setLoading(false);}},[tab]);
+  React.useEffect(()=>{setLoading(!data);load();const id=setInterval(()=>load(),8000);return()=>clearInterval(id);},[load]);
+  const install=async()=>{setInstalling(true);try{const r=await fetch('/api/ipmi/install',{method:'POST',credentials:'include'});if(!r.ok)throw new Error('Instalacja ipmitool nie powiodła się');await load(true);}catch(e){setError(e.message);}finally{setInstalling(false);}};
+  const clearSEL=async()=>{if(!window.confirm('Wyczyścić cały dziennik zdarzeń SEL? Tej operacji nie można cofnąć.'))return;setClearing(true);try{const r=await fetch('/api/ipmi/sel/clear',{method:'POST',credentials:'include'});if(!r.ok)throw new Error('Nie udało się wyczyścić SEL');await load(true);}catch(e){setError(e.message);}finally{setClearing(false);}};
+  if(loading&&!data)return <div className="ipmi-loading"><div className="ipmi-spinner"/><b>Odczyt kontrolera BMC…</b><span>Polecenie zostanie przerwane po 3 sekundach</span></div>;
+  if(data&&!data.installed)return <IPMIEmpty missing onInstall={install} busy={installing}/>;
+  if(!data||!data.bmc_present)return <IPMIEmpty/>;
+  const sensors=data.sensors||[],temps=sensors.filter(s=>s.unit==='°C'),fans=sensors.filter(s=>s.unit==='RPM'),alerts=sensors.map(s=>({...s,status:ipmiStatus(s)})).filter(s=>['crit','warn'].includes(s.status)).sort((a,b)=>ipmiRank[a.status]-ipmiRank[b.status]),hottest=temps.length?temps.reduce((a,b)=>Number(a.val)>Number(b.val)?a:b):null,psuOK=[data.power?.psu1?.status,data.power?.psu2?.status].filter(s=>s==='OK').length,g={temps,fans,alerts,hottest,psuOK};
+  const tabs=[['overview','Przegląd'],['map','Mapa cieplna'],['sensors','Czujniki'],['power','Zasilanie'],['sel','Zdarzenia SEL'],['bmc','iLO / BMC']];
+  return <div className="col ipmi-page" style={{gap:'var(--gutter)'}}><div className="ipmi-toolbar"><div><div className="row gap-sm"><IPMIStatusBadge status={data.stale?'warn':'ok'} text={data.stale?'DANE Z CACHE':'NA ŻYWO'}/><span className="mono dim">{data.last_updated?new Date(data.last_updated*1000).toLocaleTimeString('pl'):'—'}</span></div><div className="card-sub">{data.bmc?.model} · {sensors.length} czujników</div></div><button className="btn sm" onClick={()=>load(true)} disabled={loading}><Icon name="refresh" size={12}/>{loading?'Odświeżanie…':'Odśwież teraz'}</button></div>{error&&<div className="ipmi-error"><Icon name="close" size={14}/><span>{error}</span><button className="btn sm" onClick={()=>load(true)}>Ponów</button></div>}{data.stale&&<div className="ipmi-stale"><Icon name="clock" size={14}/><span>iLO nie odpowiedziało — pokazuję ostatni poprawny odczyt i ograniczam kolejne próby, aby nie blokować serwera.</span></div>}<div className="tabs ipmi-tabs">{tabs.map(([id,label])=><div key={id} className={'tab '+(tab===id?'active':'')} onClick={()=>setTab(id)}>{label}{id==='sel'&&data.sel_entries>0&&<span className="badge warn">{data.sel_entries}</span>}{id==='sensors'&&alerts.length>0&&<span className="badge warn">{alerts.length}</span>}</div>)}</div>{tab==='overview'&&<IPMIOverview I={data} g={g} history={data.history||[]} onTab={setTab}/>} {tab==='map'&&<IPMIHeatMap sensors={sensors}/>} {tab==='sensors'&&<IPMISensors sensors={sensors}/>} {tab==='power'&&<IPMIPower I={data} history={data.history||[]}/>} {tab==='sel'&&<IPMISEL I={data} clearing={clearing} onClear={clearSEL}/>} {tab==='bmc'&&<IPMIBMC I={data} onRefresh={()=>load(true)}/>}</div>;
+};
+
+window.IPMI=IPMI;
