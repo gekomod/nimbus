@@ -426,7 +426,9 @@ const ssacliDrivesCacheTTL = 5 * time.Minute
 // (np. "Smart Array P410i in Slot 0 (Embedded)" -> 0). Jeśli detekcja się nie
 // powiedzie, zwraca [0] — najczęstszy przypadek (jeden wbudowany kontroler).
 func findSSACLIControllerSlots() []int {
-	out, err := runCmd("ssacli", "ctrl", "all", "show", "status")
+	toolPath := findSSACLITool()
+	if toolPath == "" { return nil }
+	out, err := ssacliRun(toolPath, "ctrl", "all", "show", "status")
 	if err != nil || out == "" {
 		return nil
 	}
@@ -629,14 +631,14 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 	result := map[string]map[string]interface{}{}
 	pdByID := map[string]map[string]interface{}{}
 
-	if _, err := exec.LookPath("ssacli"); err == nil {
+	if toolPath := findSSACLITool(); toolPath != "" {
 		slots := findSSACLIControllerSlots()
 		if len(slots) == 0 {
 			slots = []int{0}
 		}
 
 		for _, slot := range slots {
-			out, err := runCmd("ssacli", "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
+			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
 			if err != nil || strings.TrimSpace(out) == "" {
 				continue
 			}
@@ -648,7 +650,7 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 		}
 
 		for _, slot := range slots {
-			out, err := runCmd("ssacli", "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
+			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
 			if err != nil || strings.TrimSpace(out) == "" {
 				continue
 			}
@@ -693,8 +695,9 @@ type smartCacheEntry struct { data map[string]interface{}; at time.Time }
 var (
 	_smartDataCache = map[string]smartCacheEntry{}
 	_smartDataCacheMu sync.RWMutex
+	_smartProbeMu sync.Mutex
 )
-const smartDataCacheTTL = 2 * time.Minute
+const smartDataCacheTTL = 10 * time.Minute
 
 // buildCcissSerialIndex skanuje indeksy cciss,0..N-1 RAZ dla całego
 // kontrolera (adresowanie jest globalne — wynik jest identyczny niezależnie
@@ -708,10 +711,12 @@ const smartDataCacheTTL = 2 * time.Minute
 // dysku z osobna próbować kolejne indeksy smartctl (a każde wywołanie
 // smartctl na kontrolerze HP trwa ~1-2s) — przy 20-30 dyskach dawało to
 // minuty ładowania. Z tabelą wystarczy przeskanować kontroler raz (i to
-// równolegle, patrz niżej — z dodatkowym wcześniejszym przerwaniem, gdyby
-// jednak zabrakło odpowiedzi na kilku kolejnych indeksach z rzędu), a
+// pojedynczo i wyłącznie po świadomym włączeniu NIMBUS_HP_SMART_PROBE=1), a
 // dopasowanie konkretnego dysku to już tylko odczyt z mapy.
 func buildCcissSerialIndex(anyDevPath string) map[string]string {
+	// Sondowanie wszystkich indeksów cciss obciąża firmware Smart Array.
+	// Jest wyłączone domyślnie; panel korzysta wtedy z bezpiecznych danych ssacli.
+	if os.Getenv("NIMBUS_HP_SMART_PROBE") != "1" { return map[string]string{} }
 	maxIndex := getSSACLIDriveCount()
 	if maxIndex <= 0 {
 		maxIndex = 16 // ssacli niedostępny/nic nie zgłosił — bezpieczny, mały domyślny zakres
@@ -724,7 +729,7 @@ func buildCcissSerialIndex(anyDevPath string) map[string]string {
 	}
 	results := make([]probeResult, maxIndex)
 
-	const maxConcurrent = 8
+	const maxConcurrent = 1
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 
@@ -734,6 +739,7 @@ func buildCcissSerialIndex(anyDevPath string) map[string]string {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			time.Sleep(250 * time.Millisecond)
 
 			mode := fmt.Sprintf("cciss,%d", i)
 			data := trySmartctl(anyDevPath, mode)
@@ -784,6 +790,15 @@ func getSMARTData(device string, lsblkSerial string) map[string]interface{} {
 		return e.data
 	}
 	_smartDataCacheMu.RUnlock()
+	_smartProbeMu.Lock()
+	defer _smartProbeMu.Unlock()
+	// Drugi request mógł uzupełnić cache podczas oczekiwania na pojedynczą kolejkę.
+	_smartDataCacheMu.RLock()
+	if e, ok := _smartDataCache[device]; ok && time.Since(e.at) < smartDataCacheTTL {
+		_smartDataCacheMu.RUnlock()
+		return e.data
+	}
+	_smartDataCacheMu.RUnlock()
 	data := getSMARTDataUncached(device, lsblkSerial)
 	_smartDataCacheMu.Lock()
 	_smartDataCache[device] = smartCacheEntry{data:data, at:time.Now()}
@@ -799,7 +814,18 @@ func getSMARTDataUncached(device string, lsblkSerial string) map[string]interfac
 	}
 
 	if _, err := exec.LookPath("smartctl"); err != nil {
+		if pd, ok := getCachedSSACLIDiskMap()[devPath]; ok { return pd }
 		return nil
+	}
+
+	// Na HP Smart Array zwykły odczyt listy dysków nie może automatycznie
+	// brute-force'ować cciss,N. Dane temperatury/stanu z ssacli są wystarczające
+	// dla widoku Storage i nie wybudzają/nie blokują każdego dysku osobno.
+	if pd, ok := getCachedSSACLIDiskMap()[devPath]; ok && os.Getenv("NIMBUS_HP_SMART_PROBE") != "1" {
+		_smartModeCacheMu.Lock()
+		_smartModeCache[device] = "ssacli"
+		_smartModeCacheMu.Unlock()
+		return pd
 	}
 
 	// Sprawdź czy już znamy działający tryb dla tego urządzenia
@@ -2139,11 +2165,12 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 	_, smartctlErr := exec.LookPath("smartctl")
 	info["smartctl_installed"] = smartctlErr == nil
 
-	_, ssacliErr := exec.LookPath("ssacli")
-	info["ssacli_installed"] = ssacliErr == nil
+	toolPath := findSSACLITool()
+	ssacliErr := toolPath == ""
+	info["ssacli_installed"] = !ssacliErr
 
-	if ssacliErr == nil {
-		statusOut, _ := runCmd("ssacli", "ctrl", "all", "show", "status")
+	if !ssacliErr {
+		statusOut, _ := ssacliRun(toolPath, "ctrl", "all", "show", "status")
 		info["ssacli_ctrl_status_raw"] = statusOut
 		slots := findSSACLIControllerSlots()
 		info["ssacli_detected_slots"] = slots
@@ -2153,7 +2180,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 		details := map[string]string{}
 		var parsed []map[string]interface{}
 		for _, slot := range slots {
-			out, err := runCmd("ssacli", "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
+			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
 			key := fmt.Sprintf("slot_%d", slot)
 			if err != nil {
 				details[key] = "BŁĄD: " + err.Error() + " | wyjście: " + out
@@ -2170,7 +2197,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 		ldDetails := map[string]string{}
 		diskNameMap := map[string]string{}
 		for _, slot := range slots {
-			out, err := runCmd("ssacli", "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
+			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
 			key := fmt.Sprintf("slot_%d", slot)
 			if err != nil {
 				ldDetails[key] = "BŁĄD: " + err.Error() + " | wyjście: " + out
@@ -2210,12 +2237,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 		if smartctlErr == nil {
 			directOut, _ := runCmd("smartctl", "-a", "-j", devPath)
 			info["smartctl_direct_raw"] = directOut
-			ccissAttempts := map[string]string{}
-			for i := 0; i < 4; i++ {
-				out, _ := runCmd("smartctl", "-a", "-j", "-d", fmt.Sprintf("cciss,%d", i), devPath)
-				ccissAttempts[fmt.Sprintf("cciss,%d", i)] = out
-			}
-			info["smartctl_cciss_attempts_raw"] = ccissAttempts
+			info["smartctl_cciss_probe"] = "wyłączone dla ochrony HP Smart Array; świadomie ustaw NIMBUS_HP_SMART_PROBE=1"
 		}
 	}
 

@@ -4,8 +4,8 @@ package api
 //
 // KLUCZOWE:
 //   - Wszystkie wywołania ssacli mają timeout 15s (context.WithTimeout)
-//   - enclosure info jest cache'owane na 60s — nie blokuję przy każdym request
-//   - scanBays() cache 10s
+//   - enclosure info jest cache'owane na 10 min — nie blokuję przy każdym request
+//   - scanBays() cache 5 min
 //   - Żaden handler nie blokuje dłużej niż timeout
 
 import (
@@ -103,13 +103,13 @@ func findSSACLITool() string {
 	return ""
 }
 
-// ── Cache enclosure (60s) ─────────────────────────────────────────────────────
+// ── Cache enclosure (10 min) ──────────────────────────────────────────────────
 
 var (
 	encCache     *EnclosureInfo
 	encCacheAt   time.Time
 	encCacheMu   sync.Mutex
-	encCacheTTL  = 60 * time.Second
+	encCacheTTL  = 10 * time.Minute
 )
 
 func detectEnclosure() EnclosureInfo {
@@ -221,7 +221,7 @@ func bestTool(tools []ToolInfo) string {
 	return ""
 }
 
-// ── Cache skanowania zatok (10s) ─────────────────────────────────────────────
+// ── Cache skanowania zatok (5 min) ────────────────────────────────────────────
 
 var (
 	bayCache    []BaySlot
@@ -233,7 +233,7 @@ func scanBays() []BaySlot {
 	bayCacheMu.Lock()
 	defer bayCacheMu.Unlock()
 
-	if time.Since(bayLastScan) < 10*time.Second && len(bayCache) > 0 {
+	if time.Since(bayLastScan) < 5*time.Minute && len(bayCache) > 0 {
 		return bayCache
 	}
 
