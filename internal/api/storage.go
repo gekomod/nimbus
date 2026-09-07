@@ -612,7 +612,39 @@ var (
 	_ssacliDiskMapCacheAt     time.Time
 	_ssacliDiskMapCacheMu     sync.Mutex
 	_ssacliPhysicalDriveCount int // liczba fizycznych dysków wg ssacli (0 = nieznana)
+	_ssacliPhysicalCache []map[string]interface{}
 )
+
+func getCachedSSACLIPhysicalDrives() []map[string]interface{} {
+	_ssacliDiskMapCacheMu.Lock()
+	defer _ssacliDiskMapCacheMu.Unlock()
+	if _ssacliPhysicalCache != nil && time.Since(_ssacliDiskMapCacheAt) < ssacliDrivesCacheTTL { return _ssacliPhysicalCache }
+	toolPath := findSSACLITool()
+	if toolPath == "" { return nil }
+	var drives []map[string]interface{}
+	slots := findSSACLIControllerSlots(); if len(slots)==0 { slots=[]int{0} }
+	for _, slot := range slots {
+		out,err:=ssacliRun(toolPath,"ctrl",fmt.Sprintf("slot=%d",slot),"pd","all","show","detail")
+		if err==nil { drives=append(drives,parseSSACLIPhysicalDrives(out)...)}
+	}
+	_ssacliPhysicalCache=drives
+	_ssacliPhysicalDriveCount=len(drives)
+	_ssacliDiskMapCacheAt=time.Now()
+	return drives
+}
+
+func ssacliSMARTJSON(d map[string]interface{}, name string) map[string]interface{} {
+	status,_:=d["status"].(string)
+	return map[string]interface{}{
+		"device":map[string]interface{}{"name":name,"type":"cciss","protocol":"HP Smart Array"},
+		"model_name":d["model"], "serial_number":d["serial_number"],
+		"smart_status":map[string]bool{"passed":status=="passed"},
+		"temperature":map[string]interface{}{"current":d["temp"]},
+		"power_on_time":map[string]interface{}{"hours":d["hours"]},
+		"ata_smart_attributes":map[string]interface{}{"table":[]interface{}{}},
+		"nimbus_source":"ssacli",
+	}
+}
 
 // getCachedSSACLIDiskMap zwraca mapę "/dev/sdX" -> dane fizycznego dysku
 // (bay/serial/temp/status), łącząc "ld all show detail" (Disk Name -> ID
@@ -1559,12 +1591,21 @@ func (s *Server) handleStorageSMART(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var devices []map[string]any
+	// Smart Array udostępnia fizyczne dyski przez ssacli nawet wtedy, gdy
+	// smartctl --scan nie widzi żadnego urządzenia za woluminami logicznymi.
+	for _, pd := range getCachedSSACLIPhysicalDrives() {
+		bay, _ := pd["bay"].(int)
+		if bay == 0 { if f,ok:=pd["bay"].(float64);ok { bay=int(f) } }
+		name := fmt.Sprintf("/dev/hp-bay-%d", bay)
+		devices = append(devices, map[string]any{"name":name,"type":"cciss","protocol":"HP Smart Array"})
+	}
 	for _, dev := range lsblkData.Blockdevices {
 		name := getString(dev, "name")
 		devType := getString(dev, "type")
 		if devType != "disk" {
 			continue
 		}
+		if len(devices)>0 && strings.HasPrefix(name,"sd") { continue }
 		// Sprawdź czy w ogóle da się odpytać SMART (bezpośrednio albo przez cciss,N)
 		if getSMARTData(name, getString(dev, "serial")) == nil {
 			continue
@@ -1605,6 +1646,11 @@ func (s *Server) handleStorageSMARTMonitoring(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleStorageSMARTDetails(w http.ResponseWriter, r *http.Request) {
 	dev := pathSuffix(r, "/api/storage/smart/details/")
+	if strings.HasPrefix(dev,"hp-bay-") {
+		bay,err:=strconv.Atoi(strings.TrimPrefix(dev,"hp-bay-"));if err!=nil{jsonErr(w,"nieprawidłowa zatoka HP",400);return}
+		for _,pd:=range getCachedSSACLIPhysicalDrives(){ n,_:=pd["bay"].(int);if n==0{if f,ok:=pd["bay"].(float64);ok{n=int(f)}};if n==bay{jsonOK(w,ssacliSMARTJSON(pd,"/dev/"+dev));return} }
+		jsonErr(w,"dysk nie istnieje w Smart Array",404);return
+	}
 	args := resolveSmartArgs(dev, []string{"-a", "-j"})
 	out, _ := runCmd("smartctl", args...)
 	jsonOK(w, json.RawMessage(safeJSON(out)))
