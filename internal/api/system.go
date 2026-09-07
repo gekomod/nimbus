@@ -7,11 +7,25 @@ import (
 	"net/http"
 	"nimbus/internal/sys"
 	"sort"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"os"
 )
+
+var usernameRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+func validUsername(name string) bool { return usernameRE.MatchString(name) && name != "root" }
+
+func validTimezone(name string) bool {
+	if name == "UTC" { return true }
+	for _, line := range strings.Split(readFileStr("/usr/share/zoneinfo/zone.tab"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == name { return true }
+	}
+	return false
+}
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	cpu := sys.CPUPercent()
@@ -20,6 +34,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ld  := sys.LoadAvg()
 	up  := sys.Uptime()
 	used := mem.TotalKB - mem.AvailableKB
+	memPercent := 0.0
+	if mem.TotalKB > 0 { memPercent = round2(float64(used)/float64(mem.TotalKB)*100) }
 	jsonOK(w, map[string]any{
 		"cpu": map[string]any{
 			"percent": round2(cpu), "model": ci["model"], "cores": ci["cores"],
@@ -31,7 +47,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"avail_gb": round2(float64(mem.AvailableKB)/1048576), "buffers_gb": round2(float64(mem.BuffersKB)/1048576),
 			"cached_gb": round2(float64(mem.CachedKB)/1048576), "swap_total_gb": round2(float64(mem.SwapTotalKB)/1048576),
 			"swap_used_gb": round2(float64(mem.SwapTotalKB-mem.SwapFreeKB)/1048576),
-			"percent": round2(float64(used)/float64(mem.TotalKB)*100),
+			"percent": memPercent,
 		},
 		"uptime_secs": int(up.Seconds()), "hostname": sys.Hostname(), "kernel": sys.KernelVersion(),
 	})
@@ -43,18 +59,19 @@ func (s *Server) handleCPU(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 	m := sys.Memory(); used := m.TotalKB - m.AvailableKB
+	percent := 0.0; if m.TotalKB > 0 { percent = round2(float64(used)/float64(m.TotalKB)*100) }
 	jsonOK(w, map[string]any{
 		"total_gb": round2(float64(m.TotalKB)/1048576), "used_gb": round2(float64(used)/1048576),
 		"avail_gb": round2(float64(m.AvailableKB)/1048576), "cached_gb": round2(float64(m.CachedKB)/1048576),
 		"buffers_gb": round2(float64(m.BuffersKB)/1048576), "swap_total_gb": round2(float64(m.SwapTotalKB)/1048576),
 		"swap_used_gb": round2(float64(m.SwapTotalKB-m.SwapFreeKB)/1048576),
-		"percent": round2(float64(used)/float64(m.TotalKB)*100),
+		"percent": percent,
 	})
 }
 
 func (s *Server) handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 	m := sys.Memory(); used := m.TotalKB - m.AvailableKB
-	cpuPct := round2(sys.CPUPercent()); memPct := round2(float64(used)/float64(m.TotalKB)*100)
+	cpuPct := round2(sys.CPUPercent()); memPct := 0.0; if m.TotalKB > 0 { memPct = round2(float64(used)/float64(m.TotalKB)*100) }
 	status := "healthy"
 	if cpuPct > 90 || memPct > 90 { status = "warning" }
 	jsonOK(w, map[string]any{"status": status, "cpu_pct": cpuPct, "memory_pct": memPct, "load": sys.LoadAvg(), "uptime": int(sys.Uptime().Seconds())})
@@ -97,7 +114,7 @@ func (s *Server) handleSystemShutdown(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleScheduleShutdown(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	var req struct { Minutes int `json:"minutes"` }
-	json.NewDecoder(r.Body).Decode(&req)
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Minutes < 1 || req.Minutes > 525600 { jsonErr(w,"minuty muszą mieć wartość 1–525600",400);return }
 	when := "+" + strconv.Itoa(req.Minutes)
 	if _, err := runCmd("shutdown", when); err != nil { jsonErr(w, err.Error(), http.StatusInternalServerError); return }
 	jsonOK(w, map[string]any{"status": "ok", "minutes": req.Minutes})
@@ -116,9 +133,9 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"hostname": sys.Hostname(), "timezone": strings.TrimSpace(tz)})
 	case http.MethodPost:
 		var req struct { Hostname string `json:"hostname"`; Timezone string `json:"timezone"` }
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.Hostname != "" { runCmd("hostnamectl", "set-hostname", req.Hostname) }
-		if req.Timezone != "" { runCmd("timedatectl", "set-timezone", req.Timezone) }
+		if json.NewDecoder(r.Body).Decode(&req) != nil { jsonErr(w,"nieprawidłowe dane",400);return }
+		if req.Hostname != "" { if ok,_:=regexp.MatchString(`^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$`,req.Hostname);!ok{jsonErr(w,"nieprawidłowa nazwa hosta",400);return};if out,err:=runCmd("hostnamectl","set-hostname",req.Hostname);err!=nil{jsonErr(w,out,500);return} }
+		if req.Timezone != "" { if !validTimezone(req.Timezone){jsonErr(w,"nieprawidłowa strefa czasowa",400);return};if out,err:=runCmd("timedatectl","set-timezone",req.Timezone);err!=nil{jsonErr(w,out,500);return} }
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -132,8 +149,11 @@ func (s *Server) handleWebserverConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWebserverConfigSave(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	var req struct{ Config string `json:"config"` }
-	json.NewDecoder(r.Body).Decode(&req)
-	writeFile("/etc/nginx/nginx.conf", req.Config)
+	if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Config)=="" { jsonErr(w,"nieprawidłowa konfiguracja",400);return }
+	tmp,err:=os.CreateTemp("","nimbus-nginx-*.conf");if err!=nil{jsonErr(w,err.Error(),500);return};tmpPath:=tmp.Name();defer os.Remove(tmpPath)
+	if _,err=tmp.WriteString(req.Config);err!=nil{tmp.Close();jsonErr(w,err.Error(),500);return};tmp.Close()
+	if out,err:=runCmd("nginx","-t","-c",tmpPath);err!=nil{jsonErr(w,out,400);return}
+	if err=writeFile("/etc/nginx/nginx.conf",req.Config);err!=nil{jsonErr(w,err.Error(),500);return}
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
@@ -170,13 +190,13 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, sys.LocalUsers())
 	case http.MethodPost:
 		var req struct { Username, Password, Shell, Groups string }
-		json.NewDecoder(r.Body).Decode(&req)
+		if json.NewDecoder(r.Body).Decode(&req) != nil || !validUsername(req.Username) { jsonErr(w,"nieprawidłowa nazwa użytkownika",400);return }
 		args := []string{"-m"}
 		if req.Shell != "" { args = append(args, "-s", req.Shell) }
 		if req.Groups != "" { args = append(args, "-G", req.Groups) }
 		args = append(args, req.Username)
 		if _, err := runCmd("useradd", args...); err != nil { jsonErr(w, err.Error(), http.StatusInternalServerError); return }
-		if req.Password != "" { runCmd("bash", "-c", "echo '"+req.Username+":"+req.Password+"' | chpasswd") }
+		if req.Password != "" { if out,err:=runCmdInput(req.Username+":"+req.Password+"\n","chpasswd");err!=nil{jsonErr(w,out,500);return} }
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -185,15 +205,15 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSystemUserAction(w http.ResponseWriter, r *http.Request) {
 	uname := strings.Split(pathSuffix(r, "/api/system/users/"), "/")[0]
-	if uname == "" { jsonErr(w, "username required", http.StatusBadRequest); return }
+	if !validUsername(uname) { jsonErr(w, "nieprawidłowa nazwa użytkownika", http.StatusBadRequest); return }
 	switch r.Method {
 	case http.MethodDelete:
-		runCmd("userdel", "-r", uname)
+		if out,err:=runCmd("userdel", "-r", uname);err!=nil{jsonErr(w,out,500);return}
 		jsonOK(w, map[string]string{"status": "ok"})
 	case http.MethodPut:
 		var req struct { Password, Groups, Shell string }
 		json.NewDecoder(r.Body).Decode(&req)
-		if req.Password != "" { runCmd("bash", "-c", "echo '"+uname+":"+req.Password+"' | chpasswd") }
+		if req.Password != "" { if out,err:=runCmdInput(uname+":"+req.Password+"\n","chpasswd");err!=nil{jsonErr(w,out,500);return} }
 		if req.Groups != "" { runCmd("usermod", "-G", req.Groups, uname) }
 		if req.Shell != "" { runCmd("usermod", "-s", req.Shell, uname) }
 		jsonOK(w, map[string]string{"status": "ok"})

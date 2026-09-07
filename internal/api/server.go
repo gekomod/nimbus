@@ -75,7 +75,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/logout",     s.handleLogout)
 	s.mux.HandleFunc("/api/check-auth", s.handleCheckAuth)
 	s.mux.HandleFunc("/api/status",     s.handlePublicStatus) // bez auth — dla strony logowania
-	s.mux.HandleFunc("/network/dynamic-dns/update-all", s.handleDynDNSUpdateAll)
 
 	a := func(p string, fn http.HandlerFunc) { s.mux.HandleFunc(p, s.auth_(fn)) }
 
@@ -327,6 +326,7 @@ func (s *Server) routes() {
 	a("/api/network/dns/upstream", s.handleDNSUpstream)
 
 	a("/network/dynamic-dns", s.handleDynDNS)
+	a("/network/dynamic-dns/update-all", s.handleDynDNSUpdateAll)
 	a("/network/dynamic-dns/settings", s.handleDynDNSSettings)
 	a("/network/dynamic-dns/install-cron", s.handleDynDNSInstallCron)
 	a("/network/dynamic-dns/cron-status", s.handleDynDNSCronStatus)
@@ -671,7 +671,7 @@ func (s *Server) routes() {
 	a("/services/status/", s.handleServiceStatusHelper)
 
 	// noVNC — serwuj pliki z katalogu noVNC na dysku
-	s.mux.HandleFunc("/novnc/", s.handleNoVNC)
+	a("/novnc/", s.handleNoVNC)
 
 	// static — must be last
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -832,8 +832,9 @@ func (s *Server) handleNoVNC(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	if p == "/" { p = "/index.html" }
-	clean := filepath.Clean(filepath.Join(s.cfg.WebDir, p))
-	if !strings.HasPrefix(clean, filepath.Clean(s.cfg.WebDir)) {
+	base := filepath.Clean(s.cfg.WebDir)
+	clean := filepath.Clean(filepath.Join(base, p))
+	if clean != base && !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
 		http.Error(w, "forbidden", http.StatusForbidden); return
 	}
 	info, err := os.Stat(clean)

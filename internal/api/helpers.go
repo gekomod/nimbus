@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -31,9 +33,29 @@ func round2(f float64) float64 { return float64(int(f*100)) / 100 }
 var cmdSem = make(chan struct{}, 8)
 
 func runCmd(name string, args ...string) (string, error) {
-	cmdSem <- struct{}{}
+	select {
+	case cmdSem <- struct{}{}:
+	case <-time.After(5 * time.Second): return "", fmt.Errorf("serwer jest zajęty operacjami systemowymi")
+	}
 	defer func() { <-cmdSem }()
-	out, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded { return strings.TrimSpace(string(out)), fmt.Errorf("polecenie %s przekroczyło limit 30 minut", name) }
+	return strings.TrimSpace(string(out)), err
+}
+
+func runCmdInput(input, name string, args ...string) (string, error) {
+	select {
+	case cmdSem <- struct{}{}:
+	case <-time.After(5 * time.Second): return "", fmt.Errorf("serwer jest zajęty operacjami systemowymi")
+	}
+	defer func() { <-cmdSem }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 

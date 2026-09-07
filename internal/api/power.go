@@ -10,7 +10,8 @@ import (
 func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { jsonErr(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	var req struct { Action string `json:"action"` }
-	json.NewDecoder(r.Body).Decode(&req)
+	if json.NewDecoder(r.Body).Decode(&req) != nil { jsonErr(w,"nieprawidłowe dane",400);return }
+	switch req.Action { case "poweroff", "shutdown", "reboot", "restart", "suspend", "hibernate": default: jsonErr(w,"nieznana akcja zasilania",400);return }
 	jsonOK(w, map[string]string{"status": "ok"})
 	go func() {
 		time.Sleep(500 * time.Millisecond)
