@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"context"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -755,16 +756,22 @@ type Container struct {
 	CPU    float64 `json:"cpu"`
 	Mem    float64 `json:"mem"`
 	Ports  string  `json:"ports"`
+	Project string `json:"project"`
+	Service string `json:"service"`
+	Health string `json:"health"`
+	StatsAvailable bool `json:"stats_available"`
 }
 
 func DockerContainers() ([]Container, error) {
-	out, err := exec.Command("docker", "ps", "-a",
-		"--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}").CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("docker ps: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	var containers []Container
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	containers := []Container{}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\r\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -782,8 +789,12 @@ func DockerContainers() ([]Container, error) {
 			ports = parts[5]
 		}
 
-		// Get CPU/mem stats (non-blocking, best-effort)
-		cpu, mem := containerStats(id)
+		project, service, health := "", "", ""
+		if len(parts) >= 8 { project, service = parts[6], parts[7] }
+		for _, h := range []string{"unhealthy", "healthy"} {
+			if strings.Contains(status, "("+h+")") { health = h }
+		}
+		if strings.Contains(status, "health: starting") { health = "starting" }
 
 		containers = append(containers, Container{
 			ID:     id[:min(12, len(id))],
@@ -791,9 +802,10 @@ func DockerContainers() ([]Container, error) {
 			Image:  image,
 			State:  state,
 			Status: status,
-			CPU:    cpu,
-			Mem:    mem,
 			Ports:  ports,
+			Project: project,
+			Service: service,
+			Health: health,
 		})
 	}
 	return containers, nil

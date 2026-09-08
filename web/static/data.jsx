@@ -338,7 +338,7 @@ async function _syncOnce() {
   storeSet('POOLS', p);
 
   const c = _parseContainers(containers);
-  if (c.length) {
+  if (containers && !containers.error) {
     storeSet('CONTAINERS', c);
     window.NAV[2].items[0].badge = String(c.length);
   }

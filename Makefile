@@ -20,7 +20,7 @@ all: js go ## Zbuduj JS + binarke Go (produkcja)
 # ── JavaScript ────────────────────────────────────────────────────────────────
 js: $(BUNDLE) ## Skompiluj JSX → bundle.js (produkcja, minifikacja)
 
-$(BUNDLE): $(JSX) $(ENTRY)
+$(BUNDLE): $(JSX) $(ENTRY) $(STATIC)/styles.css
 	@printf "📦  JSX → bundle.js … "
 	@esbuild $(ENTRY) \
 		--bundle \

@@ -10,6 +10,7 @@ import (
 	"nimbus/internal/sys"
 	"strings"
 	"sync"
+	"strconv"
 	"time"
 )
 
@@ -68,7 +69,8 @@ func (s *Server) handleDockerConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDockerContainers(w http.ResponseWriter, r *http.Request) {
 	conts, err := sys.DockerContainers()
-	if err != nil { jsonOK(w, map[string]any{"containers": []any{}, "error": err.Error()}); return }
+	if err != nil { jsonErr(w, err.Error(), http.StatusServiceUnavailable); return }
+	applyDockerStats(conts)
 	jsonOK(w, map[string]any{"containers": conts})
 }
 
@@ -90,14 +92,20 @@ func (s *Server) handleDockerContainerCreate(w http.ResponseWriter, r *http.Requ
 	for _, e := range req.Env    { args = append(args, "-e", e) }
 	args = append(args, req.Image)
 	out, err := runCmd("docker", args...)
-	if err != nil { jsonErr(w, err.Error(), http.StatusInternalServerError); return }
+	if err != nil { jsonErr(w, dockerCommandError(out, err), http.StatusInternalServerError); return }
 	jsonOK(w, map[string]string{"status": "ok", "id": strings.TrimSpace(out)})
 }
 
 func (s *Server) handleDockerContainerLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet { jsonErr(w, "method not allowed", 405); return }
 	id := pathSuffix(r, "/services/docker/container/logs/")
-	tail := r.URL.Query().Get("tail"); if tail == "" { tail = "100" }
-	out, _ := runCmd("docker", "logs", "--tail", tail, "--timestamps", id)
+	if !validDockerID(id) { jsonErr(w, "invalid container id", 400); return }
+	tail := r.URL.Query().Get("tail")
+	if tail == "" { tail = "500" }
+	n, err := strconv.Atoi(tail)
+	if err != nil || n < 1 || n > 5000 { jsonErr(w, "tail must be between 1 and 5000", 400); return }
+	out, err := runCmd("docker", "logs", "--tail", tail, "--timestamps", id)
+	if err != nil { jsonErr(w, dockerCommandError(out, err), 500); return }
 	jsonOK(w, map[string]any{"logs": strings.Split(out, "\n"), "id": id})
 }
 
@@ -108,49 +116,41 @@ func (s *Server) handleDockerContainerStatus(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleDockerContainerAction(w http.ResponseWriter, r *http.Request) {
-	// /services/docker/container/:id/:action  or  /services/docker/container/:id
-	suffix := pathSuffix(r, "/services/docker/container/")
-	parts  := strings.SplitN(suffix, "/", 2)
-	id     := parts[0]
-	action := ""
-	if len(parts) > 1 { action = parts[1] }
-
-	if id == "" { jsonErr(w, "container id required", http.StatusBadRequest); return }
-
+	parts := strings.SplitN(pathSuffix(r, "/services/docker/container/"), "/", 2)
+	id, action := parts[0], ""
+	if len(parts) == 2 { action = parts[1] }
+	if !validDockerID(id) { jsonErr(w, "invalid container id", 400); return }
+	var args []string
 	switch action {
-	case "start":           runCmd("docker", "start", id)
-	case "stop":            runCmd("docker", "stop", id)
-	case "kill":            runCmd("docker", "kill", id)
-	case "pause":           runCmd("docker", "pause", id)
-	case "unpause":         runCmd("docker", "unpause", id)
-	case "restart":         runCmd("docker", "restart", id)
-	case "connect-network":
-		var req struct{ Network string `json:"network"` }
-		json.NewDecoder(r.Body).Decode(&req)
-		runCmd("docker", "network", "connect", req.Network, id)
-	case "mount-volume":
-		jsonOK(w, map[string]string{"status": "ok"}); return
+	case "start", "stop", "kill", "pause", "unpause", "restart":
+		if r.Method != http.MethodPost { jsonErr(w, "method not allowed", 405); return }
+		args = []string{action, id}
 	case "config":
+		if r.Method == http.MethodPut { s.updateDockerResources(w, r, id); return }
+		if r.Method != http.MethodGet { jsonErr(w, "method not allowed", 405); return }
+		args = []string{"inspect", id}
+	case "connect-network":
+		if r.Method != http.MethodPost { jsonErr(w, "method not allowed", 405); return }
+		var req struct { Network string `json:"network"` }
+		if json.NewDecoder(r.Body).Decode(&req) != nil || !validDockerID(req.Network) { jsonErr(w, "invalid network", 400); return }
+		args = []string{"network", "connect", req.Network, id}
+	case "mount-volume":
+		jsonErr(w, "Zmiana montowań wymaga odtworzenia kontenera. Zmień konfigurację Compose.", 409); return
+	case "":
 		switch r.Method {
-		case http.MethodGet:
-			out, _ := runCmd("docker", "inspect", id)
-			jsonOK(w, json.RawMessage(safeJSON(out))); return
-		case http.MethodPut:
-			jsonOK(w, map[string]string{"status": "ok"}); return
-		}
-	default:
-		switch r.Method {
-		case http.MethodGet:
-			out, _ := runCmd("docker", "inspect", id)
-			jsonOK(w, json.RawMessage(safeJSON(out))); return
+		case http.MethodGet: args = []string{"inspect", id}
 		case http.MethodDelete:
-			args := []string{"rm"}
+			args = []string{"rm"}
 			if r.URL.Query().Get("force") == "true" { args = append(args, "-f") }
 			args = append(args, id)
-			runCmd("docker", args...)
+		default: jsonErr(w, "method not allowed", 405); return
 		}
+	default: jsonErr(w, "unknown container action", 404); return
 	}
-	jsonOK(w, map[string]string{"status": "ok"})
+	out, err := runCmd("docker", args...)
+	if err != nil { jsonErr(w, dockerCommandError(out, err), 500); return }
+	if args[0] == "inspect" { jsonOK(w, json.RawMessage(safeJSON(out))); return }
+	jsonOK(w, map[string]string{"status":"ok", "output":out})
 }
 
 func (s *Server) handleDockerImages(w http.ResponseWriter, r *http.Request) {
@@ -343,115 +343,7 @@ func (s *Server) handleDockerVolumeItem(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleDockerCompose(w http.ResponseWriter, r *http.Request) {
-	// Znajdź wszystkie pliki docker-compose na dysku
-	out, _ := runCmd("bash", "-c", "find /opt/stacks /srv /home /root -maxdepth 4 -name 'docker-compose.yml' -o -name 'docker-compose.yaml' 2>/dev/null")
-	var files []string
-	for _, f := range strings.Split(out, "\n") {
-		if f = strings.TrimSpace(f); f != "" {
-			files = append(files, f)
-		}
-	}
-
-	type StackInfo struct {
-		Name     string   `json:"name"`
-		File     string   `json:"file"`
-		Status   string   `json:"status"`
-		Services []string `json:"services"`
-		Updated  string   `json:"updated"`
-	}
-
-	var stacks []StackInfo
-
-	for _, file := range files {
-		dir := file[:strings.LastIndex(file, "/")]
-		// Nazwa stosu = nazwa katalogu
-		parts := strings.Split(dir, "/")
-		name := parts[len(parts)-1]
-
-		// Pobierz listę usług z pliku (szybkie grep)
-		servicesOut, _ := runCmd("bash", "-c",
-			`grep -E "^  [a-zA-Z][a-zA-Z0-9_-]+:" `+file+` 2>/dev/null | sed "s/://g" | tr -d " "`)
-		var services []string
-		for _, sv := range strings.Split(servicesOut, "\n") {
-			if sv = strings.TrimSpace(sv); sv != "" && sv != "version" && sv != "services" {
-				services = append(services, sv)
-			}
-		}
-
-		// Sprawdź status przez docker compose ps (z --project-name)
-		// Nazwa projektu = nazwa katalogu (tak jak docker compose domyślnie)
-		// Sprawdź status — 3 metody
-		status := "stopped"
-
-		// 1. docker compose ps z nazwą projektu
-		psOut, _ := runCmd("docker", "compose", "-f", file, "--project-name", name, "ps", "--format", "json")
-		if strings.Contains(psOut, `"running"`) || strings.Contains(psOut, "running") {
-			runningCount := strings.Count(psOut, `"running"`)
-			if runningCount >= len(services) || len(services) == 0 {
-				status = "running"
-			} else {
-				status = "partial"
-			}
-		}
-
-		// 2. Fallback — sprawdź przez docker ps wg nazwy projektu i nazw serwisów
-		if status == "stopped" {
-			psOut2, _ := runCmd("docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Labels}}")
-			running := 0
-
-			// Zbierz kandydatów — kontenery których nazwa zawiera nazwę projektu LUB serwisu
-			candidates := append(services, name)
-			for _, line := range strings.Split(psOut2, "\n") {
-				lower := strings.ToLower(line)
-				if !strings.Contains(lower, "\tup") { continue }
-				for _, cand := range candidates {
-					if strings.Contains(lower, strings.ToLower(cand)) {
-						running++
-						break
-					}
-				}
-			}
-
-			// Sprawdź też przez label com.docker.compose.project
-			psLabel, _ := runCmd("docker", "ps",
-				"--filter", "label=com.docker.compose.project="+name,
-				"--format", "{{.Names}}")
-			labelCount := 0
-			for _, l := range strings.Split(strings.TrimSpace(psLabel), "\n") {
-				if strings.TrimSpace(l) != "" { labelCount++ }
-			}
-
-			total := running
-			if labelCount > total { total = labelCount }
-
-			if total > 0 {
-				if len(services) == 0 || total >= len(services) {
-					status = "running"
-				} else {
-					status = "partial"
-				}
-			}
-		}
-
-		// Data modyfikacji pliku
-		var updated string
-		if fi, err := os.Stat(file); err == nil {
-			updated = fi.ModTime().Format("2006-01-02")
-		}
-
-		stacks = append(stacks, StackInfo{
-			Name:     name,
-			File:     file,
-			Status:   status,
-			Services: services,
-			Updated:  updated,
-		})
-	}
-
-	if stacks == nil {
-		stacks = []StackInfo{}
-	}
-	jsonOK(w, map[string]any{"stacks": stacks, "files": files})
+	s.listDockerProjects(w, r)
 }
 
 // POST /services/docker/compose — utwórz nowy stos (zapisz plik + docker compose up -d)
@@ -606,8 +498,9 @@ func (s *Server) handleDockerComposeFile(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, "niedozwolony typ pliku", http.StatusForbidden)
 		return
 	}
-	content := readFileStr(path)
-	jsonOK(w, map[string]string{"content": content, "path": path})
+	content, err := os.ReadFile(path)
+	if err != nil { jsonErr(w, err.Error(), http.StatusNotFound); return }
+	jsonOK(w, map[string]string{"content": string(content), "path": path})
 }
 
 func (s *Server) handleDockerComposeStream(w http.ResponseWriter, r *http.Request) {
@@ -629,12 +522,16 @@ func startDockerStatsPoller() {
 			for {
 				// Sprawdź czy Docker działa zanim odpytamy stats
 				if _, err := runCmd("docker", "info"); err != nil {
+					_dockerStatsCacheMu.Lock()
+					_dockerStatsCache = nil
+					_dockerStatsAt = time.Time{}
+					_dockerStatsCacheMu.Unlock()
 					time.Sleep(30 * time.Second)
 					continue
 				}
 				out, err := runCmd("docker", "stats", "--no-stream", "--format",
 					`{"id":"{{.ID}}","name":"{{.Name}}","cpu":"{{.CPUPerc}}","mem":"{{.MemUsage}}","net":"{{.NetIO}}","block":"{{.BlockIO}}"}`)
-				if err == nil && out != "" {
+				if err == nil {
 					var stats []json.RawMessage
 					for _, l := range strings.Split(out, "\n") {
 						if l = strings.TrimSpace(l); l != "" {
@@ -643,6 +540,7 @@ func startDockerStatsPoller() {
 					}
 					_dockerStatsCacheMu.Lock()
 					_dockerStatsCache = stats
+					_dockerStatsAt = time.Now()
 					_dockerStatsCacheMu.Unlock()
 				}
 				// 5s zamiast 2s — wystarczy dla live stats, mniej procesów

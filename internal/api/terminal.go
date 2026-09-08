@@ -94,6 +94,11 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	container := r.URL.Query().Get("container")
+	if container != "" {
+		if !validDockerID(container) || (shell != "/bin/sh" && shell != "/bin/bash") { http.Error(w, "invalid container or shell", 400); return }
+	}
+
 	// Upgrade do WebSocket
 	conn, err := termUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -104,6 +109,7 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 
 	// Uruchom shell w PTY
 	cmd := exec.Command(shell)
+	if container != "" { cmd = exec.Command("docker", "exec", "-it", container, shell) }
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
 		fmt.Sprintf("COLUMNS=%d", cols),
@@ -124,6 +130,7 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		ptmx.Close()
 		cmd.Process.Kill()
+		cmd.Wait()
 	}()
 
 	// Zarejestruj sesję
@@ -147,6 +154,7 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer conn.Close()
 		buf := make([]byte, 4096)
 		for {
 			n, err := ptmx.Read(buf)

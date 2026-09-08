@@ -577,6 +577,7 @@ func (s *Server) routes() {
 	// dashboard — jeden endpoint zamiast 14
 	a("/api/dashboard", s.handleDashboard)
 	a("/api/docker/compose-file", s.handleDockerComposeFile)
+	a("/api/docker/workspace/compose", s.handleDockerProjectWrite)
 
 	// proxy routes management — nimbus built-in reverse proxy
 	a("/api/proxy/routes", s.handleProxyRoutes)
