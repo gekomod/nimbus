@@ -279,6 +279,7 @@ func (s *Server) routes() {
 	// IPMI / BMC
 	a("/api/ipmi", s.handleIPMI)
 	a("/api/ipmi/install", s.handleIPMIInstall)
+	a("/api/ipmi/cooling-diagnostics", s.handleIPMICoolingDiagnostics)
 	a("/api/ipmi/sel/clear", s.handleIPMISELClear)
 
 	// Poczta

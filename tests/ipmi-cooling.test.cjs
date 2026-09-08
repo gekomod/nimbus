@@ -1,0 +1,11 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs'),vm=require('node:vm'),esbuild=require('esbuild');
+const source=esbuild.transformSync(fs.readFileSync('web/static/screens-ipmi.jsx','utf8'),{loader:'jsx',target:'es2020'}).code;
+const context={window:{},React:{}};vm.createContext(context);
+vm.runInContext(source+'\nglobalThis.rules={ipmiStatus,ipmiValue,ipmiIsFan,ipmiHasValue};',context);
+const r=context.rules;
+test('percentage fans remain visible and are not labelled RPM',()=>{const fan={kind:'fan',val:47,unit:'%',raw_status:'ok'};assert.equal(r.ipmiIsFan(fan),true);assert.equal(r.ipmiValue(fan),'47 %');assert.equal(r.ipmiStatus(fan),'ok');});
+test('missing temperatures are unknown, not zero degrees or healthy',()=>{const sensor={val:0,unit:'°C',unavailable:true,raw_status:'ns'};assert.equal(r.ipmiHasValue(sensor),false);assert.equal(r.ipmiStatus(sensor),'unknown');assert.equal(r.ipmiValue(sensor),'Brak odczytu');});
+test('discrete fans preserve the raw state without inventing RPM',()=>{const fan={kind:'fan',unit:'stan',discrete:true,raw_value:'0x01',raw_status:'0x0100',val:0};assert.equal(r.ipmiStatus(fan),'unknown');assert.equal(r.ipmiValue(fan),'Stan: 0x01');});
+test('BMC critical status takes precedence over apparently normal numeric readings',()=>{assert.equal(r.ipmiStatus({val:40,unit:'°C',crit:90,warn:80,raw_status:'ucr'}),'crit');});

@@ -27,6 +27,11 @@ type IPMISensor struct {
 	Warn float64 `json:"warn"`
 	Crit float64 `json:"crit"`
 	Max  float64 `json:"max"`
+	Kind string `json:"kind,omitempty"`
+	Unavailable bool `json:"unavailable"`
+	Discrete bool `json:"discrete"`
+	RawStatus string `json:"raw_status"`
+	RawValue string `json:"raw_value"`
 }
 
 type IPMIPSU struct {
@@ -103,6 +108,7 @@ type ipmiSELSnapshot struct {
 var (
 	ipmiCacheMu     sync.RWMutex
 	ipmiRefreshMu   sync.Mutex
+	ipmiCommandGate = make(chan struct{}, 1)
 	ipmiStaticCache ipmiStaticSnapshot
 	ipmiLiveCache   ipmiLiveSnapshot
 	ipmiSELCache    ipmiSELSnapshot
@@ -114,7 +120,7 @@ var (
 const (
 	ipmiCommandTimeout = 3 * time.Second
 	ipmiStaticTTL      = 5 * time.Minute
-	ipmiLiveTTL        = 5 * time.Second
+	ipmiLiveTTL        = 20 * time.Second
 	ipmiSELTTL         = time.Minute
 	ipmiFailurePause   = 30 * time.Second
 	ipmiHistoryLimit   = 720
@@ -131,19 +137,28 @@ func ipmiBinaryPresent() bool {
 // ipmiRun ma własny krótki timeout. Ogólny runCmd dopuszcza długie operacje
 // administracyjne, ale zawieszone iLO/BMC nie może blokować panelu przez minuty.
 func ipmiRun(args ...string) (string, error) {
+	// All modules share the same gate: older BMCs must not receive concurrent reads.
+	select {
+	case ipmiCommandGate <- struct{}{}:
+	case <-time.After(time.Second): return "", fmt.Errorf("trwa inny odczyt IPMI")
+	}
+	defer func() { <-ipmiCommandGate }()
+	timeout := ipmiCommandTimeout
+	if len(args) >= 2 && args[0] == "sensor" && args[1] == "list" { timeout = 15*time.Second }
+
 	select {
 	case cmdSem <- struct{}{}:
 	case <-time.After(time.Second):
 		return "", fmt.Errorf("kolejka poleceń IPMI jest zajęta")
 	}
 	defer func() { <-cmdSem }()
-	ctx, cancel := context.WithTimeout(context.Background(), ipmiCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ipmitool", args...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return strings.TrimSpace(string(out)), fmt.Errorf("brak odpowiedzi BMC po %s", ipmiCommandTimeout)
+		return strings.TrimSpace(string(out)), fmt.Errorf("brak odpowiedzi BMC po %s", timeout)
 	}
 	return strings.TrimSpace(string(out)), err
 }
@@ -206,31 +221,38 @@ func parseIPMISensorList(out string) []IPMISensor {
 			continue
 		}
 		val, valOK := parseF(f[1])
-		if !valOK {
-			continue
-		}
-
+		kind := ""
+		fanName := strings.Contains(strings.ToLower(name), "fan") || strings.Contains(strings.ToLower(name), "cooling")
 		var unit string
 		switch {
 		case strings.Contains(unitRaw, "degrees"):
 			unit = "°C"
 		case strings.Contains(unitRaw, "RPM"):
 			unit = "RPM"
+			kind = "fan"
 		case strings.Contains(unitRaw, "Volts"):
 			unit = "V"
 		case strings.Contains(unitRaw, "Watts"):
 			unit = "W"
 		case strings.Contains(unitRaw, "Amps"):
 			unit = "A"
+		case fanName && (strings.Contains(strings.ToLower(unitRaw), "percent") || unitRaw == "%"):
+			unit, kind = "%", "fan"
+		case fanName:
+			unit, kind = "stan", "fan"
 		default:
-			continue // pomiń sensory dyskretne (np. "discrete") — nieprzydatne do paska
+			continue
+		}
+		if !valOK || unit == "stan" {
+			sensors = append(sensors, IPMISensor{Name:name, Unit:unit, Kind:kind, Unavailable:!valOK && unit!="stan", Discrete:unit=="stan", RawStatus:f[3], RawValue:f[1]})
+			continue
 		}
 
 		// Pomiń najwyraźniej nieobsadzone/nieaktywne sloty (dokładnie 0.0) —
 		// dotyczy temperatur/napięć/mocy. Dla RPM wartość 0 jest sensownym
 		// odczytem (zatrzymany wentylator) i jest obsługiwana osobno przez
 		// frontend (sensorStatus), więc jej tu nie odrzucamy.
-		if unit != "RPM" && val == 0 {
+		if kind != "fan" && val == 0 {
 			continue
 		}
 
@@ -245,13 +267,16 @@ func parseIPMISensorList(out string) []IPMISensor {
 			if !isPlaceholder(lnc, lncOK) {
 				warn = lnc
 			} else {
-				warn = val * 0.4 // brak progu od producenta — 40% aktualnych obrotów
+				warn = 0 // brak progu producenta
 			}
 			crit = 0
 			max = unr
 			if isPlaceholder(unr, unrOK) {
-				max = val*1.4 + 500
+				max = 0
 			}
+		case "%":
+			max = 100
+			if !isPlaceholder(lnc, lncOK) { warn = lnc }
 		case "°C":
 			// Zweryfikowane na realnym sprzęcie (HP iLO): kolumna "unc" bywa
 			// zaniżona i nie odpowiada niczemu widocznemu w WebUI BMC —
@@ -291,6 +316,7 @@ func parseIPMISensorList(out string) []IPMISensor {
 		sensors = append(sensors, IPMISensor{
 			Name: name, Val: round2(val), Unit: unit,
 			Warn: round2(warn), Crit: round2(crit), Max: round2(max),
+			Kind:kind, RawStatus:f[3], RawValue:f[1],
 		})
 	}
 	return sensors
@@ -575,6 +601,7 @@ func chassisFromOutput(out string) (IPMIChassis, string) {
 func appendIPMIHistory(live ipmiLiveSnapshot) {
 	hottest, fanTotal, fanCount := 0.0, 0.0, 0
 	for _, sensor := range live.Sensors {
+		if sensor.Unavailable || sensor.Discrete { continue }
 		switch sensor.Unit {
 		case "°C":
 			if sensor.Val > hottest {
