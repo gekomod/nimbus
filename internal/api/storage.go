@@ -548,12 +548,14 @@ func parseSSACLIPhysicalDrives(out string) []map[string]interface{} {
 func parseSSACLILogicalDriveDiskNames(out string) map[string]string {
 	result := map[string]string{}
 	var diskName, pdID string
+	pdCount := 0
 
 	flush := func() {
-		if diskName != "" && pdID != "" {
+		if diskName != "" && pdID != "" && pdCount == 1 {
 			result[diskName] = pdID
 		}
 		diskName, pdID = "", ""
+		pdCount = 0
 	}
 
 	for _, raw := range strings.Split(out, "\n") {
@@ -571,10 +573,8 @@ func parseSSACLILogicalDriveDiskNames(out string) map[string]string {
 		}
 		if strings.HasPrefix(line, "physicaldrive ") {
 			fields := strings.Fields(strings.TrimPrefix(line, "physicaldrive "))
-			if len(fields) > 0 && pdID == "" {
-				// Bierzemy pierwszy — dla wolumenów wielodyskowych (RAID1/5/6)
-				// i tak nie ma jednoznacznego "tego jednego" dysku, ale nie
-				// chcemy nadpisywać już znalezionego ID kolejnymi wpisami.
+			if len(fields) > 0 {
+				pdCount++
 				pdID = fields[0]
 			}
 			continue
@@ -663,7 +663,7 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 			}
 			for _, d := range parseSSACLIPhysicalDrives(out) {
 				if id, ok := d["id"].(string); ok && id != "" {
-					pdByID[id] = d
+					pdByID[fmt.Sprintf("%d:%s", slot, id)] = d
 				}
 			}
 		}
@@ -674,7 +674,7 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 				continue
 			}
 			for diskName, pdID := range parseSSACLILogicalDriveDiskNames(out) {
-				if d, ok := pdByID[pdID]; ok {
+				if d, ok := pdByID[fmt.Sprintf("%d:%s", slot, pdID)]; ok {
 					result[diskName] = d
 				}
 			}
@@ -894,7 +894,7 @@ func getSMARTDataUncached(device string, lsblkSerial string) map[string]interfac
 		if expectedSerial != "" {
 			serialIndex := getCachedCcissSerialIndex(devPath)
 			if mode, ok := serialIndex[strings.ToUpper(strings.TrimSpace(expectedSerial))]; ok {
-				if data := trySmartctl(devPath, mode); data != nil {
+				if data := trySmartctl(devPath, mode); smartSerialMatches(data, expectedSerial) {
 					_smartModeCacheMu.Lock()
 					_smartModeCache[device] = mode
 					_smartModeCacheMu.Unlock()
@@ -917,10 +917,10 @@ func getSMARTDataUncached(device string, lsblkSerial string) map[string]interfac
 	// więcej niż jednego fizycznego dysku, gdzie SMART pojedynczego dysku
 	// i tak nie ma jednoznacznego sensu). Ostatnia deska ratunku — sprawdź
 	// numer seryjny z lsblk w tej samej, już zbudowanej tabeli.
-	if lsblkSerial != "" {
+	if lsblkSerial != "" && os.Getenv("NIMBUS_HP_SMART_PROBE") == "1" {
 		serialIndex := getCachedCcissSerialIndex(devPath)
 		if mode, ok := serialIndex[strings.ToUpper(strings.TrimSpace(lsblkSerial))]; ok {
-			if data := trySmartctl(devPath, mode); data != nil {
+			if data := trySmartctl(devPath, mode); smartSerialMatches(data, lsblkSerial) {
 				_smartModeCacheMu.Lock()
 				_smartModeCache[device] = mode
 				_smartModeCacheMu.Unlock()
@@ -929,29 +929,26 @@ func getSMARTDataUncached(device string, lsblkSerial string) map[string]interfac
 		}
 	}
 
-	// 4. Nic się nie dopasowało po numerze seryjnym — ostatnia deska ratunku:
-	// weź pierwszy dostępny wpis z tabeli i WYRAŹNIE oznacz jako niepewny,
-	// żeby UI mogło to zasygnalizować zamiast po cichu pokazywać błędne dane.
-	for _, mode := range getCachedCcissSerialIndex(devPath) {
-		data := trySmartctl(devPath, mode)
-		if data == nil {
-			continue
-		}
-		data["match_confidence"] = "unconfirmed"
-		_smartModeCacheMu.Lock()
-		_smartModeCache[device] = mode
-		_smartModeCacheMu.Unlock()
-		return data
-	}
+	// Bez zgodności numeru seryjnego nie przypisujemy obcego dysku.
 
 	return nil
+}
+
+// Recheck the serial after using a cached controller index: different
+// controllers may use the same cciss,N index for different physical disks.
+func smartSerialMatches(data map[string]interface{}, expected string) bool {
+	actual, _ := data["serial_number"].(string)
+	return strings.TrimSpace(expected) != "" && strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(expected))
 }
 
 // resolveSmartArgs zwraca gotowe argumenty smartctl (z ewentualnym -d) dla
 // danego urządzenia, korzystając z tego samego cache co getSMARTData.
 // Używane przez handlery details/diag/test-status/run-test/sector-details,
 // żeby też działały poprawnie za kontrolerem HP.
-func resolveSmartArgs(device string, baseArgs []string) []string {
+func resolveSmartArgs(device string, baseArgs []string) ([]string, error) {
+	if !storageDeviceName.MatchString(device) || strings.HasPrefix(device, "hp-bay-") {
+		return nil, fmt.Errorf("To urządzenie nie udostępnia bezpośredniego interfejsu smartctl")
+	}
 	devPath := "/dev/" + device
 
 	_smartModeCacheMu.RLock()
@@ -970,18 +967,14 @@ func resolveSmartArgs(device string, baseArgs []string) []string {
 	}
 
 	args := append([]string{}, baseArgs...)
-	// "ssacli" nie jest prawidłowym trybem "-d" dla smartctl — to tylko
-	// wewnętrzny znacznik cache oznaczający "dane pochodzą z ssacli, a nie
-	// z bezpośredniego smartctl". W tym wypadku smartctl i tak nie potrafi
-	// odpytać dysku (stąd trzeba było sięgnąć po ssacli), więc głębsze
-	// operacje smartctl (self-test, sector details) nie zadziałają — nie
-	// dokładamy -d, żeby polecenie zawiodło jawnie zamiast po cichu użyć
-	// błędnego trybu.
+	if mode == "ssacli" {
+		return nil, fmt.Errorf("Dysk jest obsługiwany przez HP Smart Array. Stan jest dostępny z kontrolera; test wymaga potwierdzonego mapowania numeru seryjnego do cciss,N")
+	}
 	if known && mode != "" && mode != "ssacli" {
 		args = append(args, "-d", mode)
 	}
 	args = append(args, devPath)
-	return args
+	return args, nil
 }
 
 // trySmartctl wykonuje smartctl -a [-d mode] -j <devPath> i parsuje wynik.
@@ -1929,17 +1922,36 @@ func (s *Server) handleStorageSMARTDetails(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !storageDeviceName.MatchString(dev) { jsonErr(w,"nieprawidłowe urządzenie",400);return }
-	args := resolveSmartArgs(dev, []string{"-a", "-j"})
+	controllerDisk, mapped := getCachedSSACLIDiskMap()["/dev/"+dev]
+	if mapped && os.Getenv("NIMBUS_HP_SMART_PROBE") != "1" {
+		_smartDataCacheMu.Lock()
+		_smartDataCache[dev] = smartCacheEntry{data:controllerDisk, at:time.Now()}
+		_smartDataCacheMu.Unlock()
+		jsonOK(w, ssacliSMARTJSON(controllerDisk, "/dev/"+dev))
+		return
+	}
+	args, resolveErr := resolveSmartArgs(dev, []string{"-a", "-j"})
+	if resolveErr != nil {
+		if mapped { jsonOK(w, ssacliSMARTJSON(controllerDisk, "/dev/"+dev)); return }
+		jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return
+	}
 	out, err := storageReadCommand("smartctl", args...)
 	summary:=parseStorageSMARTSummary(out)
-	if summary==nil { jsonErr(w,storageCommandError(out,err),502);return }
+	if summary==nil {
+		if strings.Contains(out, "cciss,N") {
+			jsonErr(w, "HP Smart Array wymaga parametru -d cciss,N. Nie znaleziono jednoznacznego mapowania tego urządzenia do dysku fizycznego. Sprawdź dostępność ssacli / hpssacli i szczegóły zatok HP. Indeksu N nie można wyznaczyć z nazwy /dev/"+dev, http.StatusUnprocessableEntity)
+			return
+		}
+		jsonErr(w,storageCommandError(out,err),502);return
+	}
 	_smartDataCacheMu.Lock();_smartDataCache[dev]=smartCacheEntry{data:summary,at:time.Now()};_smartDataCacheMu.Unlock()
 	jsonOK(w, json.RawMessage(out))
 }
 
 func (s *Server) handleStorageSMARTDiag(w http.ResponseWriter, r *http.Request) {
 	dev := pathSuffix(r, "/api/storage/smart/diagnostics/")
-	args := resolveSmartArgs(dev, []string{"-H", "-j"})
+	args, resolveErr := resolveSmartArgs(dev, []string{"-H", "-j"})
+	if resolveErr != nil { jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return }
 	out, _ := storageReadCommand("smartctl", args...)
 	jsonOK(w, json.RawMessage(safeJSON(out)))
 }
@@ -1957,7 +1969,8 @@ func (s *Server) handleStorageSMARTTestStatus(w http.ResponseWriter, r *http.Req
 		jsonErr(w, "dev required", http.StatusBadRequest)
 		return
 	}
-	args := resolveSmartArgs(dev, []string{"-a", "-j"})
+	args, resolveErr := resolveSmartArgs(dev, []string{"-a", "-j"})
+	if resolveErr != nil { jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return }
 	out, _ := storageReadCommand("smartctl", args...)
 
 	var data struct {
@@ -2017,7 +2030,8 @@ func (s *Server) handleStorageSMARTRunTest(w http.ResponseWriter, r *http.Reques
 	dev := strings.TrimPrefix(req.Device, "/dev/")
 
 	if !storageDeviceName.MatchString(dev) || strings.HasPrefix(dev,"hp-bay-") { jsonErr(w,"To urządzenie nie udostępnia testów smartctl; wybierz obsługiwany dysk fizyczny.",400);return }
-	args := resolveSmartArgs(dev, []string{"-j", "-t", testType})
+	args, resolveErr := resolveSmartArgs(dev, []string{"-j", "-t", testType})
+	if resolveErr != nil { jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return }
 	out, err := storageReadCommand("smartctl", args...)
 	var result struct { Smartctl struct { ExitStatus int `json:"exit_status"` } `json:"smartctl"` }
 	if json.Unmarshal([]byte(out),&result)!=nil || result.Smartctl.ExitStatus&7!=0 || (err!=nil && result.Smartctl.ExitStatus==0) {
@@ -2029,7 +2043,8 @@ func (s *Server) handleStorageSMARTRunTest(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleStorageSMARTSectorDetails(w http.ResponseWriter, r *http.Request) {
 	dev := pathSuffix(r, "/api/storage/smart/sector-details/")
-	args := resolveSmartArgs(dev, []string{"-A", "-j"})
+	args, resolveErr := resolveSmartArgs(dev, []string{"-A", "-j"})
+	if resolveErr != nil { jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return }
 	out, _ := storageReadCommand("smartctl", args...)
 	jsonOK(w, json.RawMessage(safeJSON(out)))
 }

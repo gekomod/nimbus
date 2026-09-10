@@ -34,6 +34,7 @@ import './screens-webmail.jsx';
 import './screens-clamav.jsx';
 import './command-palette.jsx';
 import './screens-kvm.jsx';
+import './screens-kvm-workspace.jsx';
 import './screens-network-detail.jsx';
 import './screens-filemanager.jsx';
 import './screens-packages.jsx';

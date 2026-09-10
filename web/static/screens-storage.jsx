@@ -444,9 +444,13 @@ const PART_LABELS = { zfs:'ZFS', ext4:'EXT4', xfs:'XFS', btrfs:'Btrfs', ntfs:'NT
 const DiskGparted = ({disk,onClose}) => <window.StorageDiskDetail disk={disk} onBack={onClose}/>;
 
 // ── Disks list ────────────────────────────────────────────────────────────────
-const DisksList = ({ onSelect, selected }) => {
+const useStorageRescan=()=>{
   const [scanError,setScanError]=React.useState(''),[scanning,setScanning]=React.useState(false);
   const rescan=async()=>{setScanning(true);setScanError('');try{const r=await fetch('/api/storage/rescan',{method:'POST',credentials:'include'});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Skanowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));}catch(e){setScanError(e.message);}finally{setScanning(false);}};
+  return {scanError,scanning,rescan};
+};
+const DisksList = ({ onSelect, selected }) => {
+  const {scanError,scanning,rescan}=useStorageRescan();
   const DISKS = useStore('DISKS') || [];
   const [filter, setFilter] = React.useState('');
   const visible  = DISKS.filter(d => !filter || d.model.toLowerCase().includes(filter.toLowerCase()) || d.bay.includes(filter) || (d.pool||'').includes(filter));
@@ -622,14 +626,16 @@ const stateLabel = {
 };
 
 const UnassignedView = ({ onFormat, onMount }) => {
+  const {scanError,scanning,rescan}=useStorageRescan();
   const UNASSIGNED = useStore('UNASSIGNED_DISKS') || [];
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
+      {scanError&&<div className="storage-alert" role="alert">{scanError}</div>}
       <div className="card">
         <div className="card-head">
           <div>
             <div className="card-title row gap-sm"><span className="dot pulse" style={{color:'var(--accent)'}}/> Wykryte urządzenia</div>
-            <div className="card-sub">Automatyczne wykrywanie nowych dysków · ostatni skan: przed chwilą</div>
+            <div className="card-sub">Urządzenia bez aktywnego montowania · skanowanie na żądanie</div>
           </div>
           <div className="card-actions">
             <button className="btn sm" disabled={scanning} onClick={rescan}><Icon name="refresh" size={12}/> Skanuj teraz</button>

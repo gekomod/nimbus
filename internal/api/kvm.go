@@ -389,7 +389,8 @@ func (s *Server) handleKVMList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pobierz uruchomione VM
-	out, _ := runCmd("virsh", "list", "--all")
+	out, err := runCmd("virsh", "list", "--all")
+	if err != nil { jsonErr(w, "Nie można odczytać maszyn z libvirt: "+out, http.StatusBadGateway); return }
 	vms := parseVirshList(out)
 
 	// Wzbogać dane (równolegle byłoby szybciej, ale dla prostoty sekwencyjnie)
@@ -462,7 +463,7 @@ func (s *Server) handleKVMAction(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if confirmedState == "" { confirmedState = "running" } // zakładamy sukces
+		if confirmedState == "" { confirmedState = vmStateAccurate(req.VM) }
 	} else if req.Action == "stop" {
 		// Graceful shutdown — może trwać długo (gość musi się zamknąć)
 		// Zwróć "shutting_down" — front będzie pollował aż libvirt potwierdzi stopped
@@ -477,9 +478,9 @@ func (s *Server) handleKVMAction(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if confirmedState == "" { confirmedState = "stopped" }
+		if confirmedState == "" { confirmedState = vmStateAccurateAfterStop(req.VM) }
 	} else if req.Action == "pause" {
-		confirmedState = "paused"
+		confirmedState = vmStateAccurate(req.VM)
 	}
 
 	jsonOK(w, map[string]any{"status": "ok", "output": out, "confirmed_state": confirmedState})
@@ -683,7 +684,8 @@ func (s *Server) handleKVMSnapshots(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		out, _ := runCmd("virsh", "snapshot-list", vm, "--name")
+		out, err := runCmd("virsh", "snapshot-list", vm, "--name")
+		if err != nil { jsonErr(w, "Nie można odczytać snapshotów: "+out, http.StatusBadGateway); return }
 		var snaps []VMSnapshot
 		for _, name := range strings.Split(out, "\n") {
 			name = strings.TrimSpace(name)
