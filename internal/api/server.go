@@ -128,6 +128,7 @@ func (s *Server) routes() {
 
 	// storage
 	a("/api/storage/devices", s.handleStorageDevices)
+	a("/api/storage/device-layout", s.handleStorageDeviceLayout)
 	a("/api/storage/debug-devices", s.handleStorageDebugDevices)
 	a("/api/storage/disk-size", s.handleStorageDiskSize)
 	a("/api/storage/check-device", s.handleStorageCheckDevice)

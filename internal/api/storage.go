@@ -16,10 +16,11 @@ import (
 )
 
 func (s *Server) handleStorageDevices(w http.ResponseWriter, r *http.Request) {
-	out, _ := runCmd("lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,RM,RO")
+	out, listErr := storageReadCommand("lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,RM,RO")
+	if listErr != nil { jsonErr(w, "lsblk: "+out+listErr.Error(), 503); return }
 
 	if out == "" {
-		jsonOK(w, map[string]interface{}{"devices": []interface{}{}})
+		jsonErr(w, "lsblk nie zwrócił poprawnej listy urządzeń", 502)
 		return
 	}
 
@@ -28,47 +29,13 @@ func (s *Server) handleStorageDevices(w http.ResponseWriter, r *http.Request) {
 		Blockdevices []map[string]interface{} `json:"blockdevices"`
 	}
 	if err := json.Unmarshal([]byte(out), &lsblkData); err != nil {
-		jsonOK(w, map[string]interface{}{"devices": []interface{}{}})
+		jsonErr(w, "lsblk nie zwrócił poprawnej listy urządzeń", 502)
 		return
 	}
 
-	// Rekurencyjnie zbierz nazwy dysków bazowych których partycje mają mountpoint
-	// np. sda1 zamontowane na "/" -> sda trafia do mountedBases
 	mountedBases := map[string]bool{}
-	var collectMounted func(devs []interface{})
-	collectMounted = func(devs []interface{}) {
-		for _, d := range devs {
-			dm, ok := d.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			mp, _ := dm["mountpoint"].(string)
-			devName, _ := dm["name"].(string)
-			if mp != "" && devName != "" {
-				// Wyciagnij dysk bazowy: sda1->sda, nvme0n1p1->nvme0n1
-				base := strings.TrimRight(devName, "0123456789")
-				if strings.HasSuffix(base, "p") {
-					base = strings.TrimSuffix(base, "p")
-				}
-				mountedBases[base] = true
-				mountedBases[devName] = true
-			}
-			if children, ok := dm["children"].([]interface{}); ok {
-				collectMounted(children)
-			}
-		}
-	}
-	// Wywołaj dla wszystkich blockdevices (ich children to partycje)
 	for _, dev := range lsblkData.Blockdevices {
-		if children, ok := dev["children"].([]interface{}); ok {
-			collectMounted(children)
-		}
-		// Też sprawdz sam dysk
-		if mp, ok := dev["mountpoint"].(string); ok && mp != "" {
-			if n, ok := dev["name"].(string); ok {
-				mountedBases[n] = true
-			}
-		}
+		if blockTreeMounted(dev) { mountedBases[getString(dev,"name")] = true }
 	}
 
 	poolMap := getZFSPoolDiskMapping()
@@ -151,7 +118,7 @@ func (s *Server) handleStorageDevices(w http.ResponseWriter, r *http.Request) {
 
 		// SMART data - tylko dla dysków fizycznych
 		if devType == "disk" {
-			smartData := getSMARTData(name, getString(dev, "serial"))
+			smartData := cachedStorageSMART(name)
 			if smartData != nil {
 				device["temp"] = smartData["temp"]
 				device["hours"] = smartData["hours"]
@@ -654,15 +621,16 @@ func getCachedSSACLIPhysicalDrives() []map[string]interface{} {
 
 func ssacliSMARTJSON(d map[string]interface{}, name string) map[string]interface{} {
 	status, _ := d["status"].(string)
-	return map[string]interface{}{
-		"device":     map[string]interface{}{"name": name, "type": "cciss", "protocol": "HP Smart Array"},
-		"model_name": d["model"], "serial_number": d["serial_number"],
-		"smart_status":         map[string]bool{"passed": status == "passed"},
-		"temperature":          map[string]interface{}{"current": d["temp"]},
-		"power_on_time":        map[string]interface{}{"hours": d["hours"]},
-		"ata_smart_attributes": map[string]interface{}{"table": []interface{}{}},
-		"nimbus_source":        "ssacli",
+	result := map[string]interface{}{
+		"device":map[string]interface{}{"name":name,"type":"cciss","protocol":"HP Smart Array"},
+		"model_name":d["model"],"serial_number":d["serial_number"],
+		"temperature":map[string]interface{}{"current":d["temp"]},
+		"power_on_time":map[string]interface{}{"hours":d["hours"]},
+		"nimbus_source":"ssacli",
 	}
+	if status=="passed" || status=="ok" {result["smart_status"]=map[string]bool{"passed":true}}
+	if status=="warn" || status=="failed" {result["smart_status"]=map[string]bool{"passed":false}}
+	return result
 }
 
 // getCachedSSACLIDiskMap zwraca mapę "/dev/sdX" -> dane fizycznego dysku
@@ -1026,11 +994,15 @@ func trySmartctl(devPath, mode string) map[string]interface{} {
 	}
 	args = append(args, devPath)
 
-	out, _ := runCmd("smartctl", args...)
+	out, _ := storageReadCommand("smartctl", args...)
 	if out == "" {
 		return nil
 	}
 
+	return parseStorageSMARTSummary(out)
+}
+
+func parseStorageSMARTSummary(out string) map[string]interface{} {
 	var smartData map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &smartData); err != nil {
 		return nil
@@ -1058,7 +1030,9 @@ func trySmartctl(devPath, mode string) map[string]interface{} {
 	// inaczej to nie jest prawidłowa odpowiedź z fizycznego dysku.
 	_, hasAta := smartData["ata_smart_attributes"]
 	_, hasNvme := smartData["nvme_smart_health_information_log"]
-	if !hasAta && !hasNvme {
+	_, hasSCSIHealth := smartData["smart_status"]
+	_, hasSCSIDefects := smartData["scsi_grown_defect_list"]
+	if !hasAta && !hasNvme && !hasSCSIHealth && !hasSCSIDefects {
 		return nil
 	}
 
@@ -1112,12 +1086,6 @@ func trySmartctl(devPath, mode string) map[string]interface{} {
 							}
 						}
 					}
-					// Fallback: spróbuj value
-					if result["temp"] == 0.0 {
-						if value, ok := attrMap["value"].(float64); ok {
-							result["temp"] = value
-						}
-					}
 
 				case 9: // Power-On Hours
 					if rawData, ok := attrMap["raw"].(map[string]interface{}); ok {
@@ -1140,6 +1108,13 @@ func trySmartctl(devPath, mode string) map[string]interface{} {
 		if hours, ok := nvmeData["power_on_hours"].(float64); ok {
 			result["hours"] = hours
 		}
+	}
+
+	if temperature, ok := smartData["temperature"].(map[string]interface{}); ok {
+		if value, ok := temperature["current"].(float64); ok { result["temp"] = value }
+	}
+	if power, ok := smartData["power_on_time"].(map[string]interface{}); ok {
+		if value, ok := power["hours"].(float64); ok { result["hours"] = value }
 	}
 
 	return result
@@ -1254,10 +1229,10 @@ func parseFstab(content string) []fstabEntry {
 }
 
 func fstabEntryMatches(entry fstabEntry, device, target, uuid string) bool {
-	if target != "" && filepath.Clean(entry.Target) == filepath.Clean(target) {
+	if target != "" && filepath.Clean(decodeFstabField(entry.Target)) == filepath.Clean(target) {
 		return true
 	}
-	if device != "" && entry.Source == device {
+	if device != "" && decodeFstabField(entry.Source) == device {
 		return true
 	}
 	return uuid != "" && entry.Source == "UUID="+uuid
@@ -1283,7 +1258,7 @@ func updateFstabEntry(content, device, target, uuid, fs, options string, enable 
 		fields := strings.Fields(line)
 		if line != "" && !strings.HasPrefix(line, "#") && len(fields) >= 4 {
 			entry := fstabEntry{Source: fields[0], Target: fields[1], FS: fields[2], Options: fields[3]}
-			if fstabEntryMatches(entry, device, target, uuid) {
+			if (enable && fstabEntryMatches(entry, device, target, uuid)) || (!enable && filepath.Clean(decodeFstabField(entry.Target))==filepath.Clean(target)) {
 				continue
 			}
 		}
@@ -1302,7 +1277,7 @@ func updateFstabEntry(content, device, target, uuid, fs, options string, enable 
 		if options == "" {
 			options = "defaults,nofail"
 		}
-		kept = append(kept, fmt.Sprintf("%s\t%s\t%s\t%s\t0\t2", source, target, fs, options))
+		kept = append(kept, fmt.Sprintf("%s\t%s\t%s\t%s\t0\t2", encodeFstabField(source), encodeFstabField(target), fs, options))
 	}
 	return strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n"
 }
@@ -1455,6 +1430,7 @@ func (s *Server) handleStorageMount(w http.ResponseWriter, r *http.Request) {
 	}
 	uuid, _ := runCmd("blkid", "-s", "UUID", "-o", "value", req.Device)
 	if req.Persist {
+		fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
 		current := readFileStr("/etc/fstab")
 		updated := updateFstabEntry(current, req.Device, req.Target, strings.TrimSpace(uuid), req.FS, req.Options, true)
 		if _, err := saveFstabContent(updated); err != nil {
@@ -1475,15 +1451,17 @@ func (s *Server) handleStorageUnmount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Target string
 		Force  bool
+		Lazy bool
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if json.NewDecoder(r.Body).Decode(&req)!=nil || !filepath.IsAbs(req.Target) || isSystemMountPath(req.Target) {jsonErr(w,"nieprawidłowy lub systemowy punkt montowania",400);return}
 	args := []string{}
+	if req.Lazy {args=append(args,"-l")}
 	if req.Force {
 		args = append(args, "-f")
 	}
 	args = append(args, req.Target)
-	if _, err := runCmd("umount", args...); err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+	if out, err := runCmd("umount", args...); err != nil {
+		jsonErr(w, storageCommandError(out,err), http.StatusInternalServerError)
 		return
 	}
 	invalidateMountsCache()
@@ -1589,6 +1567,7 @@ func (s *Server) handleStorageFstab(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, map[string]any{"entries": entries})
 	case http.MethodPost:
+		fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
 		var req struct {
 			Device string `json:"device"`
 			Target string `json:"target"`
@@ -1624,7 +1603,7 @@ func (s *Server) handleStorageFstab(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(mounted.Device, "/dev/") {
 			uuid, _ = runCmd("blkid", "-s", "UUID", "-o", "value", mounted.Device)
 		}
-		updated := updateFstabEntry(readFileStr("/etc/fstab"), mounted.Device, mounted.MountAt,
+		updated := updateFstabMount(readFileStr("/etc/fstab"), mounted.Device, mounted.MountAt,
 			strings.TrimSpace(uuid), mounted.FS, mounted.Options, req.Enable)
 		if _, err := saveFstabContent(updated); err != nil {
 			code := http.StatusInternalServerError
@@ -1642,7 +1621,9 @@ func (s *Server) handleStorageFstab(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageFstabContent(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]string{"content": readFileStr("/etc/fstab")})
+	content,err := os.ReadFile("/etc/fstab")
+	if err!=nil {jsonErr(w,err.Error(),500);return}
+	jsonOK(w, map[string]string{"content": string(content)})
 }
 
 func (s *Server) handleStorageSaveFstab(w http.ResponseWriter, r *http.Request) {
@@ -1652,12 +1633,17 @@ func (s *Server) handleStorageSaveFstab(w http.ResponseWriter, r *http.Request) 
 	}
 	var req struct {
 		Content string `json:"content"`
+		Original *string `json:"original"`
 		Apply   bool   `json:"apply"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "nieprawidłowe dane", http.StatusBadRequest)
 		return
 	}
+	fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
+	current, readErr := os.ReadFile("/etc/fstab")
+	if readErr!=nil { jsonErr(w,readErr.Error(),500);return }
+	if req.Original!=nil && *req.Original!=string(current) { jsonErr(w,"FSTAB zmienił się od otwarcia edytora. Otwórz go ponownie przed zapisem.",409);return }
 	verifyOutput, err := saveFstabContent(req.Content)
 	if err != nil {
 		code := http.StatusInternalServerError
@@ -1857,20 +1843,19 @@ func (s *Server) handleStorageSMART(w http.ResponseWriter, r *http.Request) {
 			"source": "ssacli",
 		})
 	}
+	hpDisks := getCachedSSACLIDiskMap()
 	for _, dev := range lsblkData.Blockdevices {
 		name := getString(dev, "name")
 		devType := getString(dev, "type")
 		if devType != "disk" {
 			continue
 		}
-		if len(devices) > 0 && strings.HasPrefix(name, "sd") {
+		if len(devices) > 0 && hpDisks["/dev/"+name] != nil {
 			continue
 		}
 		// Sprawdź czy w ogóle da się odpytać SMART (bezpośrednio albo przez cciss,N)
 		smartData := getSMARTData(name, getString(dev, "serial"))
-		if smartData == nil {
-			continue
-		}
+		if smartData == nil { smartData = map[string]interface{}{"status":"unknown"} }
 		protocol := strings.ToUpper(getString(dev, "tran"))
 		if protocol == "" {
 			protocol = "SCSI"
@@ -1920,6 +1905,7 @@ func (s *Server) handleStorageSMARTMonitoring(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleStorageSMARTDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method!=http.MethodGet {jsonErr(w,"method not allowed",405);return}
 	dev := pathSuffix(r, "/api/storage/smart/details/")
 	if strings.HasPrefix(dev, "hp-bay-") {
 		bay, err := strconv.Atoi(strings.TrimPrefix(dev, "hp-bay-"))
@@ -1942,15 +1928,19 @@ func (s *Server) handleStorageSMARTDetails(w http.ResponseWriter, r *http.Reques
 		jsonErr(w, "dysk nie istnieje w Smart Array", 404)
 		return
 	}
+	if !storageDeviceName.MatchString(dev) { jsonErr(w,"nieprawidłowe urządzenie",400);return }
 	args := resolveSmartArgs(dev, []string{"-a", "-j"})
-	out, _ := runCmd("smartctl", args...)
-	jsonOK(w, json.RawMessage(safeJSON(out)))
+	out, err := storageReadCommand("smartctl", args...)
+	summary:=parseStorageSMARTSummary(out)
+	if summary==nil { jsonErr(w,storageCommandError(out,err),502);return }
+	_smartDataCacheMu.Lock();_smartDataCache[dev]=smartCacheEntry{data:summary,at:time.Now()};_smartDataCacheMu.Unlock()
+	jsonOK(w, json.RawMessage(out))
 }
 
 func (s *Server) handleStorageSMARTDiag(w http.ResponseWriter, r *http.Request) {
 	dev := pathSuffix(r, "/api/storage/smart/diagnostics/")
 	args := resolveSmartArgs(dev, []string{"-H", "-j"})
-	out, _ := runCmd("smartctl", args...)
+	out, _ := storageReadCommand("smartctl", args...)
 	jsonOK(w, json.RawMessage(safeJSON(out)))
 }
 
@@ -1968,7 +1958,7 @@ func (s *Server) handleStorageSMARTTestStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 	args := resolveSmartArgs(dev, []string{"-a", "-j"})
-	out, _ := runCmd("smartctl", args...)
+	out, _ := storageReadCommand("smartctl", args...)
 
 	var data struct {
 		ATASelfTest struct {
@@ -2026,19 +2016,21 @@ func (s *Server) handleStorageSMARTRunTest(w http.ResponseWriter, r *http.Reques
 	// Usuń /dev/ jeśli ktoś przekazał pełną ścieżkę
 	dev := strings.TrimPrefix(req.Device, "/dev/")
 
-	args := resolveSmartArgs(dev, []string{"-t", testType})
-	out, err := runCmd("smartctl", args...)
-	if err != nil && out == "" {
-		jsonErr(w, "smartctl error: "+err.Error(), http.StatusInternalServerError)
-		return
+	if !storageDeviceName.MatchString(dev) || strings.HasPrefix(dev,"hp-bay-") { jsonErr(w,"To urządzenie nie udostępnia testów smartctl; wybierz obsługiwany dysk fizyczny.",400);return }
+	args := resolveSmartArgs(dev, []string{"-j", "-t", testType})
+	out, err := storageReadCommand("smartctl", args...)
+	var result struct { Smartctl struct { ExitStatus int `json:"exit_status"` } `json:"smartctl"` }
+	if json.Unmarshal([]byte(out),&result)!=nil || result.Smartctl.ExitStatus&7!=0 || (err!=nil && result.Smartctl.ExitStatus==0) {
+		jsonErr(w,storageCommandError(out,err),502);return
 	}
+
 	jsonOK(w, map[string]any{"status": "started", "type": testType, "device": dev, "output": out})
 }
 
 func (s *Server) handleStorageSMARTSectorDetails(w http.ResponseWriter, r *http.Request) {
 	dev := pathSuffix(r, "/api/storage/smart/sector-details/")
 	args := resolveSmartArgs(dev, []string{"-A", "-j"})
-	out, _ := runCmd("smartctl", args...)
+	out, _ := storageReadCommand("smartctl", args...)
 	jsonOK(w, json.RawMessage(safeJSON(out)))
 }
 
@@ -2098,11 +2090,10 @@ func mountIsDataPool(m sys.MountPoint, systemDevices map[string]bool) bool {
 		strings.HasPrefix(m.Device, "/dev/ram") || strings.EqualFold(m.FS, "zfs") || isSystemMountPath(m.MountAt) {
 		return false
 	}
-	for device := range blockDeviceAncestors(m.Device) {
-		if systemDevices[device] {
-			return false
-		}
-	}
+	device := m.Device
+	if resolved, err := filepath.EvalSymlinks(device); err==nil { device=resolved }
+	if systemDevices[device] { return false }
+
 	return true
 }
 

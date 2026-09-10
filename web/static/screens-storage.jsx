@@ -80,11 +80,12 @@ const Storage = () => {
 
   // Ładuj dane przy mount i co 10s
   const [devices, setDevices] = React.useState([]);
+  const [storageError,setStorageError]=React.useState('');
   React.useEffect(() => {
     const load = () => fetch('/api/storage/devices',{credentials:'include'})
-      .then(r=>r.ok?r.json():null)
+      .then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Nie można odczytać magazynu');return d;})
       .then(data => {
-        if (!data || !data.devices) return;
+        if (!data || !data.devices) return;setStorageError('');
 
         // Niezamontowany dysk z istniejącym FS też musi trafić tutaj — aby dało się go zamontować.
         // has_mounted_parts pochodzi z backendu (storage.go sprawdza children lsblk)
@@ -105,12 +106,13 @@ const Storage = () => {
           type:   d.tran === 'nvme' ? 'NVMe' : d.rota ? 'HDD' : 'SSD',
           temp:   d.temp   || 0,
           hours:  d.hours  || 0,
-          smart:  d.smart  || 'ok',
+          smart:  d.smart  || 'unknown',
           io:     d.io     || 0,
           read:   d.read_mbps  || 0,
           write:  d.write_mbps || 0,
           iops:   d.iops   || 0,
           fs:     d.fs     || '—',
+          mount:d.mount||'', device:d.mount_device||'/dev/'+d.bay,
         })));
         storeSet('UNASSIGNED_DISKS', unassigned.map(d => ({
           bay:      d.bay,
@@ -123,13 +125,14 @@ const Storage = () => {
           device:   d.mount_device || '/dev/'+d.bay,
           hours:    d.hours  || 0,
           detected: 'przed chwilą',
-          smart:    d.smart  || 'ok',
+          smart:    d.smart  || 'unknown',
         })));
         setDevices(data.devices);
-      }).catch(()=>{});
+      }).catch(e=>setStorageError(e.message));
     load();
-    const id = setInterval(load, 30000);
-    return () => clearInterval(id);
+    window.addEventListener('nimbus-storage-changed',load);
+    const id = setInterval(()=>{if(!document.hidden)load();}, 30000);
+    return () => {clearInterval(id);window.removeEventListener('nimbus-storage-changed',load);};
   }, []);
 
   const UNASSIGNED_DISKS = useStore('UNASSIGNED_DISKS') || [];
@@ -137,12 +140,13 @@ const Storage = () => {
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
+      {storageError&&<div className="storage-alert" role="alert">{storageError}</div>}
       {newCount > 0 && tab !== 'unassigned' && (
         <div className="card" style={{borderColor:'color-mix(in oklch, var(--accent) 40%, var(--line))', background:'color-mix(in oklch, var(--accent) 6%, var(--bg-2))'}}>
           <div className="row" style={{padding:'10px 16px',justifyContent:'space-between',gap:12}}>
             <div className="row gap-sm">
               <span className="dot pulse" style={{color:'var(--accent)'}}/>
-              <span style={{fontSize:'var(--fs-sm)'}}>Wykryto <b className="mono">{newCount}</b> nowych urządzeń pamięci masowej, które wymagają działania.</span>
+              <span style={{fontSize:'var(--fs-sm)'}}>Wykryto <b className="mono">{newCount}</b> niezamontowanych urządzeń pamięci masowej.</span>
             </div>
             <button className="btn sm primary" onClick={() => setTab('unassigned')}>Pokaż niezamontowane <Icon name="chevron" size={11}/></button>
           </div>
@@ -189,8 +193,9 @@ const PoolsList = ({ onSelect, onOpenMounts }) => {
       .then(raw=>{ if(raw) storeSet('POOLS', _parsePools(raw)); })
       .catch(()=>{});
     load();
+    window.addEventListener('nimbus-storage-changed',load);
     const id = setInterval(load, 20000);
-    return () => clearInterval(id);
+    return () => {clearInterval(id);window.removeEventListener('nimbus-storage-changed',load);};
   }, []);
 
   return (
@@ -391,10 +396,10 @@ const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
                   <td>{d.model}</td>
                   <td className="mono dim">{d.serial}</td>
                   <td className="mono">{d.size}</td>
-                  <td><span className="mono" style={d.temp > 42 ? {color:'var(--warn)'} : {}}>{d.temp}°C</span></td>
-                  <td className="mono dim">{(d.hours||0).toLocaleString('pl')}</td>
+                  <td><span className="mono" style={d.temp > 42 ? {color:'var(--warn)'} : {}}>{d.temp?d.temp+'°C':'—'}</span></td>
+                  <td className="mono dim">{d.hours?d.hours.toLocaleString('pl'):'—'}</td>
                   <td style={{width:120}}><div className="bar"><i style={{width:(d.io||0)+'%'}}/></div></td>
-                  <td>{d.smart==='warn' ? <span className="badge warn">WARN</span> : <span className="badge ok">PASSED</span>}</td>
+                  <td><window.StorageHealth status={d.smart}/></td>
                 </tr>
               ))}
             </tbody>
@@ -436,216 +441,29 @@ const PART_COLORS = {
 };
 const PART_LABELS = { zfs:'ZFS', ext4:'EXT4', xfs:'XFS', btrfs:'Btrfs', ntfs:'NTFS', exfat:'exFAT', swap:'SWAP', efi:'EFI', free:'Wolne' };
 
-const diskPartitions = (d) => {
-  const gb   = parseFloat(d.size) * (d.size.includes('TB') ? 1000 : 1);
-  const bay  = d.bay || 'sda';
-  // NVMe: nvme0n1 → partycje to nvme0n1p1, nvme0n1p2
-  // SATA/SAS: sda → sda1, sda2
-  const part = (n) => bay.match(/nvme/) ? bay+'p'+n : bay+n;
-  if (d.type === 'NVMe' || d.type === 'SSD') return [
-    { label:part(1), fs:'efi',  size:0.5,         mount:'/boot/efi',           flags:'boot' },
-    { label:part(2), fs:'zfs',  size:gb*0.98,     mount:'['+(d.pool||'?')+']', flags:'zfs_member' },
-    { label:null,    fs:'free', size:gb*0.02-0.5, mount:'—',                   flags:'' },
-  ];
-  const mainFs = d.fs && d.fs !== '—' ? d.fs : 'ext4';
-  const mainMount = d.pool && d.pool !== '—' ? '['+d.pool+']' : (d.mount && d.mount !== '—' ? d.mount : '/mnt/'+bay);
-  return [
-    { label:part(1), fs:mainFs, size:gb*0.9, mount:mainMount, flags:mainFs==='zfs'?'zfs_member':'' },
-    { label:part(2), fs:'swap', size:4,      mount:'[SWAP]',  flags:'swap' },
-    { label:null,    fs:'free', size:gb*0.1-4, mount:'—',     flags:'' },
-  ];
-};
-
-// ── GParted-style disk panel ──────────────────────────────────────────────────
-const DiskGparted = ({ disk, onClose }) => {
-  const [parts, setParts] = React.useState(diskPartitions(disk));
-
-  // Załaduj prawdziwe partycje z lsblk
-  React.useEffect(() => {
-    fetch('/api/storage/exec-command', {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ command: `lsblk -J -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE -b /dev/${disk.bay}` }),
-    })
-    .then(r => r.ok ? r.json() : null)
-    .then(data => {
-      if (!data || !data.output) return;
-      try {
-        const lsblk = JSON.parse(data.output);
-        const topDev = (lsblk.blockdevices || [])[0];
-        if (!topDev) return;
-        const children = topDev.children || [];
-        if (!children.length) return;
-        const totalBytes = parseInt(topDev.size) || 1;
-        const parsed = children.map(p => {
-          const sizeBytes = parseInt(p.size) || 0;
-          const sizeGB = sizeBytes / 1073741824;
-          const fs = (p.fstype || 'free').toLowerCase();
-          return {
-            label: p.name,
-            fs:    fs || 'free',
-            size:  sizeGB,
-            mount: p.mountpoint || '—',
-            flags: '',
-          };
-        });
-        // Dodaj wolne miejsce jeśli jest
-        const usedBytes = children.reduce((s,p) => s + (parseInt(p.size)||0), 0);
-        const freeBytes = (parseInt(topDev.size)||0) - usedBytes;
-        if (freeBytes > 1048576) parsed.push({ label:null, fs:'free', size:freeBytes/1073741824, mount:'—', flags:'' });
-        setParts(parsed);
-      } catch(e) {}
-    }).catch(() => {});
-  }, [disk.bay]);
-
-  const total = parts.reduce((s,p) => s + p.size, 0) || 1;
-  const gbLabel = v => v >= 1000 ? (v/1000).toFixed(1)+' TB' : v >= 1 ? v.toFixed(1)+' GB' : (v*1024).toFixed(0)+' MB';
-
-  return (
-    <div className="card" style={{marginTop:'var(--gutter)'}}>
-      <div className="card-head">
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <DiskIcon type={disk.type} size={36}/>
-          <div>
-            <div className="card-title" style={{fontSize:'var(--fs-base)'}}>{disk.bay} — {disk.model}</div>
-            <div className="card-sub">{disk.serial} · {disk.size} · {disk.type}</div>
-          </div>
-        </div>
-        <div className="card-actions">
-          <button className="btn sm"><Icon name="refresh" size={12}/> Odśwież</button>
-          <button className="btn sm primary">Nowa partycja</button>
-          <button className="icon-btn" onClick={onClose}><Icon name="close"/></button>
-        </div>
-      </div>
-
-      <div style={{padding:'0 20px 20px'}}>
-        {/* GParted bar */}
-        <div style={{display:'flex',height:44,borderRadius:5,overflow:'hidden',border:'1px solid var(--line)',marginBottom:8,boxShadow:'inset 0 1px 4px rgba(0,0,0,0.25)'}}>
-          {parts.map((p,i) => {
-            const w = (p.size/total)*100;
-            const col = PART_COLORS[p.fs] || 'var(--bg-3)';
-            return (
-              <div key={i} style={{width:w+'%',background:col,borderRight:i<parts.length-1?'2px solid var(--bg-1)':'none',display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',position:'relative',minWidth:2}}>
-                {w > 5 && <span style={{fontSize:10,fontWeight:600,color:'#fff',textShadow:'0 1px 3px rgba(0,0,0,0.6)',whiteSpace:'nowrap',padding:'0 4px'}}>{p.label||'wolne'} <span style={{opacity:0.75}}>{PART_LABELS[p.fs]}</span></span>}
-                {p.fs==='free' && <div style={{position:'absolute',inset:0,backgroundImage:'repeating-linear-gradient(-45deg,transparent,transparent 3px,rgba(255,255,255,0.04) 3px,rgba(255,255,255,0.04) 6px)'}}/>}
-              </div>
-            );
-          })}
-        </div>
-
-        <div style={{display:'flex',gap:16,marginBottom:18,flexWrap:'wrap'}}>
-          {parts.map((p,i) => p.fs !== 'free' && (
-            <span key={i} style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--fg-muted)'}}>
-              <span style={{width:10,height:10,borderRadius:2,background:PART_COLORS[p.fs],display:'inline-block'}}/>{p.label} · {PART_LABELS[p.fs]}
-            </span>
-          ))}
-          <span style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--fg-muted)'}}>
-            <span style={{width:10,height:10,borderRadius:2,background:'var(--bg-3)',border:'1px solid var(--line)',display:'inline-block'}}/>Wolne
-          </span>
-        </div>
-
-        <table className="table">
-          <thead><tr><th style={{width:14}}></th><th>Partycja</th><th>System plików</th><th>Punkt montowania</th><th>Rozmiar</th><th>Flagi</th><th></th></tr></thead>
-          <tbody>
-            {parts.map((p,i) => (
-              <tr key={i} style={p.fs==='free'?{opacity:0.55}:{}}>
-                <td><span style={{display:'inline-block',width:10,height:10,borderRadius:2,background:PART_COLORS[p.fs]||'var(--bg-3)',border:'1px solid var(--line)'}}/></td>
-                <td className="mono">{p.label || <span className="dim">—</span>}</td>
-                <td><span className={"chip " + (p.fs==='zfs'?'accent':'')}>{PART_LABELS[p.fs]}</span></td>
-                <td className="mono dim">{p.mount}</td>
-                <td className="mono">{gbLabel(p.size)}</td>
-                <td className="mono dim" style={{fontSize:10}}>{p.flags||'—'}</td>
-                <td>
-                  {p.fs !== 'free'
-                    ? <div style={{display:'flex',gap:4}}><button className="btn ghost sm">Zmień rozmiar</button><button className="btn ghost sm">Sprawdź</button></div>
-                    : <button className="btn sm primary" style={{fontSize:11}}>+ Utwórz</button>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        {/* SMART strip z prawdziwych danych */}
-        <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginTop:16}}>
-          {[
-            {k:'Temperatura',     v:disk.temp+'°C',                    warn:disk.temp>42},
-            {k:'Godziny pracy',   v:(disk.hours||0).toLocaleString('pl'), warn:false},
-            {k:'Realocowane',     v:disk.smart==='warn'?'12':'0',       warn:disk.smart==='warn'},
-            {k:'Niekorektowalne', v:'0',                                 warn:false},
-            {k:'S.M.A.R.T.',      v:disk.smart==='warn'?'WARN':'PASSED',warn:disk.smart==='warn'},
-          ].map((x,i) => (
-            <div key={i} style={{padding:'8px 10px',background:'var(--bg-2)',border:'1px solid '+(x.warn?'color-mix(in oklch,var(--warn) 40%,var(--line))':'var(--line)'),borderRadius:5}}>
-              <div style={{fontSize:9,letterSpacing:'.07em',textTransform:'uppercase',color:'var(--fg-dim)',fontWeight:500}}>{x.k}</div>
-              <div className="mono" style={{fontSize:13,marginTop:2,color:x.warn?'var(--warn)':'var(--fg)'}}>{x.v}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ── Context menu ──────────────────────────────────────────────────────────────
-const DiskMenu = ({ disk }) => {
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef(null);
-  React.useEffect(() => {
-    if (!open) return;
-    const close = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [open]);
-
-  const items = [
-    { label:'Uruchom test S.M.A.R.T.', action: async () => { await fetch('/api/storage/smart/run-extended-test',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:disk.bay})}); }},
-    { label:'Sprawdź system plików',   action: async () => { await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'fsck -n /dev/'+disk.bay})}); }},
-    { label:'─' },
-    { label:'Wysuń dysk', action: async () => { await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'udisksctl power-off -b /dev/'+disk.bay})}); }},
-    { label:'─' },
-    { label:'Usuń wszystkie partycje', danger:true, action: async () => { if(confirm('Usunąć wszystkie partycje na '+disk.bay+'?')) await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'wipefs -a /dev/'+disk.bay})}); }},
-  ];
-
-  return (
-    <div ref={ref} style={{position:'relative'}}>
-      <button className="icon-btn" onClick={e=>{e.stopPropagation();setOpen(o=>!o);}}>
-        <Icon name="more"/>
-      </button>
-      {open && (
-        <div style={{position:'absolute',right:0,top:'100%',zIndex:500,marginTop:4,background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:7,boxShadow:'0 8px 28px rgba(0,0,0,0.35)',minWidth:230,padding:'4px 0'}}>
-          <div style={{padding:'6px 12px 4px',fontSize:10,letterSpacing:'.06em',textTransform:'uppercase',color:'var(--fg-dim)',fontWeight:500}}>{disk.bay} — {disk.model}</div>
-          {items.map((it,i) => it.label==='─'
-            ? <div key={i} style={{height:1,background:'var(--line)',margin:'3px 0'}}/>
-            : <div key={i} onClick={e=>{e.stopPropagation();setOpen(false);it.action&&it.action();}}
-                style={{display:'flex',alignItems:'center',gap:9,padding:'7px 14px',cursor:'pointer',fontSize:'var(--fs-sm)',color:it.danger?'var(--err)':'var(--fg)',transition:'background .1s'}}
-                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-3)'}
-                onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
-                {it.label}
-              </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
+const DiskGparted = ({disk,onClose}) => <window.StorageDiskDetail disk={disk} onBack={onClose}/>;
 
 // ── Disks list ────────────────────────────────────────────────────────────────
 const DisksList = ({ onSelect, selected }) => {
+  const [scanError,setScanError]=React.useState(''),[scanning,setScanning]=React.useState(false);
+  const rescan=async()=>{setScanning(true);setScanError('');try{const r=await fetch('/api/storage/rescan',{method:'POST',credentials:'include'});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Skanowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));}catch(e){setScanError(e.message);}finally{setScanning(false);}};
   const DISKS = useStore('DISKS') || [];
   const [filter, setFilter] = React.useState('');
   const visible  = DISKS.filter(d => !filter || d.model.toLowerCase().includes(filter.toLowerCase()) || d.bay.includes(filter) || (d.pool||'').includes(filter));
   const selDisk  = DISKS.find(d => d.bay === selected);
+  if(selDisk)return <DiskGparted disk={selDisk} onClose={()=>onSelect(null)}/>;
 
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
-      <div className="card">
+      <>{scanError&&<div className="storage-alert" role="alert">{scanError}</div>}<div className="card">
         <div className="card-head">
-          <div className="card-title">Dyski fizyczne</div>
+          <div><div className="card-title">Dyski i urządzenia blokowe</div><div className="card-sub">Urządzenia widoczne w systemie. Stan odczytasz w szczegółach S.M.A.R.T.</div></div>
           <div className="card-actions">
             <div className="topbar-search" style={{flex:'none',width:240}}>
               <Icon name="search" size={12}/>
               <input placeholder="Filtruj..." value={filter} onChange={e=>setFilter(e.target.value)}/>
             </div>
-            <button className="btn sm" onClick={()=>fetch('/api/storage/rescan',{method:'POST',credentials:'include'})}><Icon name="refresh" size={12}/> Skanuj</button>
+            <button className="btn sm" disabled={scanning} onClick={rescan}><Icon name="refresh" size={12}/> Skanuj</button>
           </div>
         </div>
         <div style={{overflow:'auto'}}>
@@ -659,7 +477,7 @@ const DisksList = ({ onSelect, selected }) => {
             <tbody>
               {visible.length === 0 && (
                 <tr><td colSpan={13} style={{textAlign:'center',padding:30,color:'var(--fg-dim)'}}>
-                  {DISKS.length === 0 ? 'Ładowanie dysków…' : 'Brak dysków pasujących do filtra'}
+                  {DISKS.length === 0 ? 'Brak odczytanych dysków' : 'Brak dysków pasujących do filtra'}
                 </td></tr>
               )}
               {visible.map(d => (
@@ -672,18 +490,18 @@ const DisksList = ({ onSelect, selected }) => {
                   <td className="mono dim">{d.serial}</td>
                   <td className="mono">{d.size}</td>
                   <td>{d.pool && d.pool !== '—' ? <span className="chip accent">{d.pool}</span> : <span className="dim">—</span>}</td>
-                  <td><span className="mono" style={d.temp>42?{color:'var(--warn)'}:{}}>{d.temp}°C</span></td>
-                  <td className="mono dim">{(d.hours||0).toLocaleString('pl')}</td>
-                  <td>{d.smart==='warn'?<span className="badge warn">WARN</span>:<span className="badge ok">PASSED</span>}</td>
+                  <td><span className="mono" style={d.temp>42?{color:'var(--warn)'}:{}}>{d.temp?d.temp+'°C':'—'}</span></td>
+                  <td className="mono dim">{d.hours?d.hours.toLocaleString('pl'):'—'}</td>
+                  <td><window.StorageHealth status={d.smart}/></td>
                   <td style={{width:90}}><div className="bar"><i style={{width:Math.min(100,d.io||0)+'%'}}/></div></td>
-                  <td onClick={e=>e.stopPropagation()}><DiskMenu disk={d}/></td>
+                  <td><Icon name="chevron" size={15}/></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
-      {selDisk && <DiskGparted disk={selDisk} onClose={()=>onSelect(null)}/>}
+      </>{selDisk && <DiskGparted disk={selDisk} onClose={()=>onSelect(null)}/>}
     </div>
   );
 };
@@ -697,7 +515,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
   React.useEffect(() => { setMounts(MOUNTS); }, [MOUNTS]);
 
   const loadMounts = React.useCallback(() => fetch('/api/storage/mounts',{credentials:'include'})
-      .then(r=>r.ok?r.json():null)
+      .then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Nie udało się odczytać montowań');return d;})
       .then(raw => {
         if (!Array.isArray(raw)) return;
         const skip = new Set(['tmpfs','devtmpfs','sysfs','proc','cgroup','cgroup2','pstore','securityfs','debugfs','hugetlbfs','mqueue','fusectl','bpf','tracefs']);
@@ -715,13 +533,14 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
         }));
         setMounts(parsed);
         storeSet('MOUNTS', parsed);
-      }).catch(()=>{}), []);
+      }).catch(e=>setError(e.message)), []);
 
   // Odśwież z API co 20s
   React.useEffect(() => {
     loadMounts();
+    window.addEventListener('nimbus-storage-changed',loadMounts);
     const id = setInterval(loadMounts, 20000);
-    return () => clearInterval(id);
+    return () => {clearInterval(id);window.removeEventListener('nimbus-storage-changed',loadMounts);};
   }, [loadMounts]);
 
   const toggleFstab = async (mount) => {
@@ -734,7 +553,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
         body:JSON.stringify({device:mount.device,target:mount.mp,enable:!mount.inFstab})});
       const data = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(data.error||'Nie udało się zmienić wpisu /etc/fstab');
-      await loadMounts();
+      await loadMounts();window.dispatchEvent(new Event('nimbus-storage-changed'));
     } catch(e) {
       setError(e.message);
     } finally {
@@ -813,7 +632,7 @@ const UnassignedView = ({ onFormat, onMount }) => {
             <div className="card-sub">Automatyczne wykrywanie nowych dysków · ostatni skan: przed chwilą</div>
           </div>
           <div className="card-actions">
-            <button className="btn sm" onClick={()=>fetch('/api/storage/rescan',{method:'POST',credentials:'include'})}><Icon name="refresh" size={12}/> Skanuj teraz</button>
+            <button className="btn sm" disabled={scanning} onClick={rescan}><Icon name="refresh" size={12}/> Skanuj teraz</button>
           </div>
         </div>
         <div className="card-body" style={{padding:0}}>
@@ -1094,12 +913,14 @@ const SnapPolicyModal = ({ onClose }) => {
 
 // ── SMART view ────────────────────────────────────────────────────────────────
 const SmartView = () => {
+  const scanning=React.useRef(false);
   const [disks, setDisks] = React.useState([]);
   const [details, setDetails] = React.useState({});
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState('');
 
   const loadDisks = React.useCallback(() => {
+    if(scanning.current)return;scanning.current=true;
 	setLoading(true);setError('');
     return fetch('/api/storage/smart',{credentials:'include'})
       .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można pobrać danych S.M.A.R.T.'); return d; })
@@ -1109,12 +930,12 @@ const SmartView = () => {
         temp:Number(d.temp)||0, hours:Number(d.hours)||0, smart:(d.smart||'unknown').toLowerCase(), source:d.source||'smartctl'
       }))))
       .catch(e=>setError(e.message))
-      .finally(()=>setLoading(false));
+      .finally(()=>{scanning.current=false;setLoading(false);});
   }, []);
 
   React.useEffect(() => {
     loadDisks();
-    const id=setInterval(loadDisks,30000);
+    const id=setInterval(()=>{if(!document.hidden)loadDisks();},30000);
     return()=>clearInterval(id);
   }, [loadDisks]);
 
@@ -1140,7 +961,7 @@ const SmartView = () => {
       {disks.map(d => {
         const det = details[d.bay];
         const attrs = det && det.ata_smart_attributes && det.ata_smart_attributes.table;
-        const getAttr = (id) => attrs ? (attrs.find(a=>a.id===id)||{}).raw?.value || '0' : '—';
+        const getAttr = (id) => attrs ? (attrs.find(a=>a.id===id)||{}).raw?.value ?? '—' : '—';
 		const passed = d.smart==='passed'||d.smart==='ok';
 		const warned = d.smart==='warn'||d.smart==='failed';
         return (
@@ -1266,7 +1087,7 @@ const MountModal = ({ disk, onClose }) => {
       const r=await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({device, target:mp, fs:disk.fs&&disk.fs!=='—'?disk.fs:'', options:opts, persist:auto})});
       const d=await r.json();if(!r.ok)throw new Error(d.error||'Montowanie nie powiodło się');
-      onClose();
+      window.dispatchEvent(new Event('nimbus-storage-changed'));onClose();
     } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
@@ -1296,6 +1117,7 @@ const MountModal = ({ disk, onClose }) => {
 const FstabModal = ({ onClose }) => {
   const FSTAB_TEXT = useStore('FSTAB_TEXT') || '';
   const [text, setText] = React.useState(FSTAB_TEXT);
+  const [original,setOriginal]=React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState('');
@@ -1304,7 +1126,7 @@ const FstabModal = ({ onClose }) => {
   React.useEffect(() => {
     fetch('/api/storage/fstab-content',{credentials:'include'})
       .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można odczytać /etc/fstab'); return d; })
-      .then(d=>{ const content=d.content||''; setText(content); storeSet('FSTAB_TEXT',content); })
+      .then(d=>{ const content=d.content||''; setText(content);setOriginal(content); storeSet('FSTAB_TEXT',content); })
       .catch(e=>setError(e.message))
       .finally(()=>setLoading(false));
   }, []);
@@ -1320,12 +1142,12 @@ const FstabModal = ({ onClose }) => {
     } catch(e) { setError(e.message); } finally { setBusy(false); }
   };
 
-  const save = async () => {
+  const save = async (apply=false) => {
     setBusy(true);setError('');setMessage('');
     try {
-      const response = await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,apply:true})});
+      const response = await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,original,apply})});
       const data = await response.json().catch(()=>({}));
-      if(data.saved) storeSet('FSTAB_TEXT', text);
+      if(data.saved){storeSet('FSTAB_TEXT', text);setOriginal(text.endsWith('\n')?text:text+'\n');window.dispatchEvent(new Event('nimbus-storage-changed'));}
       if(!response.ok) throw new Error(data.error||'Nie udało się zapisać /etc/fstab');
       storeSet('FSTAB_TEXT', text);
       onClose();
@@ -1339,7 +1161,7 @@ const FstabModal = ({ onClose }) => {
         <button className="btn sm" disabled={loading} onClick={async()=>{try{await navigator.clipboard.writeText(text);setMessage('Skopiowano zawartość do schowka.')}catch(e){setError('Nie można skopiować do schowka.')}}}>Kopiuj</button>
         <div style={{flex:1}}/>
         <button className="btn sm ghost" onClick={onClose}>Anuluj</button>
-        <button className="btn sm primary" disabled={busy||loading} onClick={save}>{busy?'Przetwarzanie…':'Zapisz i mount -a'}</button>
+        <button className="btn sm primary" disabled={busy||loading||original===null} onClick={()=>save(false)}>Zapisz</button><button className="btn sm primary" disabled={busy||loading||original===null} onClick={()=>save(true)}>{busy?'Przetwarzanie…':'Zapisz i zamontuj'}</button>
       </>}>
       {error&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',color:'var(--err)',borderRadius:5,marginBottom:10,whiteSpace:'pre-wrap'}}>{error}</div>}
       {message&&<div style={{padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--ok) 35%,var(--line))',color:'var(--ok)',borderRadius:5,marginBottom:10,whiteSpace:'pre-wrap'}}>{message}</div>}
@@ -1421,18 +1243,19 @@ const AddMountModal = ({ onClose }) => {
 // ── Unmount confirm ───────────────────────────────────────────────────────────
 const UnmountConfirm = ({ mount, onClose }) => {
   const [lazy,  setLazy]  = React.useState(false);
+  const [busy,setBusy]=React.useState(false),[error,setError]=React.useState('');
   const [force, setForce] = React.useState(false);
   const cmd = `umount${lazy?' -l':''}${force?' -f':''} ${mount.mp}`;
 
   const doUnmount = async () => {
-    await fetch('/api/storage/unmount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({target:mount.mp, force})}).catch(()=>{});
-    onClose();
+    setBusy(true);setError('');
+    try{const r=await fetch('/api/storage/unmount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:mount.mp,force,lazy})});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Odmontowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));onClose();}catch(e){setError(e.message);}finally{setBusy(false);}
   };
 
   return (
     <Modal title={`Odmontuj ${mount.mp}`} sub={`${mount.device} · ${mount.fs} · ${mount.type}`} onClose={onClose} width={520}
-      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" style={{background:'var(--err)',borderColor:'var(--err)'}} onClick={doUnmount}>Odmontuj</button></>}>
+      footer={<><button className="btn sm ghost" onClick={onClose}>Anuluj</button><button className="btn sm primary" style={{background:'var(--err)',borderColor:'var(--err)'}} disabled={busy} onClick={doUnmount}>{busy?'Odmontowywanie…':'Odmontuj'}</button></>}>
+      {error&&<div className="storage-alert" role="alert">{error}</div>}
       {mount.inFstab && (
         <div style={{padding:'10px 12px',background:'color-mix(in oklch,var(--warn) 8%,var(--bg-2))',border:'1px solid color-mix(in oklch,var(--warn) 35%,var(--line))',borderRadius:5,marginBottom:14,fontSize:'var(--fs-sm)'}}>
           <b style={{color:'var(--warn)'}}>Uwaga:</b> ten punkt jest w /etc/fstab — zostanie odmontowany tylko do restartu.
@@ -2007,3 +1830,7 @@ window.KV      = KV;
 window.Mini    = Mini;
 window.Field   = Field;
 window.Modal   = Modal;
+
+window.StorageMountDialog=MountModal;
+window.StorageUnmountDialog=UnmountConfirm;
+window.StorageFstabDialog=FstabModal;

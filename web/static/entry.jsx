@@ -11,6 +11,7 @@ import './modules.jsx';
 import './shell.jsx';
 import './screens-overview.jsx';
 import './screens-storage.jsx';
+import './screens-storage-detail.jsx';
 import './screens-docker-topology.jsx';
 import './screens-services.jsx';
 import './screens-docker.jsx';
