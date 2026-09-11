@@ -69,7 +69,7 @@ const Mini = ({ label, v }) => (
 
 // ── Storage root ──────────────────────────────────────────────────────────────
 const Storage = () => {
-  const [tab,           setTab]           = React.useState('pools');
+  const [tab,           setTab]           = React.useState('overview');
   const [selectedPool,  setSelectedPool]  = React.useState(null);
   const [selectedDisk,  setSelectedDisk]  = React.useState(null);
   const [formatTarget,  setFormatTarget]  = React.useState(null);
@@ -77,6 +77,8 @@ const Storage = () => {
   const [showFstab,     setShowFstab]     = React.useState(false);
   const [showAddMount,  setShowAddMount]  = React.useState(false);
   const [unmountTarget, setUnmountTarget] = React.useState(null);
+
+  const [showCreatePool,setShowCreatePool]=React.useState(false);
 
   // Ładuj dane przy mount i co 10s
   const [devices, setDevices] = React.useState([]);
@@ -141,7 +143,7 @@ const Storage = () => {
   return (
     <div className="col" style={{gap:'var(--gutter)'}}>
       {storageError&&<div className="storage-alert" role="alert">{storageError}</div>}
-      {newCount > 0 && tab !== 'unassigned' && (
+      {newCount > 0 && tab !== 'unassigned' && tab !== 'overview' && (
         <div className="card" style={{borderColor:'color-mix(in oklch, var(--accent) 40%, var(--line))', background:'color-mix(in oklch, var(--accent) 6%, var(--bg-2))'}}>
           <div className="row" style={{padding:'10px 16px',justifyContent:'space-between',gap:12}}>
             <div className="row gap-sm">
@@ -153,7 +155,8 @@ const Storage = () => {
         </div>
       )}
 
-      <div className="tabs">
+      <div className="tabs" style={{flexWrap:'wrap'}} >
+        <button className={"tab "+(tab==='overview'?'active':'')} onClick={()=>setTab('overview')}>Przegląd magazynu</button>
         <div className={"tab " + (tab==='pools'      ? 'active':'')} onClick={()=>setTab('pools')}>Pule</div>
         <div className={"tab " + (tab==='disks'      ? 'active':'')} onClick={()=>setTab('disks')}>Dyski fizyczne</div>
         <div className={"tab " + (tab==='mounts'     ? 'active':'')} onClick={()=>setTab('mounts')}>Punkty montowania</div>
@@ -166,6 +169,8 @@ const Storage = () => {
         <div className={"tab " + (tab==='leds'       ? 'active':'')} onClick={()=>setTab('leds')}>Zatoki (LED)</div>
       </div>
 
+      {tab==='overview' && <window.StorageWorkspace selected={selectedDisk} onDisk={d=>setSelectedDisk(d?.bay||null)} onNavigate={setTab} onPool={p=>{setSelectedPool(p);setTab('pools')}} onCreate={()=>setShowCreatePool(true)} onMount={()=>setShowAddMount(true)} onFstab={()=>setShowFstab(true)} onFormat={setFormatTarget}/>}
+      {showCreatePool && <CreatePoolModal onClose={()=>setShowCreatePool(false)}/>}
       {tab==='pools'      && (selectedPool ? <PoolDetail pool={selectedPool} onBack={()=>setSelectedPool(null)} onViewSnapshots={()=>setTab('snap')}/> : <PoolsList onSelect={setSelectedPool} onOpenMounts={()=>setTab('mounts')}/>)}
       {tab==='disks'      && <DisksList onSelect={setSelectedDisk} selected={selectedDisk}/>}
       {tab==='mounts'     && <MountsView onEditFstab={()=>setShowFstab(true)} onAdd={()=>setShowAddMount(true)} onUnmount={setUnmountTarget}/>}
