@@ -1,0 +1,5 @@
+# Linux entrypoints must remain executable after a checkout on Windows.
+*.sh text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+services/disc-jobs/nimbus-disc-jobs text eol=lf
