@@ -95,6 +95,7 @@ step "Instalacja zależności systemowych"
 if command -v apt-get &>/dev/null; then
     apt-get update -qq
     apt-get install -y -q \
+        python3 \
         libpam0g \
         smartmontools \
         hdparm \
@@ -355,6 +356,7 @@ fi
 
 # ── Systemd service ───────────────────────────────────────────────────────────
 step "Konfiguracja systemd"
+bash "$SCRIPT_DIR/services/disc-jobs/install.sh"
 
 if [ "$UPDATE" = "1" ] && [ -f /etc/systemd/system/nimbus.service ]; then
     EXISTING_PORT=$(grep "ExecStart=" /etc/systemd/system/nimbus.service \
@@ -382,8 +384,8 @@ cat > /etc/systemd/system/nimbus.service << EOF
 [Unit]
 Description=Nimbus NAS Panel v3.5
 Documentation=https://github.com/gekomod/nimbus
-After=network-online.target
-Wants=network-online.target
+After=network-online.target nimbus-disc-jobs.service
+Wants=network-online.target nimbus-disc-jobs.service
 
 [Service]
 Type=simple

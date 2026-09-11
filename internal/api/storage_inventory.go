@@ -1,12 +1,8 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,14 +13,7 @@ var fstabWriteMu sync.Mutex
 var storageDeviceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 func storageReadCommand(name string, args ...string) (string,error) {
-	select { case cmdSem<-struct{}{}: case <-time.After(time.Second):return "",fmt.Errorf("kolejka odczytów zajęta") }
-	defer func(){<-cmdSem}()
-	ctx,cancel:=context.WithTimeout(context.Background(),15*time.Second);defer cancel()
-	cmd:=exec.CommandContext(ctx,name,args...)
-	cmd.Env=append(os.Environ(),"LC_ALL=C")
-	out,err:=cmd.CombinedOutput()
-	if ctx.Err()!=nil {err=fmt.Errorf("odczyt %s przekroczył 15 sekund",name)}
-	return strings.TrimSpace(string(out)),err
+ return discReadCommand(name,args...)
 }
 
 func storageCommandError(out string,err error) string {

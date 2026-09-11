@@ -1,0 +1,27 @@
+[Unit]
+Description=Nimbus storage operations and durable job queue
+After=local-fs.target
+Before=nimbus.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/sbin/nimbus-disc-jobs
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=nimbus
+RuntimeDirectoryMode=0700
+StateDirectory=nimbus/disc-jobs
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=false
+# Mounts must affect the host; do not enable PrivateMounts/PrivateDevices/PrivateTmp.
+PrivateMounts=false
+PrivateDevices=false
+PrivateTmp=false
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -894,13 +894,22 @@ type ZFSIOStats struct {
 	WriteMB float64 // MB/s zapisu
 }
 
+// StorageCommand is installed by the API before background monitoring starts.
+// Keeping parsing here preserves the response contract without another zpool poller.
+var StorageCommand = func(name string, args ...string) (string, error) {
+ ctx,cancel:=context.WithTimeout(context.Background(),20*time.Second)
+ defer cancel()
+ out,err:=exec.CommandContext(ctx,name,args...).CombinedOutput()
+ return string(out),err
+}
+
 func ZFSPools() ([]ZFSPool, error) {
 	zpoolPath := findZpoolPath()
 	if zpoolPath == "" {
 		return nil, fmt.Errorf("zpool not found")
 	}
 
-	out, err := exec.Command(zpoolPath, "list", "-H", "-o", "name,health,alloc,free,size").Output()
+	out, err := StorageCommand(zpoolPath, "list", "-H", "-o", "name,health,alloc,free,size")
 	if err != nil {
 		return nil, fmt.Errorf("zpool list failed: %w", err)
 	}
@@ -947,9 +956,9 @@ func ZFSPoolIOStats() (map[string]ZFSIOStats, error) {
 		zpoolPath = "/sbin/zpool"
 	}
 
-	out, err := exec.Command(zpoolPath, "iostat", "-Hp", "1", "1").Output()
+	out, err := StorageCommand(zpoolPath, "iostat", "-Hp", "1", "1")
 	if err != nil {
-		out, err = exec.Command(zpoolPath, "iostat", "-H", "1", "1").Output()
+		out, err = StorageCommand(zpoolPath, "iostat", "-H", "1", "1")
 		if err != nil {
 			return nil, err
 		}

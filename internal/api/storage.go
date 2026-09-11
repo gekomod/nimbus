@@ -167,7 +167,7 @@ func getZFSPoolDiskMapping() map[string]string {
 	poolMap := make(map[string]string)
 
 	// Użyj komendy zpool do pobrania listy dysków dla każdej puli
-	pools, _ := runCmd("zpool", "list", "-H", "-o", "name")
+	pools, _ := discReadCommand("zpool", "list", "-H", "-o", "name")
 	if pools == "" {
 		return poolMap
 	}
@@ -178,7 +178,7 @@ func getZFSPoolDiskMapping() map[string]string {
 		}
 
 		// Pobierz szczegółową listę urządzeń dla puli
-		detailOut, _ := runCmd("zpool", "status", "-P", poolName)
+		detailOut, _ := discReadCommand("zpool", "status", "-P", poolName)
 		if detailOut == "" {
 			continue
 		}
@@ -223,11 +223,11 @@ func getZFSPoolDiskMapping() map[string]string {
 // dysk → partycja niezależnie od formatu ścieżki wejściowej.
 func resolveBlockDiskName(devPath string) string {
 	// Jeśli to partycja, PKNAME zwróci nazwę dysku nadrzędnego (np. "sdb")
-	if pk, _ := runCmd("lsblk", "-no", "PKNAME", devPath); pk != "" {
+	if pk, _ := discReadCommand("lsblk", "-no", "PKNAME", devPath); pk != "" {
 		return strings.TrimSpace(pk)
 	}
 	// Nie partycja (cały dysk bez tablicy partycji) — weź nazwę samego urządzenia
-	if nm, _ := runCmd("lsblk", "-no", "NAME", devPath); nm != "" {
+	if nm, _ := discReadCommand("lsblk", "-no", "NAME", devPath); nm != "" {
 		return strings.TrimSpace(nm)
 	}
 	return ""
@@ -239,7 +239,7 @@ func resolveBlockDiskName(devPath string) string {
 func getZFSPoolMountpoints() map[string]string {
 	result := make(map[string]string)
 
-	out, _ := runCmd("zfs", "list", "-H", "-o", "name,mountpoint")
+	out, _ := discReadCommand("zfs", "list", "-H", "-o", "name,mountpoint")
 	if out == "" {
 		return result
 	}
@@ -405,7 +405,7 @@ func findSSACLIControllerSlots() []int {
 	if toolPath == "" {
 		return nil
 	}
-	out, err := ssacliRun(toolPath, "ctrl", "all", "show", "status")
+	out, err := discReadCommand(toolPath, "ctrl", "all", "show", "status")
 	if err != nil || out == "" {
 		return nil
 	}
@@ -608,7 +608,7 @@ func getCachedSSACLIPhysicalDrives() []map[string]interface{} {
 		slots = []int{0}
 	}
 	for _, slot := range slots {
-		out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
+		out, err := discReadCommand(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
 		if err == nil {
 			drives = append(drives, parseSSACLIPhysicalDrives(out)...)
 		}
@@ -657,7 +657,7 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 		}
 
 		for _, slot := range slots {
-			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
+			out, err := discReadCommand(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
 			if err != nil || strings.TrimSpace(out) == "" {
 				continue
 			}
@@ -669,7 +669,7 @@ func getCachedSSACLIDiskMap() map[string]map[string]interface{} {
 		}
 
 		for _, slot := range slots {
-			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
+			out, err := discReadCommand(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
 			if err != nil || strings.TrimSpace(out) == "" {
 				continue
 			}
@@ -959,7 +959,7 @@ func resolveSmartArgs(device string, baseArgs []string) ([]string, error) {
 		// Nie znamy jeszcze trybu — wymuś detekcję (wywoła też cache'owanie).
 		// Potrzebny jest numer seryjny z lsblk, żeby dopasować właściwy
 		// fizyczny dysk za kontrolerem cciss (patrz komentarz w getSMARTData).
-		serial, _ := runCmd("lsblk", "-no", "SERIAL", devPath)
+		serial, _ := discReadCommand("lsblk", "-no", "SERIAL", devPath)
 		getSMARTData(device, strings.TrimSpace(serial))
 		_smartModeCacheMu.RLock()
 		mode, known = _smartModeCache[device]
@@ -1133,8 +1133,8 @@ func getString(m map[string]interface{}, key string) string {
 }
 
 func (s *Server) handleStorageDebugDevices(w http.ResponseWriter, r *http.Request) {
-	lsblk, _ := runCmd("lsblk", "-J", "-a")
-	fdisk, _ := runCmd("fdisk", "-l")
+	lsblk, _ := discReadCommand("lsblk", "-J", "-a")
+	fdisk, _ := discReadCommand("fdisk", "-l")
 	jsonOK(w, map[string]any{"lsblk": json.RawMessage(safeJSON(lsblk)), "fdisk": fdisk})
 }
 
@@ -1144,7 +1144,7 @@ func (s *Server) handleStorageDiskSize(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "device required", http.StatusBadRequest)
 		return
 	}
-	out, err := runCmd("blockdev", "--getsize64", dev)
+	out, err := discReadCommand("blockdev", "--getsize64", dev)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1160,15 +1160,6 @@ func (s *Server) handleStorageCheckDevice(w http.ResponseWriter, r *http.Request
 	}
 	_, err := os.Stat(dev)
 	jsonOK(w, map[string]any{"device": dev, "exists": err == nil, "error": errStr(err)})
-}
-
-func (s *Server) handleStorageRescan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	runCmd("bash", "-c", "for f in /sys/class/scsi_host/*/scan; do echo '- - -' > $f 2>/dev/null; done")
-	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 // Cache dla Mounts — statfs może trwać do 2s, cachuj na 10s
@@ -1281,65 +1272,6 @@ func (e fstabValidationError) Error() string {
 	return "nieprawidłowy fstab: " + strings.TrimSpace(e.output)
 }
 
-func validateFstabContent(content string) (string, error) {
-	tmp, err := os.CreateTemp("", "fstab.nimbus-check-*")
-	if err != nil {
-		return "", err
-	}
-	path := tmp.Name()
-	defer os.Remove(path)
-	if _, err = tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return "", err
-	}
-	if err = tmp.Close(); err != nil {
-		return "", err
-	}
-	out, err := runCmd("findmnt", "--verify", "--verbose", "--tab-file", path)
-	if err != nil {
-		return out, fstabValidationError{output: out}
-	}
-	return out, nil
-}
-
-func saveFstabContent(content string) (string, error) {
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	out, err := validateFstabContent(content)
-	if err != nil {
-		return out, err
-	}
-	tmp, err := os.CreateTemp("/etc", "fstab.nimbus-*")
-	if err != nil {
-		return out, err
-	}
-	path := tmp.Name()
-	defer os.Remove(path)
-	if _, err = tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return out, err
-	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return out, err
-	}
-	if err = tmp.Close(); err != nil {
-		return out, err
-	}
-	if err = os.Chmod(path, 0644); err != nil {
-		return out, err
-	}
-	current := readFileStr("/etc/fstab")
-	if err = os.WriteFile("/etc/fstab.nimbus-backup", []byte(current), 0644); err != nil {
-		return out, fmt.Errorf("nie można utworzyć kopii fstab: %w", err)
-	}
-	if err = os.Rename(path, "/etc/fstab"); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
 func invalidateMountsCache() {
 	_mountsCacheMu.Lock()
 	_mountsCacheTime = time.Time{}
@@ -1357,7 +1289,7 @@ func (s *Server) handleMounts(w http.ResponseWriter, r *http.Request) {
 		}
 		uuid := ""
 		if strings.HasPrefix(m.Device, "/dev/") {
-			uuid, _ = runCmd("blkid", "-s", "UUID", "-o", "value", m.Device)
+			uuid, _ = discReadCommand("blkid", "-s", "UUID", "-o", "value", m.Device)
 		}
 		inFstab := fstabHasMount(entries, m.Device, m.MountAt, strings.TrimSpace(uuid))
 		result = append(result, map[string]any{
@@ -1370,184 +1302,8 @@ func (s *Server) handleMounts(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, result)
 }
 
-func (s *Server) handleStorageMount(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Device  string `json:"device"`
-		Target  string `json:"target"`
-		FS      string `json:"fs"`
-		Options string `json:"options"`
-		Persist bool   `json:"persist"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Device == "" || req.Target == "" {
-		jsonErr(w, "device and target required", http.StatusBadRequest)
-		return
-	}
-	req.Device = strings.TrimSpace(req.Device)
-	req.Target = filepath.Clean(strings.TrimSpace(req.Target))
-	if !strings.HasPrefix(req.Device, "/dev/") || strings.Contains(req.Device, "..") {
-		jsonErr(w, "dozwolone są wyłącznie lokalne urządzenia /dev/...", http.StatusBadRequest)
-		return
-	}
-	if req.Target == "/" || !strings.HasPrefix(req.Target, "/mnt/") {
-		jsonErr(w, "punkt montowania musi znajdować się w /mnt/", http.StatusBadRequest)
-		return
-	}
-	if _, err := os.Stat(req.Device); err != nil {
-		jsonErr(w, "urządzenie nie istnieje: "+req.Device, http.StatusBadRequest)
-		return
-	}
-	if out, _ := runCmd("findmnt", "-rn", "-S", req.Device); out != "" {
-		jsonErr(w, "urządzenie jest już zamontowane: "+out, http.StatusConflict)
-		return
-	}
-	if err := os.MkdirAll(req.Target, 0755); err != nil {
-		jsonErr(w, "nie można utworzyć punktu montowania: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	args := []string{}
-	if req.FS != "" {
-		args = append(args, "-t", req.FS)
-	}
-	if req.Options != "" {
-		args = append(args, "-o", req.Options)
-	}
-	args = append(args, req.Device, req.Target)
-	if out, err := runCmd("mount", args...); err != nil {
-		_ = os.Remove(req.Target)
-		jsonErr(w, "mount: "+strings.TrimSpace(out), http.StatusInternalServerError)
-		return
-	}
-	uuid, _ := runCmd("blkid", "-s", "UUID", "-o", "value", req.Device)
-	if req.Persist {
-		fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
-		current := readFileStr("/etc/fstab")
-		updated := updateFstabEntry(current, req.Device, req.Target, strings.TrimSpace(uuid), req.FS, req.Options, true)
-		if _, err := saveFstabContent(updated); err != nil {
-			runCmd("umount", req.Target)
-			jsonErr(w, "zamontowano, ale zapis fstab nie powiódł się: "+err.Error(), 500)
-			return
-		}
-	}
-	invalidateMountsCache()
-	jsonOK(w, map[string]string{"status": "ok", "device": req.Device, "target": req.Target, "uuid": strings.TrimSpace(uuid)})
-}
-
-func (s *Server) handleStorageUnmount(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Target string
-		Force  bool
-		Lazy bool
-	}
-	if json.NewDecoder(r.Body).Decode(&req)!=nil || !filepath.IsAbs(req.Target) || isSystemMountPath(req.Target) {jsonErr(w,"nieprawidłowy lub systemowy punkt montowania",400);return}
-	args := []string{}
-	if req.Lazy {args=append(args,"-l")}
-	if req.Force {
-		args = append(args, "-f")
-	}
-	args = append(args, req.Target)
-	if out, err := runCmd("umount", args...); err != nil {
-		jsonErr(w, storageCommandError(out,err), http.StatusInternalServerError)
-		return
-	}
-	invalidateMountsCache()
-	jsonOK(w, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleStorageFormat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct{ Device, FS, Label string }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Device == "" {
-		jsonErr(w, "device required", http.StatusBadRequest)
-		return
-	}
-	if req.FS == "" {
-		req.FS = "ext4"
-	}
-	req.Device = strings.TrimSpace(req.Device)
-	if !strings.HasPrefix(req.Device, "/dev/") || strings.Contains(req.Device, "..") {
-		jsonErr(w, "nieprawidłowe urządzenie", http.StatusBadRequest)
-		return
-	}
-	if out, err := runCmd("lsblk", "-dn", "-o", "TYPE", req.Device); err != nil || strings.TrimSpace(out) == "" {
-		jsonErr(w, "urządzenie blokowe nie istnieje: "+req.Device, http.StatusBadRequest)
-		return
-	}
-	if out, _ := runCmd("lsblk", "-nr", "-o", "MOUNTPOINT", req.Device); strings.TrimSpace(out) != "" {
-		jsonErr(w, "nie można formatować urządzenia ani dysku z zamontowaną partycją: "+strings.TrimSpace(out), http.StatusConflict)
-		return
-	}
-
-	// ZFS to zupełnie inna operacja niż mkfs.* — tworzy pulę (zpool create),
-	// która montuje się automatycznie, więc obsługujemy to osobno i wracamy
-	// od razu (bez późniejszego kroku "mount", o który poprosi front dla
-	// klasycznych systemów plików).
-	if req.FS == "zfs" {
-		label := req.Label
-		if label == "" {
-			label = strings.TrimPrefix(req.Device, "/dev/")
-		}
-		out, err := runCmd("zpool", "create", "-f", "-o", "ashift=12", label, req.Device)
-		if err != nil {
-			jsonErr(w, "zpool create failed: "+out+" "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		jsonOK(w, map[string]string{"status": "ok", "pool": label})
-		return
-	}
-
-	var args []string
-	switch req.FS {
-	case "ext4", "ext3", "ext2":
-		args = []string{"mkfs." + req.FS, "-F"}
-		if req.Label != "" {
-			args = append(args, "-L", req.Label)
-		}
-		args = append(args, req.Device)
-	case "xfs":
-		args = []string{"mkfs.xfs", "-f"}
-		if req.Label != "" {
-			args = append(args, "-L", req.Label)
-		}
-		args = append(args, req.Device)
-	case "btrfs":
-		args = []string{"mkfs.btrfs", "-f"}
-		if req.Label != "" {
-			args = append(args, "-L", req.Label)
-		}
-		args = append(args, req.Device)
-	case "fat32", "vfat":
-		args = []string{"mkfs.fat", "-F", "32", req.Device}
-	case "exfat":
-		args = []string{"mkfs.exfat"}
-		if req.Label != "" {
-			args = append(args, "-n", req.Label)
-		}
-		args = append(args, req.Device)
-	case "ntfs":
-		args = []string{"mkfs.ntfs", "-f", req.Device}
-	default:
-		jsonErr(w, "unsupported fs: "+req.FS, http.StatusBadRequest)
-		return
-	}
-	if out, err := runCmd(args[0], args[1:]...); err != nil {
-		jsonErr(w, strings.TrimSpace(out), http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]string{"status": "ok"})
-}
-
 func (s *Server) handleStorageFstab(w http.ResponseWriter, r *http.Request) {
+ if r.Method==http.MethodPost { s.discOperation("fstab.toggle")(w,r); return }
 	switch r.Method {
 	case http.MethodGet:
 		parsed := parseFstab(readFileStr("/etc/fstab"))
@@ -1559,129 +1315,17 @@ func (s *Server) handleStorageFstab(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		jsonOK(w, map[string]any{"entries": entries})
-	case http.MethodPost:
-		fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
-		var req struct {
-			Device string `json:"device"`
-			Target string `json:"target"`
-			Enable bool   `json:"enable"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonErr(w, "nieprawidłowe dane", http.StatusBadRequest)
-			return
-		}
-		req.Device = strings.TrimSpace(req.Device)
-		req.Target = filepath.Clean(strings.TrimSpace(req.Target))
-		if req.Device == "" || req.Target == "." || isSystemMountPath(req.Target) {
-			jsonErr(w, "wymagane urządzenie i niesystemowy punkt montowania", http.StatusBadRequest)
-			return
-		}
-		var mounted *sys.MountPoint
-		for _, mount := range cachedMounts() {
-			if mount.Device == req.Device && filepath.Clean(mount.MountAt) == req.Target {
-				copy := mount
-				mounted = &copy
-				break
-			}
-		}
-		if mounted == nil {
-			jsonErr(w, "punkt montowania nie jest aktywny", http.StatusNotFound)
-			return
-		}
-		if strings.EqualFold(mounted.FS, "zfs") {
-			jsonErr(w, "montowania ZFS są zarządzane przez właściwość mountpoint puli", http.StatusBadRequest)
-			return
-		}
-		uuid := ""
-		if strings.HasPrefix(mounted.Device, "/dev/") {
-			uuid, _ = runCmd("blkid", "-s", "UUID", "-o", "value", mounted.Device)
-		}
-		updated := updateFstabMount(readFileStr("/etc/fstab"), mounted.Device, mounted.MountAt,
-			strings.TrimSpace(uuid), mounted.FS, mounted.Options, req.Enable)
-		if _, err := saveFstabContent(updated); err != nil {
-			code := http.StatusInternalServerError
-			if _, ok := err.(fstabValidationError); ok {
-				code = http.StatusBadRequest
-			}
-			jsonErr(w, err.Error(), code)
-			return
-		}
-		invalidateMountsCache()
-		jsonOK(w, map[string]any{"status": "ok", "in_fstab": req.Enable})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleStorageFstabContent(w http.ResponseWriter, r *http.Request) {
-	content,err := os.ReadFile("/etc/fstab")
-	if err!=nil {jsonErr(w,err.Error(),500);return}
-	jsonOK(w, map[string]string{"content": string(content)})
-}
-
-func (s *Server) handleStorageSaveFstab(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Content string `json:"content"`
-		Original *string `json:"original"`
-		Apply   bool   `json:"apply"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "nieprawidłowe dane", http.StatusBadRequest)
-		return
-	}
-	fstabWriteMu.Lock(); defer fstabWriteMu.Unlock()
-	current, readErr := os.ReadFile("/etc/fstab")
-	if readErr!=nil { jsonErr(w,readErr.Error(),500);return }
-	if req.Original!=nil && *req.Original!=string(current) { jsonErr(w,"FSTAB zmienił się od otwarcia edytora. Otwórz go ponownie przed zapisem.",409);return }
-	verifyOutput, err := saveFstabContent(req.Content)
-	if err != nil {
-		code := http.StatusInternalServerError
-		if _, ok := err.(fstabValidationError); ok {
-			code = http.StatusBadRequest
-		}
-		jsonErr(w, err.Error(), code)
-		return
-	}
-	invalidateMountsCache()
-	result := map[string]any{"status": "ok", "saved": true, "applied": false, "verify_output": verifyOutput}
-	if req.Apply {
-		out, applyErr := runCmd("mount", "-a")
-		result["output"] = out
-		if applyErr != nil {
-			result["error"] = "fstab zapisano, ale mount -a nie powiodło się: " + strings.TrimSpace(out)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_ = json.NewEncoder(w).Encode(result)
-			return
-		}
-		result["applied"] = true
-		invalidateMountsCache()
-	}
-	jsonOK(w, result)
+ discRead(w,r,"fstab.content")
 }
 
 func (s *Server) handleStorageFstabCheck(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		out, err := runCmd("findmnt", "--verify", "--verbose")
-		jsonOK(w, map[string]any{"output": out, "ok": err == nil})
-	case http.MethodPost:
-		var req struct {
-			Content string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonErr(w, "nieprawidłowe dane", http.StatusBadRequest)
-			return
-		}
-		out, err := validateFstabContent(req.Content)
-		jsonOK(w, map[string]any{"output": out, "ok": err == nil})
-	default:
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
+ discRead(w,r,"fstab.check")
 }
 
 func (s *Server) handleStorageExecCommand(w http.ResponseWriter, r *http.Request) {
@@ -1721,28 +1365,19 @@ func (s *Server) handleListDirectories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageLVM(w http.ResponseWriter, r *http.Request) {
-	pvs, _ := runCmd("pvs", "--reportformat", "json")
-	vgs, _ := runCmd("vgs", "--reportformat", "json")
+	pvs, _ := discReadCommand("pvs", "--reportformat", "json")
+	vgs, _ := discReadCommand("vgs", "--reportformat", "json")
 	jsonOK(w, map[string]any{"pvs": json.RawMessage(safeJSON(pvs)), "vgs": json.RawMessage(safeJSON(vgs))})
 }
 
 func (s *Server) handleStorageLVMVolumes(w http.ResponseWriter, r *http.Request) {
-	out, _ := runCmd("lvs", "--reportformat", "json")
+	out, _ := discReadCommand("lvs", "--reportformat", "json")
 	jsonOK(w, json.RawMessage(safeJSON(out)))
-}
-
-func (s *Server) handleStorageScanLVM(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	out, err := runCmd("vgscan")
-	jsonOK(w, map[string]any{"output": out, "ok": err == nil})
 }
 
 func (s *Server) handleStorageRAID(w http.ResponseWriter, r *http.Request) {
 	mdstat, _ := runCmd("cat", "/proc/mdstat")
-	detail, _ := runCmd("mdadm", "--detail", "--scan")
+	detail, _ := discReadCommand("mdadm", "--detail", "--scan")
 	jsonOK(w, map[string]any{"mdstat": mdstat, "details": detail})
 }
 
@@ -1754,48 +1389,6 @@ func (s *Server) handleStorageRAIDStart(w http.ResponseWriter, r *http.Request) 
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleStorageScanRAID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	out, err := runCmd("mdadm", "--examine", "--scan")
-	jsonOK(w, map[string]any{"output": out, "ok": err == nil})
-}
-
-func (s *Server) handleStorageCreateRAID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Name    string   `json:"name"`
-		Level   string   `json:"level"`
-		Devices []string `json:"devices"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Devices) == 0 {
-		jsonErr(w, "devices required", http.StatusBadRequest)
-		return
-	}
-	if req.Name == "" {
-		req.Name = "/dev/md0"
-	}
-	if req.Level == "" {
-		req.Level = "5"
-	}
-	ndev := len(req.Devices)
-	args := append([]string{"--create", req.Name, "--level", req.Level, "--raid-devices", strings.TrimSpace(strings.Repeat("x", ndev)[:1])}, req.Devices...)
-	// Prostsze: użyj strconv
-	args = []string{"--create", req.Name, "--level", req.Level, "--raid-devices", string(rune('0' + ndev))}
-	args = append(args, req.Devices...)
-	out, err := runCmd("mdadm", args...)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]any{"status": "ok", "output": out})
-}
-
 // handleStorageSMART zwraca listę dysków dla zakładki S.M.A.R.T. we frontendzie.
 // Nie polegamy na "smartctl --scan" — na kontrolerach HP (cciss/hpsa) bywa
 // zawodne (zdarza się, że nie wykrywa poprawnie dysków wymagających -d cciss,N,
@@ -1804,7 +1397,7 @@ func (s *Server) handleStorageCreateRAID(w http.ResponseWriter, r *http.Request)
 // i filtrujemy tylko te dyski, dla których faktycznie udaje się odczytać SMART
 // (bezpośrednio albo przez auto-wykryty tryb cciss,N — patrz getSMARTData/resolveSmartArgs).
 func (s *Server) handleStorageSMART(w http.ResponseWriter, r *http.Request) {
-	out, _ := runCmd("lsblk", "-J", "-o", "NAME,TYPE,SERIAL,MODEL,TRAN,ROTA,SIZE")
+	out, _ := discReadCommand("lsblk", "-J", "-o", "NAME,TYPE,SERIAL,MODEL,TRAN,ROTA,SIZE")
 
 	var lsblkData struct {
 		Blockdevices []map[string]interface{} `json:"blockdevices"`
@@ -2032,13 +1625,9 @@ func (s *Server) handleStorageSMARTRunTest(w http.ResponseWriter, r *http.Reques
 	if !storageDeviceName.MatchString(dev) || strings.HasPrefix(dev,"hp-bay-") { jsonErr(w,"To urządzenie nie udostępnia testów smartctl; wybierz obsługiwany dysk fizyczny.",400);return }
 	args, resolveErr := resolveSmartArgs(dev, []string{"-j", "-t", testType})
 	if resolveErr != nil { jsonErr(w, resolveErr.Error(), http.StatusUnprocessableEntity); return }
-	out, err := storageReadCommand("smartctl", args...)
-	var result struct { Smartctl struct { ExitStatus int `json:"exit_status"` } `json:"smartctl"` }
-	if json.Unmarshal([]byte(out),&result)!=nil || result.Smartctl.ExitStatus&7!=0 || (err!=nil && result.Smartctl.ExitStatus==0) {
-		jsonErr(w,storageCommandError(out,err),502);return
-	}
-
-	jsonOK(w, map[string]any{"status": "started", "type": testType, "device": dev, "output": out})
+ mode := ""
+ for i,arg := range args { if arg=="-d" && i+1<len(args) { mode=args[i+1] } }
+ s.submitDiscJob(w,r,map[string]any{"operation":"smart.test","device":"/dev/"+dev,"type":testType,"mode":mode})
 }
 
 func (s *Server) handleStorageSMARTSectorDetails(w http.ResponseWriter, r *http.Request) {
@@ -2065,7 +1654,7 @@ func blockDeviceAncestors(device string) map[string]bool {
 	if resolved, err := filepath.EvalSymlinks(device); err == nil {
 		device = resolved
 	}
-	out, err := runCmd("lsblk", "-snro", "PATH", device)
+	out, err := discReadCommand("lsblk", "-snro", "PATH", device)
 	if err != nil {
 		result[device] = true
 		return result
@@ -2079,7 +1668,7 @@ func blockDeviceAncestors(device string) map[string]bool {
 }
 
 func systemStorageDevices() map[string]bool {
-	source, err := runCmd("findmnt", "-nro", "SOURCE", "/")
+	source, err := discReadCommand("findmnt", "-nro", "SOURCE", "/")
 	if err != nil {
 		return map[string]bool{}
 	}
@@ -2113,7 +1702,7 @@ func mountIsDataPool(m sys.MountPoint, systemDevices map[string]bool) bool {
 }
 
 func systemZFSPool() string {
-	out, err := runCmd("findmnt", "-nro", "SOURCE,FSTYPE", "/")
+	out, err := discReadCommand("findmnt", "-nro", "SOURCE,FSTYPE", "/")
 	if err != nil {
 		return ""
 	}
@@ -2125,7 +1714,7 @@ func systemZFSPool() string {
 }
 
 func mountedPoolName(m sys.MountPoint) string {
-	if label, err := runCmd("lsblk", "-dnro", "LABEL", m.Device); err == nil && strings.TrimSpace(label) != "" {
+	if label, err := discReadCommand("lsblk", "-dnro", "LABEL", m.Device); err == nil && strings.TrimSpace(label) != "" {
 		return strings.TrimSpace(label)
 	}
 	if name := filepath.Base(filepath.Clean(m.MountAt)); name != "." && name != "/" && name != "" {
@@ -2227,10 +1816,11 @@ func (s *Server) handleZFSPools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleZFSSnapshots(w http.ResponseWriter, r *http.Request) {
+ if r.Method==http.MethodPost { s.discOperation("zfs.snapshot")(w,r); return }
 	switch r.Method {
 	case http.MethodGet:
 		// Pobierz listę migawek
-		out, err := runCmd("zfs", "list", "-H", "-t", "snapshot", "-o", "name,used,creation")
+		out, err := discReadCommand("zfs", "list", "-H", "-t", "snapshot", "-o", "name,used,creation")
 		if err != nil {
 			jsonOK(w, map[string]any{"snapshots": []any{}})
 			return
@@ -2261,92 +1851,13 @@ func (s *Server) handleZFSSnapshots(w http.ResponseWriter, r *http.Request) {
 
 		jsonOK(w, map[string]any{"snapshots": snaps})
 
-	case http.MethodPost:
-		// Utwórz migawkę
-		var req struct {
-			Dataset   string `json:"dataset"`
-			Name      string `json:"name"`
-			Recursive bool   `json:"recursive"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-
-		if req.Dataset == "" || req.Name == "" {
-			jsonErr(w, "dataset and name required", http.StatusBadRequest)
-			return
-		}
-
-		snapName := req.Dataset + "@" + req.Name
-		args := []string{"snapshot"}
-		if req.Recursive {
-			args = append(args, "-r")
-		}
-		args = append(args, snapName)
-
-		_, err := runCmd("zfs", args...)
-		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		jsonOK(w, map[string]string{"status": "ok", "snapshot": snapName})
-
-	default:
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleZFSSnapshotAction(w http.ResponseWriter, r *http.Request) {
-	// Pobierz nazwę migawki z URL
-	snapName := strings.TrimPrefix(r.URL.Path, "/api/zfs/snapshots/")
-	if snapName == "" {
-		jsonErr(w, "snapshot name required", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodDelete:
-		_, err := runCmd("zfs", "destroy", snapName)
-		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		jsonOK(w, map[string]string{"status": "ok"})
-
-	case http.MethodPost:
-		var req struct {
-			Action string `json:"action"` // rollback, clone
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-
-		switch req.Action {
-		case "rollback":
-			_, err := runCmd("zfs", "rollback", "-r", snapName)
-			if err != nil {
-				jsonErr(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			jsonOK(w, map[string]string{"status": "ok"})
-
-		case "clone":
-			cloneName := strings.Replace(snapName, "@", "-clone-", 1)
-			_, err := runCmd("zfs", "clone", snapName, cloneName)
-			if err != nil {
-				jsonErr(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			jsonOK(w, map[string]any{"status": "ok", "clone": cloneName})
-
-		default:
-			jsonErr(w, "unknown action", http.StatusBadRequest)
-		}
-
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleZFSDatasets(w http.ResponseWriter, r *http.Request) {
-	out, err := runCmd("zfs", "list", "-H", "-o", "name,mountpoint")
+	out, err := discReadCommand("zfs", "list", "-H", "-o", "name,mountpoint")
 	if err != nil {
 		jsonOK(w, map[string]any{"datasets": []any{}, "datasets_full": []any{}})
 		return
@@ -2401,92 +1912,6 @@ func (s *Server) handleZFSSnapPolicy(w http.ResponseWriter, r *http.Request) {
 // ─── ZFS Pool Create ──────────────────────────────────────────────────────────
 
 // POST /api/zfs/pool/create
-func (s *Server) handleZFSPoolCreate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Backend  string   `json:"backend"`   // "zfs", "mdadm", "lvm"
-		RaidType string   `json:"raid_type"` // "raidz2", "mirror", "raid5" etc.
-		Name     string   `json:"name"`
-		Disks    []string `json:"disks"`
-		Ashift   int      `json:"ashift"`
-		Compress string   `json:"compress"`
-		Dedup    bool     `json:"dedup"`
-		Encrypt  bool     `json:"encrypt"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Name == "" || len(req.Disks) == 0 {
-		jsonErr(w, "name and disks required", http.StatusBadRequest)
-		return
-	}
-
-	var args []string
-	var out string
-	var err error
-
-	switch req.Backend {
-	case "mdadm":
-		level := strings.TrimPrefix(req.RaidType, "raid")
-		devs := make([]string, len(req.Disks))
-		for i, d := range req.Disks {
-			devs[i] = "/dev/" + d
-		}
-		args = append([]string{
-			"--create", "/dev/md0",
-			"--level=" + level,
-			fmt.Sprintf("--raid-devices=%d", len(req.Disks)),
-			"--run",
-		}, devs...)
-		out, err = runCmd("mdadm", args...)
-
-	case "lvm":
-		devs := make([]string, len(req.Disks))
-		for i, d := range req.Disks {
-			devs[i] = "/dev/" + d
-		}
-		args = append([]string{req.Name}, devs...)
-		out, err = runCmd("vgcreate", args...)
-
-	default: // zfs
-		ashift := req.Ashift
-		if ashift == 0 {
-			ashift = 12
-		}
-		compress := req.Compress
-		if compress == "" {
-			compress = "lz4"
-		}
-		baseArgs := []string{
-			"create", "-f",
-			"-o", fmt.Sprintf("ashift=%d", ashift),
-			"-O", "compression=" + compress,
-			"-O", "atime=off",
-		}
-		if req.Dedup {
-			baseArgs = append(baseArgs, "-O", "dedup=on")
-		}
-		baseArgs = append(baseArgs, req.Name)
-
-		// raidz / mirror topology
-		raidType := req.RaidType
-		if raidType != "" && raidType != "stripe" {
-			baseArgs = append(baseArgs, raidType)
-		}
-		baseArgs = append(baseArgs, req.Disks...)
-		out, err = runCmd("zpool", baseArgs...)
-	}
-
-	if err != nil {
-		jsonOK(w, map[string]any{"ok": false, "error": out})
-		return
-	}
-	jsonOK(w, map[string]any{"ok": true, "output": out})
-}
 
 // Nowa funkcja pomocnicza
 // ─── ZFS I/O stats — background poller ──────────────────────────────────────
@@ -2527,7 +1952,7 @@ func measureIOStats() map[string]map[string]float64 {
 	// -H = bez nagłówka, 2 = interwał sekund, 2 = liczba próbek
 	// Pierwsza próbka to dane od boota — ignorujemy.
 	// Druga próbka to delta z ostatnich 2 sekund — to chcemy.
-	out, err := runCmd("zpool", "iostat", "-H", "1", "1")
+	out, err := discReadCommand("zpool", "iostat", "-H", "1", "1")
 	if err != nil || out == "" {
 		return stats
 	}
@@ -2638,7 +2063,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 	info["ssacli_installed"] = !ssacliErr
 
 	if !ssacliErr {
-		statusOut, _ := ssacliRun(toolPath, "ctrl", "all", "show", "status")
+		statusOut, _ := discReadCommand(toolPath, "ctrl", "all", "show", "status")
 		info["ssacli_ctrl_status_raw"] = statusOut
 		slots := findSSACLIControllerSlots()
 		info["ssacli_detected_slots"] = slots
@@ -2648,7 +2073,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 		details := map[string]string{}
 		var parsed []map[string]interface{}
 		for _, slot := range slots {
-			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
+			out, err := discReadCommand(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "pd", "all", "show", "detail")
 			key := fmt.Sprintf("slot_%d", slot)
 			if err != nil {
 				details[key] = "BŁĄD: " + err.Error() + " | wyjście: " + out
@@ -2665,7 +2090,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 		ldDetails := map[string]string{}
 		diskNameMap := map[string]string{}
 		for _, slot := range slots {
-			out, err := ssacliRun(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
+			out, err := discReadCommand(toolPath, "ctrl", fmt.Sprintf("slot=%d", slot), "ld", "all", "show", "detail")
 			key := fmt.Sprintf("slot_%d", slot)
 			if err != nil {
 				ldDetails[key] = "BŁĄD: " + err.Error() + " | wyjście: " + out
@@ -2682,7 +2107,7 @@ func (s *Server) handleStorageSMARTDebug(w http.ResponseWriter, r *http.Request)
 	}
 
 	// lsblk — jak widzi dyski system
-	lsblkOut, _ := runCmd("lsblk", "-J", "-o", "NAME,TYPE,SERIAL,MODEL")
+	lsblkOut, _ := discReadCommand("lsblk", "-J", "-o", "NAME,TYPE,SERIAL,MODEL")
 	info["lsblk_raw"] = json.RawMessage(safeJSON(lsblkOut))
 
 	// Spróbuj smartctl na pierwszym znalezionym dysku fizycznym — bezpośrednio

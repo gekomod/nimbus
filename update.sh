@@ -45,6 +45,9 @@ fi
 [ -f "$SCRIPT_DIR/nimbus" ] || die "Brak binarki 'nimbus' w $SCRIPT_DIR. Użyj: sudo bash install.sh"
 ok "Binarka nimbus obecna"
 
+step "Aktualizacja usługi operacji dyskowych"
+bash "$SCRIPT_DIR/services/disc-jobs/install.sh"
+
 step "Zatrzymywanie usługi"
 systemctl stop nimbus 2>/dev/null && ok "Nimbus zatrzymany" || warn "Nimbus nie był uruchomiony"
 

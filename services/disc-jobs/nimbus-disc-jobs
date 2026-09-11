@@ -1,0 +1,600 @@
+#!/usr/bin/python3
+"""Nimbus storage worker. Root-only Unix HTTP socket; no shell RPC."""
+import argparse
+import fcntl
+import glob
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import socket
+import shutil
+import socketserver
+import sqlite3
+import stat
+import struct
+import subprocess
+import tempfile
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler
+
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin:/opt/smartstorageadmin/ssacli/bin", "LC_ALL": "C"}
+FILESYSTEMS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "fat32", "vfat", "exfat", "ntfs"}
+OPERATIONS = {"format", "partition.create", "partition.delete", "mount", "unmount", "fstab.toggle", "fstab.save", "zfs.create", "zfs.scrub", "zfs.export", "zfs.snapshot", "zfs.snapshot.delete", "zfs.rollback", "zfs.clone", "rescan", "smart.test", "raid.create", "lvm.scan", "raid.scan"}
+PROTECTED = {"/", "/boot", "/boot/efi", "/efi", "/usr", "/var", "/home", "/tmp", "/opt"}
+
+
+def run(argv, timeout=20, accepted=(0,)):
+    # Temporary output keeps a noisy command from exhausting daemon memory.
+    with tempfile.TemporaryFile() as output:
+        p = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT, env=ENV, stdin=subprocess.DEVNULL)
+        try:
+            code = p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            raise ValueError("Przekroczono czas operacji; sprawdź stan urządzenia przed kolejną próbą")
+        output.seek(0)
+        text = output.read(1024 * 1024).decode("utf-8", "replace").strip()
+    if code not in accepted:
+        raise ValueError(text or f"{argv[0]}: kod {code}")
+    return text
+
+
+def name(value, snapshot=False):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:/-]*(?:@[A-Za-z0-9_.:-]+)?" if snapshot else r"[A-Za-z][A-Za-z0-9_.:/-]*", value) or ".." in value:
+        raise ValueError("Nieprawidłowa nazwa puli / datasetu")
+    return value
+
+
+def tree_nodes(nodes):
+    for node in nodes:
+        yield node
+        yield from tree_nodes(node.get("children", []))
+
+
+def inventory():
+    return json.loads(run(["lsblk", "-b", "-J", "-p", "-o", "NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,WWN,SERIAL,RO,PKNAME"]))["blockdevices"]
+
+
+def device(path):
+    if not isinstance(path, str) or not path.startswith("/dev/"):
+        raise ValueError("Wymagane urządzenie /dev/…")
+    resolved = os.path.realpath(path)
+    if not resolved.startswith("/dev/") or not stat.S_ISBLK(os.stat(resolved).st_mode):
+        raise ValueError("To nie jest urządzenie blokowe")
+    return resolved
+
+
+def identity(path, nodes=None):
+    path = device(path)
+    nodes = json.loads(run(["lsblk", "-b", "-J", "-p", "-o", "NAME,PATH,TYPE,SIZE,WWN,SERIAL,PKNAME"]))["blockdevices"] if nodes is None else nodes
+    matches = [n for n in tree_nodes(nodes) if n.get("path") == path]
+    if not matches:
+        raise ValueError("Urządzenie zniknęło z inwentarza")
+    node = matches[0]
+    serials = sorted({str(n.get("wwn") or n.get("serial")) for root in nodes if any(n.get("path") == path for n in tree_nodes([root])) for n in [root] if n.get("wwn") or n.get("serial")})
+    if not serials:
+        raise ValueError("Brak WWN/serial — nie można bezpiecznie zidentyfikować celu zadania")
+    links = sorted(p for p in glob.glob("/dev/disk/by-id/*") if os.path.realpath(p) == path)
+    return {"path": links[0] if links else path, "serials": serials, "size": node["size"], "type": node["type"], "start": Path("/sys/class/block/" + os.path.basename(path) + "/start").read_text().strip() if node["type"] == "part" else None}
+
+
+def assert_identity(expected):
+    actual = identity(expected["path"])
+    if actual != expected:
+        raise ValueError("Identyfikacja urządzenia zmieniła się od zlecenia zadania")
+    return device(expected["path"])
+
+
+def unused(path, whole=False):
+    nodes = inventory()
+    target = [n for n in tree_nodes(nodes) if n.get("path") == path][0]
+    if target.get("ro") or (whole and target["type"] != "disk"):
+        raise ValueError("Wymagany zapisywalny dysk")
+    # Protect all branches of disks that contain OS mounts, including LVM/RAID trees.
+    roots = [root for root in nodes if any(n.get("path") == path for n in tree_nodes([root]))]
+    if any(m in PROTECTED for root in roots for n in tree_nodes([root]) for m in (n.get("mountpoints") or [])):
+        raise ValueError("Dysk systemowy jest chroniony")
+    for n in tree_nodes([target]):
+        if any(n.get("mountpoints") or []) or n.get("fstype") in {"swap", "zfs_member", "LVM2_member", "linux_raid_member", "crypto_LUKS"}:
+            raise ValueError("Urządzenie jest zamontowane lub należy do ZFS/RAID/LVM/swap")
+        if glob.glob("/sys/class/block/" + os.path.basename(n["path"]) + "/holders/*"):
+            raise ValueError("Urządzenie jest używane przez inne urządzenie blokowe")
+    # Check active membership as well as signatures, using canonical device paths.
+    if shutil.which("zpool", path=ENV["PATH"]):
+        active = run(["zpool", "status", "-LP"])
+        targets = {n["path"] for n in tree_nodes([target])}
+        for line in active.splitlines():
+            fields = line.split()
+            if fields and fields[0].startswith("/dev/") and os.path.realpath(fields[0]) in targets:
+                raise ValueError("Urządzenie należy do aktywnej puli ZFS")
+    # Existing ZFS signatures are rejected above even for exported pools.
+    return target
+
+
+def target_path(value, existing=False):
+    if not isinstance(value, str) or not os.path.isabs(value) or (not existing and not value.startswith("/mnt/")) or os.path.realpath(value) != os.path.normpath(value) or os.path.normpath(value) in PROTECTED or any(value == p or value.startswith(p+"/") for p in ("/proc", "/sys", "/dev", "/run")):
+        raise ValueError("Punkt montowania musi znajdować się w /mnt/ i nie może być symlinkiem")
+    if any(c in value for c in "\n\r\x00"):
+        raise ValueError("Nieprawidłowy punkt montowania")
+    return os.path.normpath(value)
+
+
+def escape(value):
+    return str(value).replace("\\", r"\134").replace(" ", r"\040").replace("\t", r"\011").replace("\n", r"\012")
+
+
+def unescape(value):
+    return re.sub(r"\\(040|011|012|134)", lambda m: chr(int(m[1], 8)), value)
+
+
+def edit_fstab(content, target, entry=None):
+    lines = [line for line in content.splitlines() if line.lstrip().startswith("#") or len(line.split()) < 2 or unescape(line.split()[1]) != target]
+    if entry:
+        lines.append("\t".join(escape(x) for x in entry))
+    return "\n".join(lines) + "\n"
+
+
+class Engine:
+    def __init__(self, state, fstab="/etc/fstab"):
+        self.state = Path(state)
+        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.fstab = Path(fstab)
+        self.lock = threading.RLock()
+        self.hardware = threading.RLock()  # Conservative: one storage command/transaction at a time.
+        self.cache = {}
+        self.accepting = True
+        self.db = sqlite3.connect(self.state / "jobs.sqlite3", check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, request TEXT, state TEXT, stage TEXT, result TEXT, error TEXT, created REAL, updated REAL)")
+        self.db.execute("UPDATE jobs SET state='interrupted', stage='Przerwane przez restart', error='Sprawdź stan dysku; zadania nie ponowiono', updated=? WHERE state IN ('queued','running')", (time.time(),))
+        self.db.commit()
+        self.q = queue.Queue(maxsize=128)
+
+    def rows(self, job_id=None):
+        with self.lock:
+            cur = self.db.execute("SELECT id,request,state,stage,result,error,created,updated FROM jobs " + ("WHERE id=?" if job_id else "ORDER BY created DESC LIMIT 200"), (job_id,) if job_id else ())
+            rows = []
+            for row in cur:
+                d = dict(zip(["id", "request", "state", "stage", "result", "error", "created", "updated"], row))
+                req = json.loads(d.pop("request"))
+                d.update(operation=req["operation"], target=req.get("device") or req.get("target") or req.get("name") or req.get("dataset") or "")
+                d["result"] = json.loads(d["result"]) if d["result"] else None
+                rows.append(d)
+            return rows
+
+    def set(self, job_id, state, stage, result=None, error=None):
+        with self.lock:
+            self.db.execute("UPDATE jobs SET state=?,stage=?,result=?,error=?,updated=? WHERE id=?", (state, stage, json.dumps(result) if result is not None else None, error, time.time(), job_id))
+            self.db.commit()
+
+    def submit(self, req, job_id):
+        if not isinstance(req, dict) or req.get("operation") not in OPERATIONS:
+            raise ValueError("Nieobsługiwana operacja")
+        if not re.fullmatch(r"[a-f0-9-]{32,36}", job_id):
+            raise ValueError("Wymagany identyfikator żądania")
+        req = dict(req)
+        if any(k.startswith("_") for k in req):
+            raise ValueError("Zastrzeżony parametr")
+        original = json.dumps(req, sort_keys=True)
+        with self.lock:
+            if not self.accepting:
+                raise ValueError("Usługa przygotowuje się do aktualizacji")
+            existing = self.db.execute("SELECT request FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if existing:
+                if json.loads(existing[0])["_original"] != original:
+                    raise ValueError("Identyfikator użyty dla innej operacji")
+                return self.rows(job_id)[0]
+            if self.q.full():
+                raise ValueError("Kolejka jest pełna")
+        # Never queue work against a transient /dev/sdX name alone.
+        paths = ([req["device"]] if req.get("device") else []) + [(d if d.startswith("/dev/") else "/dev/" + d) for d in req.get("disks", req.get("devices", []))]
+        req["_original"] = original
+        # This metadata lookup uses sysfs/udev, without filesystem probing or controller queries.
+        req["_identities"] = [identity(p) for p in paths]
+        if req["operation"] == "unmount":
+            target = target_path(req["target"], existing=True)
+            req["_mount_id"] = run(["findmnt", "-n", "-M", target, "-o", "ID,SOURCE,MAJ:MIN"])
+            if not req["_mount_id"]:
+                raise ValueError("Punkt montowania nie jest aktywny")
+        if req["operation"].startswith("zfs.") and req["operation"] != "zfs.create":
+            pool = name(req.get("dataset") or req.get("snapshot") or req.get("name"), True).split("/")[0].split("@")[0]
+            if not self.hardware.acquire(timeout=0.1):
+                raise ValueError("Trwa operacja sprzętowa; poczekaj na odczyt identyfikatora puli")
+            try:
+                req["_pool"] = pool
+                req["_guid"] = run(["zpool", "get", "-H", "-o", "value", "guid", pool])
+            finally:
+                self.hardware.release()
+        with self.lock:
+            if not self.accepting:
+                raise ValueError("Usługa przygotowuje się do aktualizacji")
+            # Recheck after potentially slow hardware identification.
+            existing = self.db.execute("SELECT request FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if existing:
+                if json.loads(existing[0])["_original"] != original:
+                    raise ValueError("Identyfikator użyty dla innej operacji")
+                return self.rows(job_id)[0]
+            if self.q.full():
+                raise ValueError("Kolejka jest pełna")
+            now = time.time()
+            self.db.execute("INSERT INTO jobs VALUES (?,?, 'queued', 'Oczekuje', NULL,NULL,?,?)", (job_id, json.dumps(req), now, now))
+            self.db.commit()
+            self.q.put_nowait((job_id, req))
+            return self.rows(job_id)[0]
+
+    def work(self):
+        while True:
+            job_id, req = self.q.get()
+            try:
+                with self.hardware:
+                    self.set(job_id, "running", "Weryfikacja urządzeń")
+                    paths = [assert_identity(i) for i in req["_identities"]]
+                    if "_mount_id" in req and run(["findmnt", "-n", "-M", req["target"], "-o", "ID,SOURCE,MAJ:MIN"]) != req["_mount_id"]:
+                        raise ValueError("Montowanie zmieniło się od zlecenia zadania")
+                    if "_pool" in req and run(["zpool", "get", "-H", "-o", "value", "guid", req["_pool"]]) != req["_guid"]:
+                        raise ValueError("Tożsamość puli zmieniła się od zlecenia zadania")
+                    self.set(job_id, "running", "Wykonywanie: " + req["operation"])
+                    result = self.execute(req, paths)
+                    self.set(job_id, "succeeded", "Zakończone", result)
+            except Exception as exc:
+                self.set(job_id, "failed", "Błąd — sprawdź wynik operacji", error=str(exc))
+            finally:
+                with self.hardware:
+                    self.cache.clear()
+                self.q.task_done()
+
+    def verify_fstab(self, content):
+        if not isinstance(content, str) or len(content) > 262144 or "\x00" in content:
+            raise ValueError("Nieprawidłowa treść FSTAB")
+        # Literal line breaks inside fields are not allowed; encoded fields are supported.
+        for line in content.splitlines():
+            if line.strip() and not line.lstrip().startswith("#") and len(line.split()) != 6:
+                raise ValueError("Wpis FSTAB wymaga sześciu pól")
+        with tempfile.NamedTemporaryFile(mode="w", dir=self.fstab.parent, prefix=".nimbus-fstab-") as f:
+            f.write(content)
+            f.flush()
+            return run(["findmnt", "--verify", "--verbose", "--tab-file", f.name])
+
+    def save_fstab(self, content, original):
+        current = self.fstab.read_text()
+        if original != current:
+            raise ValueError("FSTAB zmienił się — ponownie otwórz edytor")
+        output = self.verify_fstab(content)
+        backup = self.state / ("fstab-" + uuid.uuid4().hex + ".bak")
+        with open(backup, "x") as f:
+            f.write(current)
+            f.flush()
+            os.fsync(f.fileno())
+        mode = self.fstab.stat()
+        fd, tmp = tempfile.mkstemp(dir=self.fstab.parent, prefix=".nimbus-fstab-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+                os.fchmod(f.fileno(), stat.S_IMODE(mode.st_mode))
+                os.fchown(f.fileno(), mode.st_uid, mode.st_gid)
+            if self.fstab.read_text() != current:
+                raise ValueError("FSTAB został zmieniony podczas walidacji")
+            os.replace(tmp, self.fstab)
+            directory = os.open(self.fstab.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return output
+
+    def fstab_entry(self, path, target, enabled):
+        mounts = json.loads(run(["findmnt", "-J", "-M", target, "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]))["filesystems"]
+        m = mounts[0]
+        if os.path.realpath(m["source"]) != path or m["target"] != target or m["fstype"] == "zfs":
+            raise ValueError("Montowanie nie odpowiada urządzeniu lub jest zarządzane przez ZFS")
+        uid = run(["blkid", "-s", "UUID", "-o", "value", path])
+        if not uid:
+            raise ValueError("Brak UUID systemu plików")
+        content = self.fstab.read_text()
+        updated = edit_fstab(content, target, ["UUID=" + uid, target, m["fstype"], m["options"], "0", "2" if m["fstype"].startswith("ext") else "0"] if enabled else None)
+        self.save_fstab(updated, content)
+        return {"status": "ok", "in_fstab": enabled}
+
+    def execute(self, r, paths):
+        op = r["operation"]
+        if op == "smart.test":
+            kind, mode = r.get("type"), r.get("mode", "")
+            if kind not in {"short", "long"} or (mode and not re.fullmatch(r"(?:sat|scsi|nvme|cciss,[0-9]{1,3})", mode)):
+                raise ValueError("Nieprawidłowy rodzaj testu SMART")
+            output = run(["smartctl", "-j", "-t", kind] + (["-d", mode] if mode else []) + [paths[0]], 30, tuple(range(256)))
+            status = json.loads(output)["smartctl"]["exit_status"]
+            if status & 7:
+                raise ValueError(output)
+            return {"status": "started", "output": output}
+        if op == "format":
+            path = paths[0]
+            unused(path)
+            fs, label = r.get("fs", "ext4"), r.get("label", "")
+            if not isinstance(label, str) or len(label.encode()) > 16 or any(c in label for c in "\x00\n\r"):
+                raise ValueError("Nieprawidłowa etykieta (maks. 16 bajtów)")
+            if fs == "zfs":
+                return self.execute({"operation": "zfs.create", "name": label or os.path.basename(path), "backend": "zfs"}, paths)
+            if fs not in FILESYSTEMS:
+                raise ValueError("Nieobsługiwany system plików")
+            argv = ["mkfs." + fs]
+            if fs.startswith("ext"):
+                argv += ["-F"]
+            elif fs in {"xfs", "btrfs", "ntfs"}:
+                argv += ["-f"]
+            if fs in {"fat32", "vfat"}:
+                argv = ["mkfs.fat", "-F", "32"]
+            if label:
+                argv += ["-n" if fs in {"exfat", "fat32", "vfat"} else "-L", label]
+            return {"status": "ok", "output": run(argv + [path], 3600)}
+        if op.startswith("partition."):
+            path = paths[0]
+            unused(path, whole=True)
+            if op == "partition.create":
+                start, end = r.get("start_mib"), r.get("end_mib")
+                if type(start) is not int or type(end) is not int or not 1 <= start < end:
+                    raise ValueError("Podaj granice partycji w MiB")
+                # Existing GPT only: no implicit destruction of a partition table.
+                table = json.loads(run(["sfdisk", "--json", path]))["partitiontable"]
+                if table.get("label") != "gpt":
+                    raise ValueError("Wymagana istniejąca tablica GPT")
+                run(["parted", "-s", path, "mkpart", "primary", str(start) + "MiB", str(end) + "MiB"], 120)
+            else:
+                number = r.get("number")
+                if type(number) is not int or not 1 <= number <= 128:
+                    raise ValueError("Nieprawidłowy numer partycji")
+                run(["parted", "-s", path, "rm", str(number)], 120)
+            return {"status": "ok", "output": run(["partprobe", path], 30)}
+        if op == "mount":
+            path, target = paths[0], target_path(r["target"])
+            unused(path)
+            fs = r.get("fs", "")
+            if fs and fs not in FILESYSTEMS:
+                raise ValueError("Nieobsługiwany system plików")
+            opts = r.get("options") or "rw,relatime"
+            if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", opts) or set(opts.split(",")) & {"bind", "rbind", "move", "remount"}:
+                raise ValueError("Nieobsługiwane opcje montowania")
+            os.makedirs(target, exist_ok=True)
+            if os.path.ismount(target) or os.listdir(target):
+                raise ValueError("Punkt montowania jest zajęty")
+            output = run(["mount"] + (["-t", fs] if fs else []) + ["-o", opts, path, target], 120)
+            if r.get("persist"):
+                try:
+                    self.fstab_entry(path, target, True)
+                except Exception as exc:
+                    raise ValueError("Dysk zamontowano, lecz nie zapisano FSTAB: " + str(exc))
+            return {"status": "ok", "output": output, "target": target}
+        if op == "unmount":
+            target = target_path(r["target"], existing=True)
+            return {"status": "ok", "output": run(["umount"] + (["-l"] if r.get("lazy") else []) + (["-f"] if r.get("force") else []) + [target], 120)}
+        if op == "fstab.toggle":
+            return self.fstab_entry(paths[0], target_path(r["target"], existing=True), r.get("enable") is True)
+        if op == "fstab.save":
+            output = self.save_fstab(r["content"], r.get("original"))
+            result = {"status": "ok", "saved": True, "applied": False, "verify_output": output}
+            if r.get("apply"):
+                try:
+                    result["output"] = run(["mount", "-a"], 120)
+                    result["applied"] = True
+                except Exception as exc:
+                    result["error"] = "FSTAB zapisano; zastosowanie nie powiodło się: " + str(exc)
+            return result
+        if op in {"zfs.create", "raid.create"}:
+            backend = "mdadm" if op == "raid.create" else r.get("backend") or "zfs"
+            if not paths or len(set(paths)) != len(paths):
+                raise ValueError("Wskaż różne dyski")
+            for path in paths:
+                unused(path)
+            if backend == "mdadm":
+                level = str(r.get("level") or r.get("raid_type") or "raid5").removeprefix("raid")
+                minimum = {"0":2,"1":2,"5":3,"6":4,"10":4}
+                if level not in minimum or len(paths) < minimum[level] or (level == "10" and len(paths) % 2):
+                    raise ValueError("Nieprawidłowa topologia RAID")
+                array = r.get("name") or "data"
+                array = array if array.startswith("/dev/") else "/dev/md/" + array
+                if not re.fullmatch(r"/dev/(?:md[0-9]+|md/[A-Za-z0-9_-]+)", array) or os.path.exists(array):
+                    raise ValueError("Nazwa macierzy jest zajęta lub nieprawidłowa")
+                return {"ok": True, "output": run(["mdadm", "--create", array, "--level="+level, "--raid-devices="+str(len(paths)), "--run"] + paths, 180)}
+            if backend == "lvm":
+                group = r.get("name", "")
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", group):
+                    raise ValueError("Nieprawidłowa nazwa grupy LVM")
+                return {"ok": True, "output": run(["vgcreate", group] + paths, 180)}
+            if backend != "zfs" or r.get("encrypt"):
+                raise ValueError("Kolejka tworzenia pul obsługuje ZFS bez szyfrowania; żądanie nie zostało wykonane")
+            pool = name(r["name"])
+            if "/" in pool or ":" in pool or not paths:
+                raise ValueError("Nieprawidłowa nazwa puli / brak dysków")
+            if len(set(paths)) != len(paths):
+                raise ValueError("Ten sam dysk wskazano wielokrotnie")
+            for path in paths:
+                unused(path)
+            raid = r.get("raid_type") or "stripe"
+            minimum = {"stripe": 1, "mirror": 2, "raidz": 2, "raidz1": 2, "raidz2": 3, "raidz3": 4}
+            if raid not in minimum or len(paths) < minimum[raid]:
+                raise ValueError("Nieprawidłowa topologia / za mało dysków")
+            ashift, comp = r.get("ashift") or 12, r.get("compress") or "lz4"
+            if ashift not in {9, 12, 13} or comp not in {"off", "on", "lz4", "zstd", "gzip"}:
+                raise ValueError("Nieprawidłowe parametry ZFS")
+            argv = ["zpool", "create", "-o", "ashift=" + str(ashift), "-O", "compression=" + comp, "-O", "atime=off"]
+            if r.get("dedup"):
+                argv += ["-O", "dedup=on"]
+            return {"ok": True, "status": "ok", "output": run(argv + [pool] + ([] if raid == "stripe" else [raid]) + paths, 180)}
+        if op in {"zfs.scrub", "zfs.export"}:
+            pool = name(r["name"])
+            if "/" in pool:
+                raise ValueError("Wymagana nazwa puli")
+            if op == "zfs.export":
+                mounts = run(["zfs", "list", "-H", "-r", "-o", "mountpoint", pool]).splitlines()
+                if any(p in PROTECTED for p in mounts):
+                    raise ValueError("Pula systemowa jest chroniona")
+            return {"ok": True, "output": run(["zpool", op.split(".")[1], pool], 180)}
+        if op == "zfs.snapshot":
+            snap = name(r["dataset"]) + "@" + r["name"]
+            name(snap, True)
+            output = run(["zfs", "snapshot"] + (["-r"] if r.get("recursive") else []) + [snap], 180)
+            return {"status": "ok", "snapshot": snap, "output": output}
+        if op in {"zfs.snapshot.delete", "zfs.rollback", "zfs.clone"}:
+            snap = name(r["snapshot"], True)
+            if snap.count("@") != 1:
+                raise ValueError("Wymagana nazwa migawki")
+            if op == "zfs.clone":
+                clone = name(r.get("clone") or snap.replace("@", "-clone-"))
+                argv = ["zfs", "clone", snap, clone]
+            elif op == "zfs.rollback":
+                mountpoint = run(["zfs", "get", "-H", "-o", "value", "mountpoint", snap.split("@")[0]])
+                if mountpoint in PROTECTED:
+                    raise ValueError("Systemowy dataset jest chroniony")
+                # Do not silently delete newer snapshots (-r).
+                argv = ["zfs", "rollback", snap]
+            else:
+                argv = ["zfs", "destroy", snap]
+            return {"status": "ok", "output": run(argv, 180)}
+        if op == "lvm.scan":
+            return {"ok": True, "output": run(["vgscan"], 60)}
+        if op == "raid.scan":
+            return {"ok": True, "output": run(["mdadm", "--examine", "--scan"], 60)}
+        if op == "rescan":
+            for p in glob.glob("/sys/class/scsi_host/*/scan"):
+                Path(p).write_text("- - -\n")
+            return {"status": "ok"}
+        raise ValueError("Nieobsługiwana operacja")
+
+    def read(self, r):
+        op = r.get("operation")
+        if op == "fstab.content":
+            return {"content": self.fstab.read_text()}
+        if op == "fstab.check":
+            with self.hardware:
+                try:
+                    return {"ok": True, "output": self.verify_fstab(r.get("content", self.fstab.read_text()))}
+                except ValueError as exc:
+                    return {"ok": False, "output": str(exc)}
+        if op == "inventory":
+            with self.hardware:
+                return {"blockdevices": inventory()}
+        if op != "read.command":
+            raise ValueError("Nieobsługiwany odczyt")
+        argv = r.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and len(x) < 1024 and "\x00" not in x for x in argv):
+            raise ValueError("Nieprawidłowy odczyt")
+        cmd, args = argv[0], argv[1:]
+        # Read-only programs; reject every write-capable mode explicitly.
+        allowed = cmd == "lsblk" or (cmd == "blkid" and args[:4] == ["-s", "UUID", "-o", "value"] and len(args) == 5 and args[4].startswith("/dev/"))
+        allowed |= cmd in {"zpool", "zfs"} and bool(args) and args[0] in ({"list", "status", "get", "iostat"} if cmd == "zpool" else {"list", "get"})
+        allowed |= cmd == "smartctl" and len(args) in {3, 5} and args[:2] in (["-a", "-j"], ["-A", "-j"], ["-H", "-j"]) and args[-1].startswith("/dev/") and (len(args) == 3 or (args[2] == "-d" and re.fullmatch(r"(?:sat|scsi|nvme|cciss,[0-9]{1,3})", args[3]) is not None))
+        allowed |= cmd in {"ssacli", "hpssacli", "hpacucli"} and bool(re.fullmatch(r"ctrl (?:all|slot=\d+)(?: (?:pd|ld) all)? show(?: detail| status)?", " ".join(args)))
+        allowed |= cmd == "blockdev" and len(args) == 2 and args[0] == "--getsize64" and args[1].startswith("/dev/")
+        allowed |= cmd in {"pvs", "vgs", "lvs"} and args == ["--reportformat", "json"]
+        allowed |= cmd == "mdadm" and args == ["--detail", "--scan"]
+        allowed |= cmd == "fdisk" and args == ["-l"]
+        allowed |= cmd == "findmnt" and bool(args) and not any(x in {"--poll", "--verify", "--tab-file"} or x.startswith("--tab-file=") for x in args)
+        if not allowed:
+            raise ValueError("Odczyt spoza listy dozwolonych operacji")
+        key = json.dumps(argv)
+        if not self.hardware.acquire(timeout=0.1):
+            raise ValueError("Odczyt wstrzymany na czas operacji sprzętowej. Dane w panelu mogą być nieaktualne.")
+        try:
+            cached = self.cache.get(key)
+            if cached and time.monotonic() - cached[0] < (60 if cmd in {"smartctl", "ssacli", "hpssacli", "hpacucli"} else 5):
+                return cached[1]
+            result = {"output": run(argv, 20, tuple(range(256)) if cmd == "smartctl" else (0,))}
+            self.cache[key] = (time.monotonic(), result)
+            if len(self.cache) > 256:
+                self.cache = {key: self.cache[key]}
+            return result
+        finally:
+            self.hardware.release()
+
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.handle_request()
+
+    def do_POST(self):
+        self.handle_request()
+
+    def handle_request(self):
+        try:
+            # Socket filesystem permissions AND kernel peer credentials.
+            _, uid, _ = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if uid != 0:
+                return self.reply(403, {"error": "Wymagany lokalny backend root"})
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 <= size <= 524288:
+                return self.reply(413, {"error": "Żądanie za duże"})
+            r = json.loads(self.rfile.read(size)) if size else {}
+            if self.command == "POST" and self.path == "/drain":
+                with self.server.engine.lock:
+                    active = self.server.engine.db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+                    if active:
+                        return self.reply(409, {"error": "Trwają zadania dyskowe; poczekaj na ich zakończenie"})
+                    self.server.engine.accepting = False
+                return self.reply(200, {"drained": True})
+            if self.command == "GET" and self.path == "/health":
+                return self.reply(200, {"available": True, "protocol": 1})
+            if self.command == "GET" and self.path == "/jobs":
+                return self.reply(200, {"jobs": self.server.engine.rows()})
+            if self.command == "GET" and self.path.startswith("/jobs/"):
+                rows = self.server.engine.rows(self.path[6:])
+                return self.reply(200 if rows else 404, rows[0] if rows else {"error": "Nie znaleziono zadania"})
+            if self.command == "POST" and self.path == "/jobs":
+                return self.reply(202, self.server.engine.submit(r, self.headers.get("Idempotency-Key", "")))
+            if self.command == "POST" and self.path == "/read":
+                return self.reply(200, self.server.engine.read(r))
+            return self.reply(404, {"error": "Nieznana operacja"})
+        except (ValueError, KeyError, TypeError, IndexError, OSError) as exc:
+            self.reply(400, {"error": str(exc)})
+
+    def reply(self, code, body):
+        data = json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--socket", default="/run/nimbus/disc-jobs.sock")
+    parser.add_argument("--state", default="/var/lib/nimbus/disc-jobs")
+    args = parser.parse_args()
+    os.umask(0o077)
+    Path(args.state).mkdir(parents=True, exist_ok=True)
+    # Refuse a second daemon before touching the socket or recovering jobs.
+    with open(Path(args.state) / "daemon.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        engine = Engine(args.state)
+        Path(args.socket).parent.mkdir(parents=True, exist_ok=True)
+        if os.path.exists(args.socket):
+            if not stat.S_ISSOCK(os.stat(args.socket).st_mode):
+                raise ValueError("Ścieżka socketu jest zajęta przez plik")
+            os.unlink(args.socket)
+        with Server(args.socket, Handler) as server:
+            os.chmod(args.socket, 0o600)
+            server.engine = engine
+            threading.Thread(target=engine.work, daemon=True).start()
+            server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

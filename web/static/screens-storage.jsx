@@ -82,7 +82,7 @@ const Storage = () => {
   const [devices, setDevices] = React.useState([]);
   const [storageError,setStorageError]=React.useState('');
   React.useEffect(() => {
-    const load = () => fetch('/api/storage/devices',{credentials:'include'})
+    const load = () => (window.nimbusStorageFetch||fetch)('/api/storage/devices',{credentials:'include'})
       .then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Nie można odczytać magazynu');return d;})
       .then(data => {
         if (!data || !data.devices) return;setStorageError('');
@@ -162,6 +162,7 @@ const Storage = () => {
         </div>
         <div className={"tab " + (tab==='snap'  ? 'active':'')} onClick={()=>setTab('snap')}>Migawki</div>
         <div className={"tab " + (tab==='smart'      ? 'active':'')} onClick={()=>setTab('smart')}>S.M.A.R.T.</div>
+        <button className={"tab "+(tab==='jobs'?'active':'')} onClick={()=>setTab('jobs')}>Zadania</button>
         <div className={"tab " + (tab==='leds'       ? 'active':'')} onClick={()=>setTab('leds')}>Zatoki (LED)</div>
       </div>
 
@@ -172,6 +173,7 @@ const Storage = () => {
       {tab==='snap'  && <Snapshots/>}
       {tab==='smart' && <SmartView/>}
       {tab==='leds'  && <BayLedsView/>}
+      {tab==='jobs' && <window.StorageJobs/>}
 
       {formatTarget  && <FormatModal   disk={formatTarget}   onClose={()=>setFormatTarget(null)}/>}
       {mountTarget   && <MountModal    disk={mountTarget}    onClose={()=>setMountTarget(null)}/>}
@@ -188,7 +190,7 @@ const PoolsList = ({ onSelect, onOpenMounts }) => {
   const [showCreate, setShowCreate] = React.useState(false);
 
   React.useEffect(() => {
-    const load = () => fetch('/api/storage/pools',{credentials:'include'})
+    const load = () => (window.nimbusStorageFetch||fetch)('/api/storage/pools',{credentials:'include'})
       .then(r=>r.ok?r.json():null)
       .then(raw=>{ if(raw) storeSet('POOLS', _parsePools(raw)); })
       .catch(()=>{});
@@ -269,7 +271,7 @@ const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
 
   React.useEffect(() => {
     // Prawdziwe właściwości ZFS
-    fetch('/api/storage/exec-command', {method:'POST', credentials:'include',
+    (window.nimbusStorageFetch||fetch)('/api/storage/exec-command', {method:'POST', credentials:'include',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({command: 'zfs get -H -o property,value compression,dedup,encryption '+pool.name})})
       .then(r=>r.ok?r.json():null)
@@ -284,7 +286,7 @@ const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
       }).catch(()=>{});
 
     // Sprawdź cron dla auto-migawek
-    fetch('/api/storage/exec-command', {method:'POST', credentials:'include',
+    (window.nimbusStorageFetch||fetch)('/api/storage/exec-command', {method:'POST', credentials:'include',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({command: `crontab -l 2>/dev/null | grep -c "zfs snapshot.*${pool.name}" || echo 0`})})
       .then(r=>r.ok?r.json():null)
@@ -306,20 +308,20 @@ const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
           <button className="btn sm" onClick={onViewSnapshots}>Migawki</button>
           <button className="btn sm" disabled={scrubRunning} onClick={async()=>{
             setScrubRunning(true);
-            const r = await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+            try { const r = await (window.nimbusStorageFetch||fetch)('/api/storage/jobs',{method:'POST',credentials:'include',
               headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({command:'zpool scrub '+pool.name})});
+              body:JSON.stringify({operation:'zfs.scrub',name:pool.name})});
             const d = await r.json();
-            setScrubOutput(d.output||'Scrub uruchomiony');
-            setTimeout(()=>setScrubRunning(false), 3000);
+            setScrubOutput(d.error||d.output||(d.ok?'Scrub uruchomiony; jego postęp sprawdzisz w stanie puli.':'Nie udało się uruchomić scrub'));
+            } catch(e) {setScrubOutput(e.message);} finally {setScrubRunning(false);}
           }}>{scrubRunning ? 'Scrub…' : 'Scrub'}</button>
           <button className="btn sm primary" onClick={async()=>{
             if(!confirm('Eksportować pulę '+pool.name+'? Zostanie odmontowana.')) return;
-            const r = await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+            const r = await (window.nimbusStorageFetch||fetch)('/api/storage/jobs',{method:'POST',credentials:'include',
               headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({command:'zpool export '+pool.name})});
+              body:JSON.stringify({operation:'zfs.export',name:pool.name})});
             const d = await r.json();
-            alert(d.ok ? 'Pula wyeksportowana' : 'Błąd: '+d.output);
+            alert(d.ok ? 'Pula wyeksportowana' : 'Błąd: '+(d.error||d.output));
             if(d.ok) onBack();
           }}>Eksportuj</button>
         </div>
@@ -365,7 +367,7 @@ const PoolDetail = ({ pool, onBack, onViewSnapshots }) => {
                 const cmd = enable
                   ? 'echo "0 * * * * zfs snapshot '+pool.name+'@auto-$(date +\%Y\%m\%d\%H%M)" | crontab -'
                   : 'crontab -l | grep -v "zfs snapshot.*'+pool.name+'" | crontab -';
-                await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',
+                await (window.nimbusStorageFetch||fetch)('/api/storage/exec-command',{method:'POST',credentials:'include',
                   headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})});
                 setAutoSnap(enable);
               }}/>
@@ -446,7 +448,7 @@ const DiskGparted = ({disk,onClose}) => <window.StorageDiskDetail disk={disk} on
 // ── Disks list ────────────────────────────────────────────────────────────────
 const useStorageRescan=()=>{
   const [scanError,setScanError]=React.useState(''),[scanning,setScanning]=React.useState(false);
-  const rescan=async()=>{setScanning(true);setScanError('');try{const r=await fetch('/api/storage/rescan',{method:'POST',credentials:'include'});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Skanowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));}catch(e){setScanError(e.message);}finally{setScanning(false);}};
+  const rescan=async()=>{setScanning(true);setScanError('');try{const r=await (window.nimbusStorageFetch||fetch)('/api/storage/rescan',{method:'POST',credentials:'include'});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Skanowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));}catch(e){setScanError(e.message);}finally{setScanning(false);}};
   return {scanError,scanning,rescan};
 };
 const DisksList = ({ onSelect, selected }) => {
@@ -518,7 +520,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
   const [error, setError] = React.useState('');
   React.useEffect(() => { setMounts(MOUNTS); }, [MOUNTS]);
 
-  const loadMounts = React.useCallback(() => fetch('/api/storage/mounts',{credentials:'include'})
+  const loadMounts = React.useCallback(() => (window.nimbusStorageFetch||fetch)('/api/storage/mounts',{credentials:'include'})
       .then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error||'Nie udało się odczytać montowań');return d;})
       .then(raw => {
         if (!Array.isArray(raw)) return;
@@ -553,7 +555,7 @@ const MountsView = ({ onEditFstab, onAdd, onUnmount }) => {
     setError('');
     setFstabBusy(prev=>({...prev,[mount.mp]:true}));
     try {
-      const r = await fetch('/api/storage/fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      const r = await (window.nimbusStorageFetch||fetch)('/api/storage/fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({device:mount.device,target:mount.mp,enable:!mount.inFstab})});
       const data = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(data.error||'Nie udało się zmienić wpisu /etc/fstab');
@@ -715,7 +717,7 @@ const Snapshots = () => {
 
   // Załaduj migawki z API
   const loadSnaps = () => {
-    fetch('/api/zfs/snapshots', {credentials:'include'})
+    (window.nimbusStorageFetch||fetch)('/api/zfs/snapshots', {credentials:'include'})
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data && data.snapshots) {
@@ -733,22 +735,18 @@ const Snapshots = () => {
   }, []);
 
   const doDelete = async (snap) => {
-    await fetch('/api/zfs/snapshots/' + encodeURIComponent(snap.name), {
-      method: 'DELETE',
-      credentials: 'include'
-    });
-    loadSnaps();
-    setDeleteTarget(null);
+    try {
+      const r=await (window.nimbusStorageFetch||fetch)('/api/zfs/snapshots/'+encodeURIComponent(snap.name),{method:'DELETE',credentials:'include'});
+      const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Nie udało się usunąć migawki');
+      loadSnaps();setDeleteTarget(null);
+    }catch(e){alert(e.message);}
   };
-
   const doRestore = async (snap, mode) => {
-    await fetch('/api/zfs/snapshots/' + encodeURIComponent(snap.name), {
-      method: 'POST',
-      credentials: 'include',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: mode})
-    });
-    setRestoreTarget(null);
+    try {
+      const r=await (window.nimbusStorageFetch||fetch)('/api/zfs/snapshots/'+encodeURIComponent(snap.name),{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:mode})});
+      const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Nie udało się przywrócić migawki');
+      setRestoreTarget(null);loadSnaps();
+    }catch(e){alert(e.message);}
   };
 
   return (
@@ -796,7 +794,7 @@ const Snapshots = () => {
         </table>
       </div>
 
-      {showCreate    && <SnapCreateModal  onClose={()=>setShowCreate(false)}  onCreate={s=>{setSnaps(prev=>[s,...prev]);setShowCreate(false);}}/>}
+      {showCreate    && <SnapCreateModal  onClose={()=>setShowCreate(false)}  onCreate={()=>{loadSnaps();setShowCreate(false);}}/>}
       {restoreTarget && <SnapRestoreModal snap={restoreTarget} onClose={()=>setRestoreTarget(null)}/>}
       {deleteTarget  && <SnapDeleteModal  snap={deleteTarget}  onClose={()=>setDeleteTarget(null)} onConfirm={()=>doDelete(deleteTarget)}/>}
       {showPolicy    && <SnapPolicyModal  onClose={()=>setShowPolicy(false)}/>}
@@ -806,15 +804,18 @@ const Snapshots = () => {
 
 const SnapCreateModal = ({ onClose, onCreate }) => {
   const POOLS_RAW = useStore('POOLS') || [];
-  const datasets  = POOLS_RAW.length ? POOLS_RAW.flatMap(p=>[p.name+'/media',p.name+'/docs',p.name]) : ['tank/media','tank/docs','tank'];
+  const [datasets,setDatasets] = React.useState([]);
+  React.useEffect(()=>{(window.nimbusStorageFetch||fetch)('/api/zfs/datasets',{credentials:'include'}).then(r=>r.json()).then(d=>{setDatasets(d.datasets||[]);setDs(d.datasets?.[0]||'');}).catch(()=>{});},[]);
   const [ds,        setDs]        = React.useState(datasets[0]);
   const [label,     setLabel]     = React.useState('manual-'+new Date().toISOString().slice(0,10));
   const [recursive, setRecursive] = React.useState(false);
   const snapName = `${ds}@${label}`;
   const create = async () => {
-    await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({command:'zfs snapshot'+(recursive?' -r':'')+' '+snapName})}).catch(()=>{});
-    onCreate({ name:snapName, size:'0 B', date:'teraz', auto:false });
+    try {
+      const r=await (window.nimbusStorageFetch||fetch)('/api/zfs/snapshots',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:ds,name:label,recursive})});
+      const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Nie udało się utworzyć migawki');
+      onCreate();
+    } catch(e) {alert(e.message);}
   };
   return (
     <Modal title="Utwórz migawkę ZFS" sub="zfs snapshot" onClose={onClose} width={560}
@@ -848,9 +849,11 @@ const SnapCreateModal = ({ onClose, onCreate }) => {
 const SnapRestoreModal = ({ snap, onClose }) => {
   const [mode, setMode] = React.useState('rollback');
   const doRestore = async () => {
-    const cmd = mode==='rollback' ? `zfs rollback -r ${snap.name}` : `zfs clone ${snap.name} ${snap.name.split('@')[0]}-clone`;
-    await fetch('/api/storage/exec-command',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}).catch(()=>{});
-    onClose();
+    try {
+      const r=await (window.nimbusStorageFetch||fetch)('/api/zfs/snapshots/'+encodeURIComponent(snap.name),{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:mode})});
+      const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Przywracanie nie powiodło się');
+      onClose();
+    } catch(e) {alert(e.message);}
   };
   return (
     <Modal title="Przywróć migawkę" sub={snap.name} onClose={onClose} width={620}
@@ -928,7 +931,7 @@ const SmartView = () => {
   const loadDisks = React.useCallback(() => {
     if(scanning.current)return;scanning.current=true;
 	setLoading(true);setError('');
-    return fetch('/api/storage/smart',{credentials:'include'})
+    return (window.nimbusStorageFetch||fetch)('/api/storage/smart',{credentials:'include'})
       .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można pobrać danych S.M.A.R.T.'); return d; })
       .then(data=>setDisks((data.devices||[]).map(d=>({
         bay:d.bay||(d.name||'').replace('/dev/',''), name:d.name, model:d.model||'—', serial:d.serial||'—',
@@ -948,7 +951,7 @@ const SmartView = () => {
   const loadDetails = async (bay) => {
     setError('');
     try {
-      const r = await fetch('/api/storage/smart/details/'+encodeURIComponent(bay),{credentials:'include'});
+      const r = await (window.nimbusStorageFetch||fetch)('/api/storage/smart/details/'+encodeURIComponent(bay),{credentials:'include'});
       const d = await r.json();
       if(!r.ok) throw new Error(d.error||'Nie można pobrać szczegółów S.M.A.R.T.');
       setDetails(prev => ({...prev, [bay]: d}));
@@ -1027,9 +1030,9 @@ const FormatModal = ({ disk, onClose }) => {
     if (!ok) return;
     setBusy(true);setError('');
     try {
-      let r=await fetch('/api/storage/format',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay, fs, label})});
+      let r=await (window.nimbusStorageFetch||fetch)('/api/storage/format',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay, fs, label})});
       let d=await r.json();if(!r.ok)throw new Error(d.error||'Formatowanie nie powiodło się');
-      if(fs!=='zfs'&&mp){r=await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay,target:mp,fs,options:trim?'rw,relatime,discard':'rw,relatime',persist:true})});d=await r.json();if(!r.ok)throw new Error(d.error||'Dysk sformatowano, ale montowanie nie powiodło się')}
+      if(fs!=='zfs'&&mp){r=await (window.nimbusStorageFetch||fetch)('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:'/dev/'+disk.bay,target:mp,fs,options:trim?'rw,relatime,discard':'rw,relatime',persist:true})});d=await r.json();if(!r.ok)throw new Error(d.error||'Dysk sformatowano, ale montowanie nie powiodło się')}
       onClose();
     } catch(e){setError(e.message)} finally{setBusy(false)}
   };
@@ -1090,7 +1093,7 @@ const MountModal = ({ disk, onClose }) => {
   const doMount = async () => {
     setBusy(true);setError('');
     try {
-      const r=await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      const r=await (window.nimbusStorageFetch||fetch)('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({device, target:mp, fs:disk.fs&&disk.fs!=='—'?disk.fs:'', options:opts, persist:auto})});
       const d=await r.json();if(!r.ok)throw new Error(d.error||'Montowanie nie powiodło się');
       window.dispatchEvent(new Event('nimbus-storage-changed'));onClose();
@@ -1130,7 +1133,7 @@ const FstabModal = ({ onClose }) => {
   const [error, setError] = React.useState('');
 
   React.useEffect(() => {
-    fetch('/api/storage/fstab-content',{credentials:'include'})
+    (window.nimbusStorageFetch||fetch)('/api/storage/fstab-content',{credentials:'include'})
       .then(async r=>{ const d=await r.json(); if(!r.ok) throw new Error(d.error||'Nie można odczytać /etc/fstab'); return d; })
       .then(d=>{ const content=d.content||''; setText(content);setOriginal(content); storeSet('FSTAB_TEXT',content); })
       .catch(e=>setError(e.message))
@@ -1140,7 +1143,7 @@ const FstabModal = ({ onClose }) => {
   const check = async () => {
     setBusy(true);setError('');setMessage('');
     try {
-      const response = await fetch('/api/storage/fstab-check',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})});
+      const response = await (window.nimbusStorageFetch||fetch)('/api/storage/fstab-check',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})});
       const data = await response.json();
       if(!response.ok) throw new Error(data.error||'Nie można sprawdzić fstab');
       if(!data.ok) throw new Error(data.output||'Wykryto błędy w fstab');
@@ -1151,7 +1154,7 @@ const FstabModal = ({ onClose }) => {
   const save = async (apply=false) => {
     setBusy(true);setError('');setMessage('');
     try {
-      const response = await fetch('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,original,apply})});
+      const response = await (window.nimbusStorageFetch||fetch)('/api/storage/save-fstab',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,original,apply})});
       const data = await response.json().catch(()=>({}));
       if(data.saved){storeSet('FSTAB_TEXT', text);setOriginal(text.endsWith('\n')?text:text+'\n');window.dispatchEvent(new Event('nimbus-storage-changed'));}
       if(!response.ok) throw new Error(data.error||'Nie udało się zapisać /etc/fstab');
@@ -1194,14 +1197,14 @@ const AddMountModal = ({ onClose }) => {
   const fstabLine = `${device||'<urządzenie>'}   ${mp}   ${fs}   ${opts}   0   2`;
 
   const testMount = async () => {
-    const r = await fetch('/api/storage/check-device?device='+encodeURIComponent(device),{credentials:'include'}).then(r=>r.json()).catch(()=>null);
+    const r = await (window.nimbusStorageFetch||fetch)('/api/storage/check-device?device='+encodeURIComponent(device),{credentials:'include'}).then(r=>r.json()).catch(()=>null);
     alert(r?.exists ? 'Urządzenie dostępne' : 'Urządzenie niedostępne'+(r?.error?' — '+r.error:''));
   };
 
   const doMount = async () => {
     setBusy(true);setError('');
     try {
-      const r = await fetch('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      const r = await (window.nimbusStorageFetch||fetch)('/api/storage/mount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({device, target:mp, fs:fs==='auto'?'':fs, options:opts, persist:auto&&fstab})});
       const d = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(d.error||'Montowanie nie powiodło się');
@@ -1255,7 +1258,7 @@ const UnmountConfirm = ({ mount, onClose }) => {
 
   const doUnmount = async () => {
     setBusy(true);setError('');
-    try{const r=await fetch('/api/storage/unmount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:mount.mp,force,lazy})});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Odmontowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));onClose();}catch(e){setError(e.message);}finally{setBusy(false);}
+    try{const r=await (window.nimbusStorageFetch||fetch)('/api/storage/unmount',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:mount.mp,force,lazy})});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Odmontowanie nie powiodło się');window.dispatchEvent(new Event('nimbus-storage-changed'));onClose();}catch(e){setError(e.message);}finally{setBusy(false);}
   };
 
   return (
@@ -1353,7 +1356,7 @@ const CreatePoolModal = ({ onClose }) => {
     if (!ok) return;
     setBusy(true); setLog('');
     try {
-      const r = await fetch('/api/zfs/pool/create', {
+      const r = await (window.nimbusStorageFetch||fetch)('/api/zfs/pool/create', {
         method: 'POST', credentials: 'include',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ backend, raid_type: raidType, name: name.trim(), disks: selectedDisks, ashift: parseInt(ashift), compress, dedup, encrypt }),
@@ -1501,7 +1504,7 @@ const BayLedsView = () => {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const baysRes = await fetch('/api/bays', { credentials: 'include' }).then(r => r.json());
+      const baysRes = await (window.nimbusStorageFetch||fetch)('/api/bays', { credentials: 'include' }).then(r => r.json());
       const infoRes = baysRes.enclosure || {tool:baysRes.tool,tools:[]};
       setEnclosure(infoRes);
       // Ustaw tool z serwera jeśli jeszcze nie ustawiony przez użytkownika
@@ -1524,7 +1527,7 @@ const BayLedsView = () => {
   const rescan = async () => {
     setScanning(true);
     try {
-      await fetch('/api/bays/scan', { method: 'POST', credentials: 'include' });
+      await (window.nimbusStorageFetch||fetch)('/api/bays/scan', { method: 'POST', credentials: 'include' });
       await loadAll();
     } catch {}
     setScanning(false);
@@ -1536,7 +1539,7 @@ const BayLedsView = () => {
     setLedBusy(true);
     setLastResult(null);
     try {
-      const r = await fetch(`/api/bays/${selected}/led`, {
+      const r = await (window.nimbusStorageFetch||fetch)(`/api/bays/${selected}/led`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -1560,7 +1563,7 @@ const BayLedsView = () => {
   const allOff = async () => {
     setLedBusy(true);
     try {
-      await fetch('/api/bays/all-off', { method: 'POST', credentials: 'include' });
+      await (window.nimbusStorageFetch||fetch)('/api/bays/all-off', { method: 'POST', credentials: 'include' });
       setSlots(ss => ss.map(s => ({ ...s, led: 'off', led_color: 'off' })));
     } catch {}
     setLedBusy(false);

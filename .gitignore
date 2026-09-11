@@ -33,3 +33,7 @@ vendor/
 
 # esbuild local
 node_modules/
+
+# Python worker caches
+__pycache__/
+*.pyc

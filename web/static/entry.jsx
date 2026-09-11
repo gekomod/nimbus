@@ -10,6 +10,7 @@ import './data.jsx';
 import './modules.jsx';
 import './shell.jsx';
 import './screens-overview.jsx';
+import './storage-jobs.jsx';
 import './screens-storage.jsx';
 import './screens-storage-detail.jsx';
 import './screens-docker-topology.jsx';
