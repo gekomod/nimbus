@@ -13,6 +13,7 @@ import './screens-overview.jsx';
 import './screens-storage.jsx';
 import './screens-storage-detail.jsx';
 import './screens-docker-topology.jsx';
+import './screens-network-workspace.jsx';
 import './screens-services.jsx';
 import './screens-docker.jsx';
 import './screens-system.jsx';

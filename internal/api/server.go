@@ -43,6 +43,7 @@ func NewServer(cfg Config) *Server {
 		jsonErr(w, "nimbus-dl niedostępny — sprawdź: systemctl status nimbus-dl", http.StatusServiceUnavailable)
 	}
 
+	recoverNetworkChange()
 	s.routes()
 	go runStartupTasks()
 	sys.StartMonitor()
@@ -178,6 +179,7 @@ func (s *Server) routes() {
 
 	// network
 	a("/api/network", s.networkOverviewWithRealStates(s.handleNetworkOverview))
+	a("/network/changes", s.handleNetworkChanges)
 	a("/network/interfaces", s.handleNetworkInterfaces)
 	a("/network/interfaces/details/", s.handleNetworkInterfaceDetail)
 	a("/network/interfaces/add", s.handleNetworkInterfaceAdd)

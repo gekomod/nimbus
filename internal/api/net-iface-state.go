@@ -22,7 +22,7 @@ func ifaceLinkState(name string) string {
 	flags, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(string(flagsData), "0x")), 16, 32)
 	if err != nil || flags&0x1 == 0 { return "down" }
 	oper, _ := os.ReadFile("/sys/class/net/" + name + "/operstate")
-	if strings.TrimSpace(string(oper)) == "down" { return "no-carrier" }
+	if state := strings.TrimSpace(string(oper)); state != "up" && state != "unknown" { return "no-carrier" }
 	return "up"
 }
 

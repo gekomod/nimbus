@@ -7,7 +7,7 @@ const MiniLine = ({ data, color='var(--accent)', h=28 }) => {
   const w=120;
   const mn=Math.min(...data), mx=Math.max(...data)||1;
   const range=mx-mn||1;
-  const pts=data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-mn)/range)*(h-4)-2}`);
+  const pts=data.map((v,i)=>`${(i/Math.max(1,data.length-1))*w},${h-((v-mn)/range)*(h-4)-2}`);
   return (
     <svg viewBox={`0 0 ${w} ${h}`} style={{width:120,height:h}} preserveAspectRatio="none">
       <path d={`M 0,${h} L ${pts.join(' L ')} L ${w},${h} Z`} fill={color} opacity=".12"/>
@@ -52,7 +52,7 @@ const BandwidthChart = ({ iface, series }) => {
       <path d={txArea} fill={txColor} opacity=".1"/>
       <path d={txPath} fill="none" stroke={txColor} strokeWidth="1.5" strokeDasharray="4 3"/>
       {xLabels.map(i=>(
-        <text key={i} x={x(i)} y={h-6} fontSize="10" fill="var(--fg-dim)" textAnchor="middle" fontFamily="var(--font-mono)">-{n-1-i}s</text>
+        <text key={i} x={x(i)} y={h-6} fontSize="10" fill="var(--fg-dim)" textAnchor="middle" fontFamily="var(--font-mono)">-{(n-1-i)*3}s</text>
       ))}
       <text x={w-pad+2} y={y(lastRxVal)+4} fontSize="11" fill={color} fontFamily="var(--font-mono)" fontWeight="600">
         {lastRxVal<0.1?(lastRxVal*1024).toFixed(0)+' KB/s':lastRxVal+' MB/s'}
@@ -85,7 +85,7 @@ const NetworkDetail = () => {
         setSeries(newSeries);
         // Użyj setSelIface z funkcją — omija problem zamrożonego zamknięcia
         // Preferuj interfejs 'up' — czytaj window.NETWORK poza setState
-        const NET2 = window.useStore ? window.useStore('NETWORK') : window.NETWORK;
+        const NET2 = window.NETWORK;
         const netIfacesList = NET2?.interfaces || [];
         const names = Object.keys(newSeries);
         const upIface = names.find(n => netIfacesList.find(i => i.name === n && i.state === 'up'));
@@ -251,7 +251,7 @@ const NetworkDetail = () => {
                   </div>
                   <div className="card">
                     <div className="card-head">
-                      <div><div className="card-title">Przepustowość — {iface.name}</div><div className="card-sub">ostatnie 60 minut</div></div>
+                      <div><div className="card-title">Przepustowość — {iface.name}</div><div className="card-sub">ostatnie 60 próbek · około 3 min</div></div>
                       <div style={{display:'flex',gap:14,fontSize:'var(--fs-xs)'}}>
                         <div style={{display:'flex',alignItems:'center',gap:5}}><div style={{width:20,height:2,background:color}}/><span style={{color:'var(--fg-dim)'}}>RX</span></div>
                         <div style={{display:'flex',alignItems:'center',gap:5}}><div style={{width:20,height:2,background:'oklch(0.65 0.18 200)',opacity:.8}}/><span style={{color:'var(--fg-dim)'}}>TX</span></div>
@@ -417,3 +417,5 @@ const NetworkDetail = () => {
 };
 
 window.NetworkDetail = NetworkDetail;
+
+window.NetworkBandwidthChart = BandwidthChart;

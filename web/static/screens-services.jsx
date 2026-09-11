@@ -2131,16 +2131,9 @@ const DynamicDNS = () => {
 
 const Network = () => {
   const [netTab, setNetTab] = React.useState('interfaces');
-	const [traffic, setTraffic] = React.useState({rx:Array(40).fill(0),tx:Array(40).fill(0)});
   const [editIface, setEditIface] = React.useState(null);
   const NETWORK = useStore('NETWORK');
-  const N  = NETWORK || {hostname:'—',domain:'—',gateway:'—',dns:[],interfaces:[]};
-  const ifaces = N.interfaces || [];
-	React.useEffect(() => {
-	  const rxNow=ifaces.reduce((sum,i)=>sum+(Number(i.rx)||0),0);
-	  const txNow=ifaces.reduce((sum,i)=>sum+(Number(i.tx)||0),0);
-	  setTraffic(h=>({rx:[...h.rx.slice(-39),rxNow],tx:[...h.tx.slice(-39),txNow]}));
-	}, [NETWORK]);
+  const N = NETWORK || {hostname:'—',domain:'—',gateway:'—',dns:[],interfaces:[]};
 
   const NET_TABS = [
     {id:'interfaces', label:'Interfejsy'},
@@ -2157,74 +2150,7 @@ const Network = () => {
       <div className="segmented" style={{flexWrap:'wrap'}}>
         {NET_TABS.map(t=><button key={t.id} className={netTab===t.id?'active':''} onClick={()=>setNetTab(t.id)}>{t.label}</button>)}
       </div>
-      {netTab==='interfaces' && (
-        <div className="col" style={{gap:'var(--gutter)'}}>
-          <div className="grid grid-2-1">
-            <div className="card">
-              <div className="card-head">
-                <div>
-                  <div className="card-title">Przepustowość</div>
-                  <div className="card-sub">{ifaces[0]?.name||'eth0'} · ostatnie 5 min</div>
-                </div>
-                <div className="card-actions">
-                  <span className="badge ok"><span className="dot pulse"/>{ifaces.filter(i=>i.state==='up').length} iface UP</span>
-                </div>
-              </div>
-              <div className="card-body">
-                <div className="row" style={{gap:24,marginBottom:8,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',color:'var(--fg-muted)'}}>
-                  <span><span style={{display:'inline-block',width:8,height:8,background:'var(--accent)',borderRadius:2,marginRight:6}}/>RX (download)</span>
-                  <span><span style={{display:'inline-block',width:8,height:8,background:'oklch(0.78 0.15 75)',borderRadius:2,marginRight:6}}/>TX (upload)</span>
-                </div>
-				<LineChart series={[traffic.rx,traffic.tx]} colors={['var(--accent)','oklch(0.78 0.15 75)']} labels={['historia','','','','','teraz']}/>
-              </div>
-            </div>
-            <div className="card">
-              <div className="card-head"><div className="card-title">Konfiguracja</div></div>
-              <div className="card-body col" style={{gap:8}}>
-                <KV k="Hostname" v={<span className="mono">{N.hostname}</span>}/>
-                <KV k="Domena"   v={<span className="mono">{N.domain||'local'}</span>}/>
-                <KV k="Brama"    v={<span className="mono">{N.gateway||'—'}</span>}/>
-                <KV k="DNS"      v={<span className="mono">{(N.dns||[]).join(', ')||'—'}</span>}/>
-                <hr className="div"/>
-                <div className="row" style={{justifyContent:'space-between'}}><span>WireGuard VPN</span><div className={'toggle'+(ifaces.some(i=>i.name==='wg0'&&i.state==='up')?' on':'')}/></div>
-                <div className="row" style={{justifyContent:'space-between'}}><span>IPv6</span><div className="toggle on"/></div>
-              </div>
-            </div>
-          </div>
-			<div className="card">
-			  <div className="card-head"><div className="card-title">Interfejsy sieciowe</div></div>
-			  <table className="table">
-				<thead><tr><th>Interfejs</th><th>Stan</th><th>Prędkość</th><th>Adres IP</th><th>MAC</th><th>VLAN</th><th>RX</th><th>TX</th><th></th></tr></thead>
-				<tbody>
-				  {ifaces.length === 0
-				    ? <tr><td colSpan={9} style={{textAlign:'center',padding:24,color:'var(--fg-dim)'}}>Ładowanie interfejsów…</td></tr>
-				    : ifaces.map((iface,k)=>{
-				        const liveRx = iface.state === 'up' ? Number(iface.rx||0).toFixed(2) : 0;
-				        const liveTx = iface.state === 'up' ? Number(iface.tx||0).toFixed(2) : 0;
-				        
-				        return (
-				          <tr key={k}>
-				            <td className="mono">{iface.name}</td>
-				            <td>{iface.state==='up'?<span className="badge ok"><span className="dot"/>UP</span>:iface.state==='no-carrier'?<span className="badge warn"><span className="dot"/>BRAK LINKU</span>:<span className="badge"><span className="dot"/>DOWN</span>}</td>
-				            <td className="mono">{iface.speed||'—'}</td>
-				            <td className="mono">{iface.ip||'—'}</td>
-				            <td className="mono dim">{iface.mac||'—'}</td>
-				            <td className="mono">{iface.vlan||'—'}</td>
-				            <td className="mono" style={{color:iface.state==='up'?'var(--accent)':'var(--fg-dim)'}}>
-				              <Icon name="arrow_down" size={10}/> {liveRx} MB/s
-				            </td>
-				            <td className="mono" style={{color:iface.state==='up'?'oklch(0.78 0.15 75)':'var(--fg-dim)'}}>
-				              <Icon name="arrow_up" size={10}/> {liveTx} MB/s
-				            </td>
-				            <td><button className="icon-btn" onClick={()=>setEditIface(iface)}><Icon name="edit"/></button></td>
-				          </tr>
-				        );
-				      })}
-				</tbody>
-			  </table>
-			</div>
-        </div>
-      )}
+      {netTab==='interfaces' && <window.NetworkWorkspace onAdvanced={setEditIface}/>}
 
       {netTab==='wireguard' && <NetworkWireGuard/>}
       {netTab==='dhcp'      && <NetworkDhcp/>}
@@ -2244,12 +2170,12 @@ const Network = () => {
 // ── Edit Interface Modal ────────────────────────────────────────────────────
 const EditIfaceModal = ({ iface, onClose }) => {
   const N = useStore('NETWORK') || {};
-  const [ip,      setIp]      = React.useState(iface.ip === '—' ? '' : iface.ip);
+  const [ip,      setIp]      = React.useState((iface.addresses||[]).find(a=>a.includes('.')) || (iface.ip === '—' ? '' : iface.ip));
   const [mode,    setMode]    = React.useState(ip ? 'static' : 'dhcp');
   const [gw,      setGw]      = React.useState(N.gateway || '');
   const [dns,     setDns]     = React.useState((N.dns || []).join(', '));
   const [vlan,    setVlan]    = React.useState(iface.vlan === '—' ? '' : iface.vlan);
-  const [mtu,     setMtu]     = React.useState('1500');
+  const [mtu,     setMtu]     = React.useState(String(iface.mtu||1500));
   const [enabled, setEnabled] = React.useState(iface.admin_up ?? iface.state === 'up');
 	const [error,setError]=React.useState('');
   const [saving,  setSaving]  = React.useState(false);
@@ -2286,6 +2212,7 @@ const EditIfaceModal = ({ iface, onClose }) => {
         </button>
       </>}
     >
+      <p className="dim">Zaawansowane ustawienia stosowane są od razu, bez automatycznego cofania. Zmianę IPv4, MTU lub stanu karty z potwierdzeniem wykonasz w szczegółach interfejsu.</p>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
         <div style={{padding:'10px 14px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:6,display:'flex',justifyContent:'space-between',alignItems:'center',gridColumn:'1/-1'}}>
           <div>

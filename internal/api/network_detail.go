@@ -80,16 +80,7 @@ func updateBandwidth() {
 	defer bwMu.Unlock()
 
 	for name, cur := range stats {
-		// Pomiń interfejsy wirtualne Docker, veth, bridges, tunele
-		if strings.HasPrefix(name, "veth")   ||
-		   strings.HasPrefix(name, "br-")    ||
-		   strings.HasPrefix(name, "docker") ||
-		   strings.HasPrefix(name, "virbr")  ||
-		   strings.HasPrefix(name, "tun")    ||
-		   strings.HasPrefix(name, "tap")    ||
-		   name == "lo" {
-			continue
-		}
+
 		prev := bwHistory[name]
 		newSample := IfaceSample{RxBytes: cur[0], TxBytes: cur[1], T: now}
 
@@ -97,8 +88,8 @@ func updateBandwidth() {
 			last := prev[len(prev)-1]
 			dt := now.Sub(last.T).Seconds()
 			if dt > 0 {
-				rxMBs := float64(cur[0]-last.RxBytes) / dt / 1024 / 1024
-				txMBs := float64(cur[1]-last.TxBytes) / dt / 1024 / 1024
+				rxMBs := counterRate(cur[0], last.RxBytes, dt)
+				txMBs := counterRate(cur[1], last.TxBytes, dt)
 				if rxMBs < 0 { rxMBs = 0 }
 				if txMBs < 0 { txMBs = 0 }
 
@@ -328,4 +319,8 @@ func buildIptablesCmd(chain, action, proto, src, dport, comment string) string {
 	if comment != "" { cmd += fmt.Sprintf(` -m comment --comment "%s"`, comment) }
 	cmd += fmt.Sprintf(" -j %s", action)
 	return cmd
+}
+
+func counterRate(now, prev uint64, seconds float64) float64 {
+ if seconds <= 0 || now < prev { return 0 }; return float64(now-prev)/seconds/1_000_000
 }

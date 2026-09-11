@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+ "net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,6 +165,12 @@ func Memory() MemInfo {
 // ─── Network ────────────────────────────────────────────────────────────────
 
 type NetIface struct {
+ Kind string `json:"kind"`
+ Master string `json:"master"`
+ MTU int `json:"mtu"`
+ Addresses []string `json:"addresses"`
+ Physical bool `json:"physical"`
+ Duplex string `json:"duplex"`
 	Name      string  `json:"name"`
 	RxB       uint64  `json:"rx_bytes"`
 	TxB       uint64  `json:"tx_bytes"`
@@ -190,7 +197,18 @@ var (
 	netCounterPrev = map[string]netCounterSample{}
 )
 
+// Keep legacy aggregate consumers from counting virtual links twice.
 func NetInterfaces() []NetIface {
+ var result []NetIface
+ for _, iface := range AllNetInterfaces() {
+  name:=iface.Name
+  if strings.HasPrefix(name,"veth") || strings.HasPrefix(name,"br-") || strings.HasPrefix(name,"docker") || strings.HasPrefix(name,"virbr") || strings.HasPrefix(name,"tun") || strings.HasPrefix(name,"tap") {continue}
+  result=append(result,iface)
+ }
+ return result
+}
+
+func AllNetInterfaces() []NetIface {
 	data, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
 		return nil
@@ -213,16 +231,7 @@ func NetInterfaces() []NetIface {
 		}
 		name := strings.TrimSpace(line[:colonIdx])
 
-		// Pomiń lo i interfejsy wirtualne (docker, veth, br-, virbr, tun, tap)
-		if name == "lo" ||
-			strings.HasPrefix(name, "veth") ||
-			strings.HasPrefix(name, "br-") ||
-			strings.HasPrefix(name, "docker") ||
-			strings.HasPrefix(name, "virbr") ||
-			strings.HasPrefix(name, "tun") ||
-			strings.HasPrefix(name, "tap") {
-			continue
-		}
+		if name == "lo" { continue }
 
 		fields := strings.Fields(line[colonIdx+1:])
 		if len(fields) < 9 {
@@ -276,19 +285,28 @@ func NetInterfaces() []NetIface {
 			speedMbps = 0
 		}
 
-		// Get IP via /proc/net/if_inet6 or ip command
-		out, _ := exec.Command("ip", "-brief", "addr", "show", name).Output()
-		for _, l := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(l)
-			if len(fields) >= 3 {
-				for _, f := range fields[2:] {
-					if strings.Contains(f, ".") {
-						ip = strings.Split(f, "/")[0]
-						break
-					}
-				}
-			}
-		}
+        addresses := []string{}
+        mtu := 0
+        if ni, e := net.InterfaceByName(name); e == nil {
+            mtu = ni.MTU
+            addrs, _ := ni.Addrs()
+            for _, addr := range addrs {
+                addresses = append(addresses, addr.String())
+                if parsed, _, e := net.ParseCIDR(addr.String()); e == nil && parsed.To4() != nil && ip == "" { ip = parsed.String() }
+            }
+        }
+        base := "/sys/class/net/" + name
+        _, physicalErr := os.Stat(base + "/device")
+        physical := physicalErr == nil
+        kind := "virtual"
+        if physical { kind = "physical" }
+        if _, e := os.Stat(base + "/bridge"); e == nil { kind = "bridge" }
+        if _, e := os.Stat(base + "/bonding"); e == nil { kind = "bond" }
+        if _, e := os.Stat("/proc/net/vlan/" + name); e == nil { kind = "vlan" }
+        master := ""
+        if target, e := os.Readlink(base + "/master"); e == nil { master = filepath.Base(target) }
+        duplex, _ := os.ReadFile(base + "/duplex")
+        if speedMbps < 0 { speedMbps = 0 }
 
 		// Sprawdź czy interfejs ma VLAN (np. eth0.100)
 		vlan := ""
@@ -298,6 +316,7 @@ func NetInterfaces() []NetIface {
 
 		ifaces = append(ifaces, NetIface{
 			Name:      name,
+ Kind: kind, Physical: physical, Master: master, MTU: mtu, Addresses: addresses, Duplex: strings.TrimSpace(string(duplex)),
 			RxB:       rxB,
 			TxB:       txB,
 			Rx:        rxRate,

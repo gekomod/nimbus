@@ -18,11 +18,11 @@ func validIface(name string) bool {
 }
 
 func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]any{"hostname": sys.Hostname(), "interfaces": sys.NetInterfaces()})
+	jsonOK(w, map[string]any{"hostname": sys.Hostname(), "interfaces": sys.AllNetInterfaces()})
 }
 
 func (s *Server) handleNetworkInterfaces(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]any{"interfaces": sys.NetInterfaces()})
+	jsonOK(w, map[string]any{"interfaces": sys.AllNetInterfaces()})
 }
 
 func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +48,8 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 		stats, _ := runCmd("ip", "-s", "link", "show", "dev", iface)
 		jsonOK(w, map[string]any{"interface": iface, "addr": addr, "stats": stats})
 	case http.MethodPost:
+        networkChanges.Lock(); defer networkChanges.Unlock()
+        if networkChanges.Pending!=nil {jsonErr(w,"najpierw potwierdź lub cofnij zmianę sieci",409);return}
 		var req struct { Action, IP, Prefix, Mode, Gateway, DNS, VLAN string; MTU int }
 		if json.NewDecoder(r.Body).Decode(&req) != nil { jsonErr(w,"nieprawidłowe dane",400); return }
 		if _, err := os.Stat("/sys/class/net/"+iface); err != nil { jsonErr(w,"interfejs nie istnieje",404); return }
