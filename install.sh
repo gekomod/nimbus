@@ -75,6 +75,16 @@ ok "Źródła zweryfikowane"
 # ── Sprawdź root ───────────────────────────────────────────────────────────────
 [ "$(id -u)" = "0" ] || die "Uruchom jako root: sudo bash install.sh"
 
+# Stop before dependencies/build/copy in every installation and update mode.
+step "Zatrzymywanie nimbus-dl przed instalacją"
+if DL_STOP_OUTPUT=$(systemctl stop nimbus-dl 2>&1); then
+    ok "nimbus-dl zatrzymany"
+elif [ "$(systemctl show nimbus-dl.service --property=LoadState --value 2>/dev/null || true)" = "not-found" ]; then
+    info "nimbus-dl nie jest jeszcze zainstalowany — kontynuuję"
+else
+    die "Nie można zatrzymać nimbus-dl: $DL_STOP_OUTPUT"
+fi
+
 # ── Sprawdź OS ─────────────────────────────────────────────────────────────────
 step "Sprawdzanie systemu"
 if [ -f /etc/os-release ]; then
