@@ -2180,38 +2180,33 @@ const EditIfaceModal = ({ iface, onClose }) => {
 	const [error,setError]=React.useState('');
   const [saving,  setSaving]  = React.useState(false);
   
+  const [result,setResult]=React.useState(''),[elapsed,setElapsed]=React.useState(0);
+  React.useEffect(()=>{if(!saving)return;const start=Date.now();setElapsed(0);const id=setInterval(()=>setElapsed(Math.floor((Date.now()-start)/1000)),1000);return()=>clearInterval(id)},[saving]);
   const inpCss = {width:'100%',background:'var(--bg-1)',border:'1px solid var(--line)',color:'var(--fg)',padding:'7px 10px',borderRadius:5,fontSize:'var(--fs-sm)',fontFamily:'var(--font-mono)',outline:'none'};
   
   const save = async () => {
-    setSaving(true);
+    if(saving)return;
+    setSaving(true);setError('');setResult('');
     try {
-		      const r=await fetch(`/network/interfaces/details/${iface.name}`, {
-		        method: 'POST',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-		          action: enabled ? 'configure' : 'down', mode,
-		          IP: ip.split('/')[0], Prefix: ip.split('/')[1] || '24',
-		          Gateway:gw, DNS:dns, VLAN:vlan, MTU:+mtu,
-		        }),
-		      });
-		      const d=await r.json();if(!r.ok)throw new Error(d.error||'Nie udało się zastosować konfiguracji');
-		      onClose();
-    } catch(e) {
-		      setError(e.message);
-    }
-    setSaving(false);
+      const d=await window.networkRequest(`/network/interfaces/details/${encodeURIComponent(iface.name)}`,{
+        action:enabled?'configure':'down',mode,
+        IP:ip.split('/')[0],Prefix:ip.split('/')[1]||'24',Gateway:gw,DNS:dns,VLAN:vlan,MTU:+mtu,
+      });
+      setResult((d.message||'Polecenie wykonane.')+' Stan interfejsu: '+({up:'włączony',down:'wyłączony','no-carrier':'włączony, brak połączenia fizycznego'}[d.state]||d.state||'nieznany'));
+    }catch(e){setError(e.message)}finally{setSaving(false)}
   };
 
   return (
     <Modal title={`Edytuj interfejs · ${iface.name}`} sub={`${iface.speed || '—'} · MAC ${iface.mac}`} onClose={onClose} width={620}
       footer={<>
-        <button className="btn sm ghost" onClick={onClose}>Anuluj</button>
+        <button className="btn sm ghost" onClick={onClose}>{result?'Zamknij':'Anuluj'}</button>
         <button className="btn sm primary" onClick={save} disabled={saving}>
-          {saving ? 'Zapisywanie…' : 'Zapisz i zastosuj'}
+          {saving ? `Zapisywanie… ${elapsed} s` : 'Zapisz i zastosuj'}
         </button>
       </>}
     >
+      {saving&&<p role="status">Stosowanie konfiguracji… {elapsed} s. Zmiana adresu lub wyłączenie karty może przerwać dostęp do panelu.</p>}
+      {result&&<p role="status" style={{color:'var(--ok)'}}>{result}</p>}
       <p className="dim">Zaawansowane ustawienia stosowane są od razu, bez automatycznego cofania. Zmianę IPv4, MTU lub stanu karty z potwierdzeniem wykonasz w szczegółach interfejsu.</p>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
         <div style={{padding:'10px 14px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:6,display:'flex',justifyContent:'space-between',alignItems:'center',gridColumn:'1/-1'}}>

@@ -112,7 +112,7 @@ func networkPlan(req networkChangeRequest, ni *net.Interface) ([][]string, [][]s
 }
 
 func (s *Server) handleNetworkChanges(w http.ResponseWriter,r *http.Request) {
- networkChanges.Lock(); defer networkChanges.Unlock()
+ if !networkChanges.TryLock() {jsonErr(w,"Trwa zmiana sieci lub cofanie konfiguracji. Poczekaj na wynik.",409);return}; defer networkChanges.Unlock()
  if r.Method==http.MethodGet { jsonOK(w,map[string]any{"pending":networkChanges.Pending}); return }
  if r.Method!=http.MethodPost { jsonErr(w,"method not allowed",405); return }
  var req networkChangeRequest

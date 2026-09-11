@@ -4,8 +4,17 @@ const netRate = value => Number.isFinite(value) ? (value < 1 ? (value*1000).toFi
 const netSpeed = i => i.physical && !i.carrier ? 'Brak linku' : Number(i.speed_mbps)>0 ? (i.speed_mbps>=1000 ? (i.speed_mbps/1000)+' Gb/s' : i.speed_mbps+' Mb/s') : '—';
 const netState = i => !i.admin_up ? 'Wyłączony' : i.state==='up' ? 'Połączony' : i.state==='no-carrier' ? 'Brak linku' : 'Nieznany';
 async function networkRequest(path, body, signal) {
- const r=await fetch(path,{credentials:'include',signal,...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});
- let d;try{d=await r.json()}catch{throw Error('HTTP '+r.status+' — nieprawidłowa odpowiedź serwera')}; if(!r.ok || d.error || d.status==='error') throw Error(d.error||d.message||'Błąd operacji sieciowej'); return d;
+ const ctrl=new AbortController();let timedOut=false;
+ const abort=()=>ctrl.abort();if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+ const timer=setTimeout(()=>{timedOut=true;ctrl.abort()},body?30000:10000);
+ try {
+  const r=await fetch(path,{credentials:'include',signal:ctrl.signal,...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});
+  let d;try{d=await r.json()}catch(e){if(ctrl.signal.aborted)throw e;throw Error('HTTP '+r.status+' — nieprawidłowa odpowiedź serwera')};
+  if(!r.ok || d.error || d.status==='error') throw Error(d.error||d.message||'Błąd operacji sieciowej');return d;
+ } catch(e) {
+  if(timedOut)throw Error(body?'Brak odpowiedzi przez 30 sekund. Wynik zmiany jest nieznany — sprawdź połączenie i aktualny stan, zanim ponowisz operację.':'Brak odpowiedzi serwera przez 10 sekund.');
+  throw e;
+ } finally {clearTimeout(timer);signal?.removeEventListener('abort',abort)}
 }
 const NetworkWorkspace = ({onAdvanced}) => {
  const [ifaces,setIfaces]=React.useState([]),[selected,setSelected]=React.useState(''),[filter,setFilter]=React.useState('all'),[search,setSearch]=React.useState('');
@@ -13,6 +22,7 @@ const NetworkWorkspace = ({onAdvanced}) => {
  const [pending,setPending]=React.useState(null),[busy,setBusy]=React.useState(false),[detail,setDetail]=React.useState('overview'),[diagnostic,setDiagnostic]=React.useState(''),[clock,setClock]=React.useState(Date.now());
  const [edit,setEdit]=React.useState(null),[value,setValue]=React.useState('');
  const [pollError,setPollError]=React.useState('');
+ const [started,setStarted]=React.useState(0),[notice,setNotice]=React.useState('');
  const kinds={all:'Wszystkie',physical:'Fizyczne',bridge:'Bridge',bond:'Bond',vlan:'VLAN',virtual:'Wirtualne'};
  const refresh=React.useCallback(async(signal)=>{
   const [inventory,bandwidth,changes]=await Promise.all([networkRequest('/network/interfaces',null,signal),networkRequest('/api/network/bandwidth',null,signal),networkRequest('/network/changes',null,signal)]);
@@ -30,8 +40,15 @@ const NetworkWorkspace = ({onAdvanced}) => {
  const last=(i,key)=>{const samples=series[i.name]?.[key];return samples?.length?samples[samples.length-1]:null};
  const total=key=>{const vals=physical.map(i=>last(i,key));return vals.length&&vals.every(Number.isFinite)?vals.reduce((a,b)=>a+b,0):null};
  const visible=ifaces.filter(i=>(filter==='all'||netKind(i)===filter)&&[i.name,...(i.addresses||[]),i.master].join(' ').toLowerCase().includes(search.toLowerCase()));
- const mutate=async body=>{setBusy(true);setError('');try{const d=await networkRequest('/network/changes',body);setPending(d.pending||null);setEdit(null);await refresh()}catch(e){setError(e.message+' — odśwież stan przed ponowną próbą.')}finally{setBusy(false)}};
- const inspect=async()=>{setDetail('diagnostics');setBusy(true);setDiagnostic('');try{const d=await networkRequest('/network/interfaces/details/'+encodeURIComponent(selected));setDiagnostic([d.addr,d.stats].filter(Boolean).join('\n'))}catch(e){setError(e.message)}finally{setBusy(false)}};
+ const mutate=async body=>{
+  setBusy(true);setStarted(Date.now());setError('');setNotice('');
+  try {
+   const d=await networkRequest('/network/changes',body);setPending(d.pending||null);setEdit(null);
+   setNotice(d.pending?'Zmiana zastosowana — potwierdź działające połączenie w ciągu 90 sekund.':body.action==='revert'?'Konfiguracja została cofnięta.':'Zmiana została potwierdzona.');
+   try{await refresh()}catch(e){setPollError('Operacja otrzymała odpowiedź, ale odświeżenie stanu nie powiodło się: '+e.message)}
+  }catch(e){setError(e.message+' Nie ponawiam operacji automatycznie.');}finally{setBusy(false)}
+ };
+ const inspect=async()=>{setDetail('diagnostics');setBusy(true);setStarted(Date.now());setDiagnostic('');try{const d=await networkRequest('/network/interfaces/details/'+encodeURIComponent(selected));setDiagnostic([d.addr,d.stats].filter(Boolean).join('\n'))}catch(e){setError(e.message)}finally{setBusy(false)}};
  const openEdit=action=>{setEdit(action);setValue(action==='mtu'?String(iface.mtu):(iface.addresses||[]).find(a=>a.includes('.'))||'')};
  const changeAddress=()=>mutate({interface:selected,action:edit,...(edit==='mtu'?{mtu:Number(value)}:{address:value.trim(),old_address:(iface.addresses||[]).find(a=>a.includes('.'))||''})});
  const chart=series[selected]||{rx:[],tx:[]};
@@ -45,6 +62,8 @@ const NetworkWorkspace = ({onAdvanced}) => {
    @media(max-width:1050px){.nw-layout{grid-template-columns:1fr}.nw-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:540px){.nw-summary{grid-template-columns:1fr}.nw-row{padding:14px 12px;grid-template-columns:25px minmax(0,1fr) auto}.nw-port{min-width:80px}.nw-chassis{padding:16px}.nw-row .nw-rate{display:none}}
   `}</style>
   <div className="nw-heading"><div><h2>Twoja sieć</h2><div className="nw-muted">Połączenia, interfejsy i ruch serwera w jednym miejscu</div></div><div className="nw-muted">{updated?'Odczyt '+updated.toLocaleTimeString('pl-PL'):'Oczekiwanie na dane'}</div></div>
+  {busy&&<div className="nw-alert" role="status" aria-live="polite">Oczekiwanie na wynik operacji… {Math.max(0,Math.floor((clock-started)/1000))} s. Zmiana IP lub wyłączenie karty może przerwać połączenie z panelem.</div>}
+  {notice&&<div className="nw-alert" role="status">{notice}</div>}
   {pollError&&<div className="nw-alert error" role="alert">Odczyt nieudany: {pollError}. Wyświetlane dane mogą być nieaktualne.</div>}
   {error&&<div className="nw-alert error" role="alert">{error}</div>}
   {pending&&<div className="nw-alert" role="status"><strong>{pending.error?'Cofanie wymaga uwagi':'Sprawdź połączenie · '+pending.interface}</strong><p>{pending.error||'Potwierdź dostęp do panelu. Niepotwierdzona zmiana zostanie cofnięta za '+Math.max(0,Math.ceil((Date.parse(pending.deadline)-clock)/1000))+' s.'}</p><div className="nw-actions"><button className="btn primary" disabled={busy||!!pending.error||Date.parse(pending.deadline)<=clock} onClick={()=>mutate({action:'confirm',id:pending.id})}>Połączenie działa — zachowaj</button><button className="btn" disabled={busy} onClick={()=>mutate({action:'revert',id:pending.id})}>Cofnij teraz</button></div></div>}
@@ -62,3 +81,5 @@ const NetworkWorkspace = ({onAdvanced}) => {
 };
 window.NetworkWorkspace=NetworkWorkspace;
 window.NetworkWorkspaceHelpers={netKind,netRate,netSpeed,netState,networkRequest};
+
+window.networkRequest = networkRequest;

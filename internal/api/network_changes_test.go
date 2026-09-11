@@ -1,5 +1,5 @@
 package api
-import("net";"reflect";"testing";"fmt";"encoding/json";"os";"time";"net/http/httptest";"strings")
+import("context";"net";"reflect";"testing";"fmt";"encoding/json";"os";"time";"net/http/httptest";"strings")
 func TestNetworkPlanRestoresAdministrativeState(t *testing.T){
  ni:=&net.Interface{Name:"eth0",Flags:net.FlagUp,MTU:9000}
  forward,undo,err:=networkPlan(networkChangeRequest{Interface:"eth0",Action:"down"},ni)
@@ -39,4 +39,16 @@ func TestExpiredNetworkConfirmationRejected(t *testing.T){
  w:=httptest.NewRecorder();r:=httptest.NewRequest("POST","/network/changes",strings.NewReader(`{"action":"confirm","id":"expired"}`))
  (&Server{}).handleNetworkChanges(w,r)
  if w.Code!=409||networkChanges.Pending==nil{t.Fatal("expired change confirmed")}
+}
+
+func TestNetworkOperationContentionReturnsImmediately(t *testing.T){
+ networkChanges.Lock();defer networkChanges.Unlock()
+ w:=httptest.NewRecorder();r:=httptest.NewRequest("POST","/network/changes",strings.NewReader(`{"action":"up","interface":"eth0"}`))
+ (&Server{}).handleNetworkChanges(w,r)
+ if w.Code!=409 {t.Fatalf("expected busy response, got %d",w.Code)}
+}
+func TestNetworkCommandHonorsExpiredBudget(t *testing.T){
+ ctx,cancel:=context.WithCancel(context.Background());cancel()
+ _,err:=networkCommand(ctx,"ip","link","show")
+ if err==nil||!strings.Contains(err.Error(),"czas oczekiwania"){t.Fatalf("deadline not surfaced: %v",err)}
 }

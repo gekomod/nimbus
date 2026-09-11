@@ -2,6 +2,10 @@ package api
 
 import (
 	"encoding/json"
+ "context"
+ "net"
+ "os/exec"
+ "time"
 	"fmt"
 	"net/http"
 	"nimbus/internal/sys"
@@ -25,6 +29,17 @@ func (s *Server) handleNetworkInterfaces(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, map[string]any{"interfaces": sys.AllNetInterfaces()})
 }
 
+// A network operation has a total budget, including DHCP fallbacks.
+func networkCommand(ctx context.Context, name string, args ...string) (string,error) {
+ limit:=5*time.Second
+ if name=="nmcli" || name=="dhclient" {limit=12*time.Second}
+ child,cancel:=context.WithTimeout(ctx,limit);defer cancel()
+ cmd:=exec.CommandContext(child,name,args...);cmd.WaitDelay=time.Second
+ out,err:=cmd.CombinedOutput()
+ if child.Err()!=nil {return strings.TrimSpace(string(out)),fmt.Errorf("%s: przekroczono czas oczekiwania; sprawdź aktualny stan interfejsu",name)}
+ return strings.TrimSpace(string(out)),err
+}
+
 func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Request) {
 	// /network/interfaces/details/:interface  or  /network/interfaces/details/:interface/speedtest
 	suffix := pathSuffix(r, "/network/interfaces/details/")
@@ -42,17 +57,30 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+ ctx,cancel:=context.WithTimeout(context.Background(),20*time.Second);defer cancel()
+ runCmd:=func(name string,args ...string)(string,error){return networkCommand(ctx,name,args...)}
+
 	switch r.Method {
 	case http.MethodGet:
-		addr, _ := runCmd("ip", "addr", "show", "dev", iface)
-		stats, _ := runCmd("ip", "-s", "link", "show", "dev", iface)
+		addr, err := runCmd("ip", "addr", "show", "dev", iface)
+        if err!=nil {jsonErr(w,addr+" "+err.Error(),502);return}
+		stats, err := runCmd("ip", "-s", "link", "show", "dev", iface)
+        if err!=nil {jsonErr(w,stats+" "+err.Error(),502);return}
 		jsonOK(w, map[string]any{"interface": iface, "addr": addr, "stats": stats})
 	case http.MethodPost:
-        networkChanges.Lock(); defer networkChanges.Unlock()
+        if !networkChanges.TryLock() {jsonErr(w,"Trwa inna zmiana sieci. Poczekaj na jej wynik.",409);return}; defer networkChanges.Unlock()
         if networkChanges.Pending!=nil {jsonErr(w,"najpierw potwierdź lub cofnij zmianę sieci",409);return}
 		var req struct { Action, IP, Prefix, Mode, Gateway, DNS, VLAN string; MTU int }
 		if json.NewDecoder(r.Body).Decode(&req) != nil { jsonErr(w,"nieprawidłowe dane",400); return }
 		if _, err := os.Stat("/sys/class/net/"+iface); err != nil { jsonErr(w,"interfejs nie istnieje",404); return }
+        if req.Action=="configure" || req.Action=="set-ip" {
+         if req.Prefix=="" {req.Prefix="24"}
+         if req.Action=="set-ip" || req.Mode!="dhcp" {ip,_,e:=net.ParseCIDR(req.IP+"/"+req.Prefix);if e!=nil || ip.To4()==nil {jsonErr(w,"Nieprawidłowy adres IPv4 lub maska",400);return}}
+         if req.MTU!=0 && (req.MTU<576 || req.MTU>9216) {jsonErr(w,"MTU poza zakresem 576–9216",400);return}
+         if req.Gateway!="" && net.ParseIP(req.Gateway)==nil {jsonErr(w,"Nieprawidłowa brama",400);return}
+         for _,dns:=range strings.Fields(strings.ReplaceAll(req.DNS,","," ")) {if net.ParseIP(dns)==nil {jsonErr(w,"Nieprawidłowy adres DNS",400);return}}
+         if req.Mode!="dhcp" && req.DNS!="" {if _,e:=exec.LookPath("resolvectl");e!=nil {jsonErr(w,"DNS nie został zapisany: brak resolvectl",400);return}}
+        }
 		var out string; var err error
 		switch req.Action {
 		case "up":   out, err = runCmd("ip", "link", "set", "dev", iface, "up")
@@ -74,10 +102,11 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 				attempted := false
 				for _, client := range []struct{name string; args []string}{
 					{"networkctl", []string{"renew", target}},
-					{"nmcli", []string{"device", "connect", target}},
-					{"dhclient", []string{"-v", target}},
+					{"nmcli", []string{"--wait", "10", "device", "connect", target}},
+					{"dhclient", []string{"-1", "-v", target}},
 				} {
-					if !isInstalled(client.name) { continue }
+					if ctx.Err()!=nil {err=fmt.Errorf("Przekroczono łączny limit 20 sekund konfiguracji DHCP");break}
+                    if _,e:=exec.LookPath(client.name);e!=nil {continue}
 					attempted = true
 					out,err=runCmd(client.name,client.args...)
 					if err == nil { break }
@@ -87,13 +116,13 @@ func (s *Server) handleNetworkInterfaceDetail(w http.ResponseWriter, r *http.Req
 				if req.IP == "" { jsonErr(w,"adres IP jest wymagany",400);return }; if req.Prefix==""{req.Prefix="24"}
 				if out,err=runCmd("ip","addr","replace",req.IP+"/"+req.Prefix,"dev",target);err!=nil{break}
 				if req.Gateway!="" { out,err=runCmd("ip","route","replace","default","via",req.Gateway,"dev",target);if err!=nil{break} }
-				if req.DNS!="" && isInstalled("resolvectl") { dnsArgs:=append([]string{"dns",target},strings.Fields(strings.ReplaceAll(req.DNS,","," "))...);out,err=runCmd("resolvectl",dnsArgs...) }
+				if req.DNS!="" { dnsArgs:=append([]string{"dns",target},strings.Fields(strings.ReplaceAll(req.DNS,","," "))...);out,err=runCmd("resolvectl",dnsArgs...) }
 			}
 		default: jsonErr(w,"nieznana akcja",400); return
 		}
 		if err != nil { jsonErr(w,strings.TrimSpace(out+" "+err.Error()),500);return }
 		real := ifaceLinkState(iface)
-		jsonOK(w, map[string]string{"status": "ok", "state":real, "output":out})
+		jsonOK(w, map[string]string{"status": "ok", "state":real, "output":out, "message":"Polecenia konfiguracji wykonane. Sprawdź adres i stan połączenia."})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
