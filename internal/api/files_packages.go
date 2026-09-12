@@ -18,8 +18,8 @@ import (
 
 type FileEntry struct {
 	Name    string `json:"name"`
-	Type    string `json:"type"`    // "dir", "file", "symlink"
-	Size    int64  `json:"size"`    // bytes, -1 for dirs
+	Type    string `json:"type"` // "dir", "file", "symlink"
+	Size    int64  `json:"size"` // bytes, -1 for dirs
 	SizeStr string `json:"size_str"`
 	Mtime   string `json:"mtime"`
 	Perms   string `json:"perms"`
@@ -271,7 +271,11 @@ func (s *Server) handleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dir := filepath.Clean(r.URL.Query().Get("path"))
-	r.ParseMultipartForm(512 << 20) // 512 MB
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
@@ -285,7 +289,16 @@ func (s *Server) handleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer out.Close()
-	size, _ := io.Copy(out, file)
+	size, copyErr := io.Copy(out, file)
+	closeErr := out.Close()
+	if copyErr != nil {
+		jsonErr(w, copyErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if closeErr != nil {
+		jsonErr(w, closeErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	jsonOK(w, map[string]any{"ok": true, "path": dst, "size": size})
 }
 

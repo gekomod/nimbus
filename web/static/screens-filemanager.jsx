@@ -65,17 +65,18 @@ const PermsDialog = ({ file, dir, onClose, onSave }) => {
 
 const PreviewDialog = ({ file, dir, onClose }) => {
   const [content,setContent] = React.useState(null);
+  const [previewError,setPreviewError] = React.useState('');
   const [loading,setLoading] = React.useState(true);
   React.useEffect(() => {
     if (!['text','code','file'].includes(file.type)) { setLoading(false); return; }
-    apiGet(`/api/files/preview?path=${encodeURIComponent(dir+'/'+file.name)}`).then(d => { setContent(d.content||''); setLoading(false); });
+    apiGet(`/api/files/preview?path=${encodeURIComponent(dir+'/'+file.name)}`).then(d => { setPreviewError(d.error||''); setContent(d.content||''); setLoading(false); });
   }, []);
   const dlUrl = `/api/files/download?path=${encodeURIComponent(dir+'/'+file.name)}`;
   return (
     <Modal title={`Podgląd · ${file.name}`} sub={`${file.size_str} · ${file.mtime}`} onClose={onClose} width={720}
       footer={<div className="row gap-sm" style={{marginLeft:'auto'}}><a className="btn sm" href={dlUrl} download={file.name}><Icon name="download" size={11}/> Pobierz</a><button className="btn sm primary" onClick={onClose}>Zamknij</button></div>}>
       {loading ? <div style={{padding:32,textAlign:'center',color:'var(--fg-dim)'}}>Ładowanie…</div>
-        : ['text','code'].includes(file.type) && content !== null
+        : previewError ? <div role="alert" className="dlw-error">{previewError}</div> : ['text','code','file'].includes(file.type) && content !== null
           ? <pre style={{background:'oklch(0.12 0.01 260)',borderRadius:8,padding:'16px',fontFamily:'var(--font-mono)',fontSize:12,lineHeight:1.7,color:'oklch(0.85 0.04 260)',maxHeight:420,overflow:'auto',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{content||'(pusty plik)'}</pre>
           : file.type==='video'||file.type==='audio'
             ? <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12,padding:20}}><div style={{width:120,height:120,borderRadius:16,background:'oklch(0.65 0.2 25 / 0.15)',display:'flex',alignItems:'center',justifyContent:'center'}}><Icon name="media" size={48} style={{color:'oklch(0.65 0.2 25)'}}/></div><div style={{textAlign:'center',color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Podgląd niedostępny.<br/>Rozmiar: <span className="mono">{file.size_str}</span></div></div>
@@ -118,7 +119,6 @@ const RenameDialog = ({ file, dir, onClose, onRenamed }) => {
 
 // ── Main FileManager ──────────────────────────────────────────────────────────
 
-const ROOT_NODE = { id:'__root__', label:'/', path:'/', icon:'disk' };
 
 const FileManager = () => {
   // sidebar — pools from /api/storage/mounts filtered by fs=zfs
@@ -134,7 +134,7 @@ const FileManager = () => {
 
   // ui
   const [selected, setSelected] = React.useState([]);
-  const [view,     setView]     = React.useState('list');
+  const [view,     setView]     = React.useState('grid');
   const [sortBy,   setSortBy]   = React.useState('name');
   const [sortDesc, setSortDesc] = React.useState(false);
   const [search,   setSearch]   = React.useState('');
@@ -144,14 +144,17 @@ const FileManager = () => {
   const [previewFor,   setPreviewFor]   = React.useState(null);
   const [renameFor,    setRenameFor]    = React.useState(null);
   const [newFolderDlg, setNewFolderDlg] = React.useState(false);
-  const [ctxMenu,      setCtxMenu]      = React.useState(null);
   const [uploading,    setUploading]    = React.useState(false);
   const fileInputRef = React.useRef(null);
+  const requestID = React.useRef(0);
+  const [transfer,setTransfer] = React.useState(null);
+  const [poolError,setPoolError] = React.useState('');
 
   // ── Load ZFS pools from /api/storage/mounts ───────────────────────────
   React.useEffect(() => {
     apiGet('/api/storage/mounts').then(res => {
       // res may be array or {mounts:[...]}
+      if(res.error) setPoolError(res.error);
       const all = Array.isArray(res) ? res : (res.mounts || []);
       const zfs = all.filter(m => m.fs === 'zfs' || m.fs === 'ZFS');
       setPools(zfs);
@@ -162,20 +165,16 @@ const FileManager = () => {
   // ── Load files ────────────────────────────────────────────────────────
   const loadFiles = React.useCallback(async (p) => {
     if (!p) return;
+    const id = ++requestID.current;
     setLoading(true); setError(''); setSelected([]);
     const res = await apiGet(`/api/files/list?path=${encodeURIComponent(p)}`);
+    if(id !== requestID.current) return;
     setLoading(false);
     if (res.error) { setError(res.error); setEntries([]); return; }
     setEntries(res.entries || []);
   }, []);
 
   React.useEffect(() => { loadFiles(path); }, [path]);
-
-  React.useEffect(() => {
-    const close = () => setCtxMenu(null);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, []);
 
   // ── Navigation ────────────────────────────────────────────────────────
   const navigateTo = (newPath, pool) => {
@@ -195,7 +194,7 @@ const FileManager = () => {
   const navigateToBreadcrumb = (idx) => {
     const newPath = idx < 0 ? '/' : '/' + crumbs.slice(0, idx + 1).join('/');
     // figure out which pool this belongs to (longest matching mount prefix)
-    const matchPool = pools.reduce((best, m) => newPath.startsWith(m.mount) && m.mount.length > (best?.mount?.length||0) ? m : best, null);
+    const matchPool = pools.reduce((best, m) => (newPath === m.mount || newPath.startsWith(m.mount + '/')) && m.mount.length > (best?.mount?.length||0) ? m : best, null);
     navigateTo(newPath, matchPool);
   };
 
@@ -213,7 +212,6 @@ const FileManager = () => {
     return list;
   }, [entries, search, sortBy, sortDesc]);
 
-  const toggleSort   = col => { if(sortBy===col) setSortDesc(d=>!d); else {setSortBy(col);setSortDesc(false);} };
   const toggleSelect = (name,e) => { if(e.ctrlKey||e.metaKey) setSelected(s=>s.includes(name)?s.filter(x=>x!==name):[...s,name]); else setSelected([name]); };
 
   // ── Actions ────────────────────────────────────────────────────────────
@@ -225,255 +223,44 @@ const FileManager = () => {
     loadFiles(path);
   };
 
-  const handleUpload = async (file) => {
-    if (!file) return;
-    setUploading(true);
-    const fd = new FormData(); fd.append('file', file);
-    await fetch(`/api/files/upload?path=${encodeURIComponent(path)}`, {method:'POST',credentials:'include',body:fd});
-    setUploading(false); loadFiles(path);
+  const handleUpload = (file) => {
+    if (!file || uploading) return;
+    const destination=path;
+    setUploading(true); setTransfer({name:file.name,percent:0,state:'Przesyłanie'});
+    const fd=new FormData(); fd.append('file',file);
+    const xhr=new XMLHttpRequest();
+    xhr.open('POST',`/api/files/upload?path=${encodeURIComponent(destination)}`);
+    xhr.withCredentials=true;
+    xhr.upload.onprogress=e=>setTransfer({name:file.name,percent:e.lengthComputable?Math.round(e.loaded/e.total*100):null,state:e.lengthComputable&&e.loaded===e.total?'Zapisywanie na serwerze':'Przesyłanie'});
+    const finish=error=>{setUploading(false);setTransfer(t=>({...t,state:error?'Błąd':'Zakończono',error}));if(!error&&destination===currentPath.current)loadFiles(destination);if(fileInputRef.current)fileInputRef.current.value='';};
+    xhr.onload=()=>{let result;try{result=JSON.parse(xhr.responseText)}catch{}finish(xhr.status<200||xhr.status>=300?result?.error||`HTTP ${xhr.status}: ${xhr.responseText.slice(0,300)}`:result?.error||null)};
+    xhr.onerror=()=>finish('Utracono połączenie. Sprawdź katalog docelowy przed ponowieniem.');
+    xhr.send(fd);
   };
+  const currentPath=React.useRef(path); currentPath.current=path;
 
-  const onCtx = (e, file) => { e.preventDefault(); e.stopPropagation(); setCtxMenu({x:e.clientX,y:e.clientY,file}); };
 
   // ── is a pool entry the "active" one (current path is inside it) ──────
   const isPoolActive = (pool) => path === pool.mount || path.startsWith(pool.mount + '/');
 
-  // ── Render ─────────────────────────────────────────────────────────────
-  return (
-    <div style={{display:'flex',height:'calc(100vh - 160px)',minHeight:500,border:'1px solid var(--line-strong)',borderRadius:10,overflow:'hidden',background:'var(--bg-1)'}}>
-
-      {/* Dialogs */}
-      {permsFor    && <PermsDialog    file={permsFor}    dir={path} onClose={()=>setPermsFor(null)}    onSave={()=>loadFiles(path)}/>}
-      {previewFor  && <PreviewDialog  file={previewFor}  dir={path} onClose={()=>setPreviewFor(null)}/>}
-      {renameFor   && <RenameDialog   file={renameFor}   dir={path} onClose={()=>setRenameFor(null)}   onRenamed={()=>loadFiles(path)}/>}
-      {newFolderDlg && <NewFolderDialog dir={path} onClose={()=>setNewFolderDlg(false)} onCreated={()=>loadFiles(path)}/>}
-
-      {/* Context menu */}
-      {ctxMenu && (
-        <div onClick={e=>e.stopPropagation()} style={{position:'fixed',left:ctxMenu.x,top:ctxMenu.y,zIndex:1000,background:'var(--bg-1)',border:'1px solid var(--line-strong)',borderRadius:8,padding:4,minWidth:180,boxShadow:'0 8px 24px rgba(0,0,0,0.4)'}}>
-          {[
-            {icon:'log',     label:'Podgląd',     show:!ctxMenu.file.is_dir, action:()=>{setPreviewFor(ctxMenu.file);setCtxMenu(null);}},
-            {icon:'download',label:'Pobierz',      show:!ctxMenu.file.is_dir, action:()=>{window.open(`/api/files/download?path=${encodeURIComponent(path+'/'+ctxMenu.file.name)}`,'_blank');setCtxMenu(null);}},
-            {icon:'edit',    label:'Zmień nazwę', show:true, action:()=>{setRenameFor(ctxMenu.file);setCtxMenu(null);}},
-            {icon:'key',     label:'Uprawnienia', show:true, action:()=>{setPermsFor(ctxMenu.file);setCtxMenu(null);}},
-            null,
-            {icon:'trash',   label:'Usuń',        show:true, action:()=>{handleDelete([ctxMenu.file.name]);setCtxMenu(null);}, danger:true},
-          ].filter(x=>x===null||x.show).map((item,i)=>item===null
-            ?<div key={i} style={{height:1,background:'var(--line)',margin:'4px 0'}}/>
-            :<button key={i} onClick={item.action}
-                style={{display:'flex',alignItems:'center',gap:8,width:'100%',padding:'7px 10px',background:'none',border:'none',borderRadius:5,cursor:'pointer',textAlign:'left',color:item.danger?'var(--err)':'var(--fg)',fontSize:'var(--fs-sm)'}}
-                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-2)'}
-                onMouseLeave={e=>e.currentTarget.style.background='none'}>
-                <Icon name={item.icon} size={13}/>{item.label}
-              </button>
-          )}
-        </div>
-      )}
-
-      {/* ── SIDEBAR ── */}
-      <div style={{width:230,borderRight:'1px solid var(--line-strong)',overflowY:'auto',padding:'8px 6px',flexShrink:0,display:'flex',flexDirection:'column',gap:0}}>
-
-        {/* Header */}
-        <div style={{fontSize:'var(--fs-xs)',fontWeight:600,color:'var(--fg-dim)',textTransform:'uppercase',letterSpacing:'.06em',padding:'4px 8px 10px'}}>
-          Pule ZFS
-        </div>
-
-        {/* / root */}
-        {(() => {
-          const isRoot = path === '/';
-          return (
-            <div onClick={() => navigateTo('/', null)}
-              style={{display:'flex',alignItems:'center',gap:7,padding:'6px 8px',borderRadius:6,cursor:'pointer',marginBottom:2,
-                background: isRoot ? 'oklch(0.55 0.2 260 / 0.12)' : 'none',
-                border: isRoot ? '1px solid oklch(0.55 0.2 260 / 0.25)' : '1px solid transparent'}}
-              onMouseEnter={e=>{if(!isRoot)e.currentTarget.style.background='var(--bg-2)';}}
-              onMouseLeave={e=>{if(!isRoot)e.currentTarget.style.background='none';}}>
-              <Icon name="disk" size={14} style={{color:isRoot?'var(--accent)':'var(--fg-dim)',flexShrink:0}}/>
-              <span style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',color:isRoot?'var(--accent)':'var(--fg)',fontWeight:500}}>/ (root)</span>
-            </div>
-          );
-        })()}
-
-        {/* Divider */}
-        <div style={{height:1,background:'var(--line)',margin:'6px 4px 8px'}}/>
-
-        {/* ZFS pools */}
-        {poolsLoading ? (
-          <div style={{padding:'10px 8px',color:'var(--fg-dim)',fontSize:'var(--fs-xs)'}}>
-            <span className="dot pulse" style={{display:'inline-block',marginRight:6}}/>Ładowanie…
-          </div>
-        ) : pools.length === 0 ? (
-          <div style={{padding:'10px 8px',color:'var(--fg-dim)',fontSize:'var(--fs-xs)'}}>Brak pul ZFS</div>
-        ) : (
-          pools.map(pool => {
-            const active = isPoolActive(pool);
-            return (
-              <div key={pool.mount}
-                onClick={() => navigateTo(pool.mount, pool)}
-                style={{padding:'8px 10px',borderRadius:7,cursor:'pointer',marginBottom:3,
-                  background: active ? 'oklch(0.55 0.2 260 / 0.12)' : 'none',
-                  border: active ? '1px solid oklch(0.55 0.2 260 / 0.25)' : '1px solid transparent'}}
-                onMouseEnter={e=>{if(!active)e.currentTarget.style.background='var(--bg-2)';}}
-                onMouseLeave={e=>{if(!active)e.currentTarget.style.background='none';}}>
-
-                {/* Pool name + icon */}
-                <div style={{display:'flex',alignItems:'center',gap:7}}>
-                  <Icon name="disk" size={14} style={{color:active?'var(--accent)':'oklch(0.7 0.15 75)',flexShrink:0}}/>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',fontWeight:600,color:active?'var(--accent)':'var(--fg)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                      {pool.device}
-                    </div>
-                    <div style={{fontSize:10,color:'var(--fg-dim)',fontFamily:'var(--font-mono)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginTop:1}}>
-                      {pool.mount}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Usage bar */}
-                <div style={{marginTop:6}}>
-                  {fmtPercent(pool.percent)}
-                  <div style={{display:'flex',justifyContent:'space-between',marginTop:3}}>
-                    <span style={{fontSize:9,color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>
-                      {pool.used_gb?.toFixed(1)} / {pool.total_gb?.toFixed(1)} GB
-                    </span>
-                    <span style={{fontSize:9,color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>
-                      {pool.free_gb?.toFixed(1)} GB wolne
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      {/* ── MAIN AREA ── */}
-      <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
-
-        {/* Toolbar */}
-        <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px',borderBottom:'1px solid var(--line-strong)',flexWrap:'wrap'}}>
-
-          {/* Breadcrumb — always starts with clickable "/" */}
-          <div className="row" style={{flex:1,fontFamily:'var(--font-mono)',fontSize:'var(--fs-xs)',flexWrap:'wrap',alignItems:'center',gap:0}}>
-            <span style={{color:crumbs.length===0?'var(--fg)':'var(--accent)',cursor:'pointer',padding:'0 3px',fontWeight:500}}
-              onClick={() => navigateToBreadcrumb(-1)}>/</span>
-            {crumbs.map((part, i) => (
-              <span key={i} style={{display:'flex',alignItems:'center'}}>
-                <span style={{color:'var(--fg-dim)',margin:'0 1px'}}>/</span>
-                <span style={{color:i===crumbs.length-1?'var(--fg)':'var(--accent)',cursor:'pointer',padding:'0 2px'}}
-                  onClick={() => navigateToBreadcrumb(i)}>{part}</span>
-              </span>
-            ))}
-          </div>
-
-          <div className="row gap-sm">
-            {/* Search */}
-            <div style={{display:'flex',alignItems:'center',gap:6,background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:5,padding:'4px 8px'}}>
-              <Icon name="search" size={12} style={{color:'var(--fg-dim)'}}/>
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Szukaj…"
-                style={{background:'none',border:'none',outline:'none',color:'var(--fg)',fontSize:'var(--fs-xs)',width:120}}/>
-            </div>
-            <button className="btn sm" onClick={()=>setNewFolderDlg(true)}><Icon name="folder" size={11}/> Nowy folder</button>
-            <button className="btn sm primary" onClick={()=>fileInputRef.current?.click()} disabled={uploading}>
-              {uploading?<><span className="dot pulse" style={{display:'inline-block',marginRight:6}}/>Przesyłanie…</>:<><Icon name="upload" size={11}/> Wgraj</>}
-            </button>
-            <input ref={fileInputRef} type="file" style={{display:'none'}} onChange={e=>handleUpload(e.target.files[0])}/>
-            {selected.length > 0 && <>
-              <button className="btn sm"><Icon name="download" size={11}/> Pobierz</button>
-              <button className="btn sm danger" onClick={()=>handleDelete(selected)}><Icon name="trash" size={11}/> Usuń ({selected.length})</button>
-            </>}
-            <div className="segmented">
-              <button className={view==='list'?'active':''} onClick={()=>setView('list')}>Lista</button>
-              <button className={view==='grid'?'active':''} onClick={()=>setView('grid')}>Siatka</button>
-            </div>
-            <button className="icon-btn" onClick={()=>loadFiles(path)} title="Odśwież"><Icon name="refresh" size={13}/></button>
-          </div>
-        </div>
-
-        {/* File list */}
-        <div style={{flex:1,overflowY:'auto',position:'relative'}}>
-          {loading && <div style={{position:'absolute',inset:0,display:'grid',placeItems:'center',background:'var(--bg-1)',opacity:.6,zIndex:5}}><span className="dot pulse" style={{display:'inline-block'}}/></div>}
-          {error   && <div style={{padding:24,color:'var(--err)',fontSize:'var(--fs-sm)',fontFamily:'var(--font-mono)'}}>⚠ {error}</div>}
-
-          {!error && view==='list' && (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th style={{width:24}}><input type="checkbox" style={{accentColor:'var(--accent)'}} checked={selected.length===filtered.length&&filtered.length>0} onChange={e=>setSelected(e.target.checked?filtered.map(f=>f.name):[])}/></th>
-                  <th style={{cursor:'pointer'}} onClick={()=>toggleSort('name')}>Nazwa {sortBy==='name'&&(sortDesc?'↓':'↑')}</th>
-                  <th style={{cursor:'pointer'}} onClick={()=>toggleSort('size')}>Rozmiar {sortBy==='size'&&(sortDesc?'↓':'↑')}</th>
-                  <th style={{cursor:'pointer'}} onClick={()=>toggleSort('mtime')}>Modyfikacja {sortBy==='mtime'&&(sortDesc?'↓':'↑')}</th>
-                  <th>Uprawnienia</th>
-                  <th>Właściciel</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length===0&&!loading&&<tr><td colSpan={7} style={{textAlign:'center',padding:32,color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Pusty katalog</td></tr>}
-                {filtered.map(f => (
-                  <tr key={f.name}
-                    onClick={e => { if(f.is_dir) navigateIntoDir(f.name); else toggleSelect(f.name,e); }}
-                    onContextMenu={e => onCtx(e,f)}
-                    style={{background:selected.includes(f.name)?'oklch(0.55 0.2 260 / 0.1)':'',cursor:'pointer'}}>
-                    <td onClick={e=>{e.stopPropagation();toggleSelect(f.name,e);}}><input type="checkbox" checked={selected.includes(f.name)} onChange={()=>{}} style={{accentColor:'var(--accent)'}}/></td>
-                    <td>
-                      <div className="row gap-sm">
-                        <Icon name={typeIcon(f.type)} size={14} style={{color:typeColor(f.type),flexShrink:0}}/>
-                        <span style={{fontWeight:f.is_dir?600:400}}>{f.name}</span>
-                        {f.type==='symlink'&&<span style={{color:'var(--fg-dim)',fontSize:10}}>(symlink)</span>}
-                      </div>
-                    </td>
-                    <td className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{f.size_str}</td>
-                    <td className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{f.mtime}</td>
-                    <td className="mono"     style={{fontSize:'var(--fs-xs)',letterSpacing:'.04em'}}>{f.perms}</td>
-                    <td className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{f.owner}:{f.group}</td>
-                    <td onClick={e=>e.stopPropagation()}>
-                      <div className="row gap-sm">
-                        {!f.is_dir&&<button className="icon-btn" onClick={()=>setPreviewFor(f)} title="Podgląd"><Icon name="log" size={13}/></button>}
-                        <button className="icon-btn" title="Zmień nazwę" onClick={()=>setRenameFor(f)}><Icon name="edit" size={13}/></button>
-                        <button className="icon-btn" title="Uprawnienia" onClick={()=>setPermsFor(f)}><Icon name="key" size={13}/></button>
-                        {!f.is_dir&&<a className="icon-btn" href={`/api/files/download?path=${encodeURIComponent(path+'/'+f.name)}`} download={f.name} title="Pobierz"><Icon name="download" size={13}/></a>}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {!error && view==='grid' && (
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(120px,1fr))',gap:10,padding:14}}>
-              {filtered.length===0&&!loading&&<div style={{gridColumn:'1/-1',textAlign:'center',padding:32,color:'var(--fg-dim)',fontSize:'var(--fs-sm)'}}>Pusty katalog</div>}
-              {filtered.map(f => (
-                <div key={f.name} onContextMenu={e=>onCtx(e,f)}
-                  onClick={e=>{if(f.is_dir)navigateIntoDir(f.name);else toggleSelect(f.name,e);}}
-                  style={{display:'flex',flexDirection:'column',alignItems:'center',gap:8,padding:'14px 10px',borderRadius:8,cursor:'pointer',border:'1px solid',transition:'all .15s',userSelect:'none',
-                    borderColor:selected.includes(f.name)?'var(--accent)':'transparent',
-                    background:selected.includes(f.name)?'oklch(0.55 0.2 260 / 0.1)':'var(--bg-2)'}}>
-                  <Icon name={typeIcon(f.type)} size={36} style={{color:typeColor(f.type)}}/>
-                  <div style={{fontSize:'var(--fs-xs)',textAlign:'center',wordBreak:'break-all',lineHeight:1.4,color:'var(--fg)',fontWeight:f.is_dir?600:400}}>
-                    {f.name.length>22?f.name.slice(0,20)+'…':f.name}
-                  </div>
-                  <div style={{fontSize:10,color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>{f.size_str}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Status bar */}
-        <div style={{padding:'6px 14px',borderTop:'1px solid var(--line)',fontSize:'var(--fs-xs)',color:'var(--fg-dim)',display:'flex',justifyContent:'space-between',fontFamily:'var(--font-mono)'}}>
-          <span>{filtered.length} elementów{selected.length>0?` · ${selected.length} zaznaczonych`:''}</span>
-          {selectedPool && (
-            <span style={{color:'var(--fg-dim)'}}>
-              {selectedPool.device} · {selectedPool.used_gb?.toFixed(1)}/{selectedPool.total_gb?.toFixed(1)} GB
-            </span>
-          )}
-          <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:320}}>{path}</span>
-        </div>
-      </div>
-    </div>
-  );
+  const chosen=entries.find(f=>f.name===selected[0]);
+  const fileURL=f=>`/api/files/download?path=${encodeURIComponent((path==='/'?'':path)+'/'+f.name)}`;
+  const open=f=>f.is_dir?navigateIntoDir(f.name):setPreviewFor(f);
+  return <div className="nimbus-paper fm-modern">
+    {permsFor&&<PermsDialog file={permsFor} dir={path} onClose={()=>setPermsFor(null)} onSave={()=>loadFiles(path)}/>}
+    {previewFor&&<PreviewDialog file={previewFor} dir={path} onClose={()=>setPreviewFor(null)}/>}
+    {renameFor&&<RenameDialog file={renameFor} dir={path} onClose={()=>setRenameFor(null)} onRenamed={()=>loadFiles(path)}/>}
+    {newFolderDlg&&<NewFolderDialog dir={path} onClose={()=>setNewFolderDlg(false)} onCreated={()=>loadFiles(path)}/>}
+    <header className="paper-heading"><div><span>TWOJA PRZESTRZEŃ</span><h2>Pliki</h2><p>Foldery, dokumenty i wszystko, co przechowujesz.</p></div><div className="paper-actions"><button className="btn" onClick={()=>setNewFolderDlg(true)}><Icon name="folder" size={16}/> Nowy folder</button><button className="btn primary" disabled={uploading} onClick={()=>fileInputRef.current?.click()}><Icon name="upload" size={16}/> Prześlij plik</button><input ref={fileInputRef} type="file" hidden onChange={e=>handleUpload(e.target.files[0])}/></div></header>
+    <div className="fm-layout"><nav className="fm-locations" aria-label="Lokalizacje"><h3>Lokalizacje</h3><button className={path==='/'?'active':''} onClick={()=>navigateTo('/',null)}><Icon name="disk" size={18}/> System plików</button><h3>Pule ZFS</h3>{poolError&&<p role="alert">{poolError}</p>}{poolsLoading?<p>Ładowanie…</p>:!pools.length?<p>Brak zamontowanych pul ZFS</p>:pools.map(pool=><button key={pool.mount} className={isPoolActive(pool)?'active':''} onClick={()=>navigateTo(pool.mount,pool)}><Icon name="disk" size={18}/><span><strong>{pool.device}</strong><small>{pool.mount}</small>{Number.isFinite(pool.percent)&&fmtPercent(pool.percent)}</span></button>)}<div className="fm-location-note"><Icon name="folder" size={24}/><p>Wybierz lokalizację, a następnie folder lub plik.</p></div></nav>
+    <main className="fm-content"><div className="fm-path"><button onClick={()=>navigateToBreadcrumb(-1)}>System plików</button>{crumbs.map((part,i)=><React.Fragment key={i}><span>›</span><button onClick={()=>navigateToBreadcrumb(i)}>{part}</button></React.Fragment>)}</div>
+    <div className="fm-tools"><input aria-label="Szukaj w bieżącym folderze" placeholder="Szukaj w tym folderze…" value={search} onChange={e=>setSearch(e.target.value)}/><select aria-label="Sortowanie" value={sortBy} onChange={e=>setSortBy(e.target.value)}><option value="name">Nazwa</option><option value="size">Rozmiar</option><option value="mtime">Data zmiany</option></select><button className="btn" aria-label="Odwróć kolejność" onClick={()=>setSortDesc(v=>!v)}>{sortDesc?'↓':'↑'}</button><div className="segmented">{[['grid','Kafelki'],['list','Lista']].map(([v,label])=><button key={v} className={view===v?'active':''} aria-pressed={view===v} onClick={()=>setView(v)}>{label}</button>)}</div><button className="btn" onClick={()=>loadFiles(path)} aria-label="Odśwież"><Icon name="refresh" size={16}/></button></div>
+    {selected.length>0&&<div className="fm-selection"><span>Zaznaczono: {selected.length}</span><button className="btn" onClick={()=>setSelected([])}>Odznacz</button><button className="btn danger" onClick={()=>handleDelete(selected)}>Usuń zaznaczone</button></div>}
+    {error&&<div className="dlw-error" role="alert">{error}</div>}
+    {loading?<div className="dlw-empty" role="status">Ładowanie folderu…</div>:!error&&<><div className="fm-section-heading"><h3>{view==='grid'?'Zawartość folderu':'Wszystkie elementy'}</h3><span>{filtered.length} elementów</span></div><div className={'fm-items '+view}>{filtered.map((f,i)=><div key={f.name} className={'fm-item '+(selected.includes(f.name)?'selected':'')}><input type="checkbox" aria-label={'Zaznacz '+f.name} checked={selected.includes(f.name)} onChange={()=>setSelected(s=>s.includes(f.name)?s.filter(n=>n!==f.name):[...s,f.name])}/><button className="fm-file" aria-pressed={selected.includes(f.name)} onClick={e=>toggleSelect(f.name,e)} onDoubleClick={()=>open(f)}><span className={'fm-art '+(f.is_dir?'folder':'document')} style={{'--folder-hue':[220,265,155,35,195][i%5]}}>{!f.is_dir&&<Icon name={typeIcon(f.type)} size={30}/>}</span><strong title={f.name}>{f.name}</strong><small>{f.is_dir?'Folder':f.size_str||'—'}</small>{view==='list'&&<small>{f.mtime}</small>}</button><button className="fm-open" aria-label={'Otwórz '+f.name} onClick={()=>open(f)}>Otwórz ↗</button></div>)}</div>{!filtered.length&&<div className="dlw-empty"><Icon name="folder" size={40}/><h3>{search?'Brak pasujących plików':'Folder jest pusty'}</h3><p>{search?'Zmień wyszukiwaną nazwę.':'Prześlij pierwszy plik lub utwórz folder.'}</p></div>}</>}
+    <footer className="fm-footer">{path}</footer></main>
+    <aside className="fm-inspector" aria-label="Szczegóły pliku"><span>SZCZEGÓŁY</span>{chosen?<><div className={'fm-preview '+(chosen.is_dir?'is-folder':'')}><Icon name={typeIcon(chosen.type)} size={64}/></div><h3>{chosen.name}</h3><p>{chosen.is_dir?'Folder':chosen.type||'Plik'}</p><dl>{[['Rozmiar',chosen.size_str],['Zmodyfikowano',chosen.mtime],['Właściciel',chosen.owner],['Grupa',chosen.group],['Uprawnienia',chosen.perms]].map(([label,value])=><React.Fragment key={label}><dt>{label}</dt><dd>{value||'—'}</dd></React.Fragment>)}</dl><div className="paper-actions"><button className="btn primary" onClick={()=>open(chosen)}>Otwórz</button>{!chosen.is_dir&&<a className="btn" href={fileURL(chosen)} download={chosen.name}>Pobierz</a>}<button className="btn" onClick={()=>setRenameFor(chosen)}>Zmień nazwę</button><button className="btn" onClick={()=>setPermsFor(chosen)}>Uprawnienia</button><button className="btn danger" onClick={()=>handleDelete([chosen.name])}>Usuń</button></div></>:<div className="dlw-empty"><Icon name="folder" size={44}/><h3>Wybierz plik lub folder</h3><p>Kliknij element, aby zobaczyć jego szczegóły. Użyj „Otwórz”, aby wejść do folderu.</p></div>}</aside></div>
+    {transfer&&<div className={'fm-transfer '+(transfer.error?'failed':'')} role="status"><div><strong>{transfer.state}</strong>{!uploading&&<button aria-label="Zamknij wynik przesyłania" onClick={()=>setTransfer(null)}>×</button>}</div><p>{transfer.name}</p><progress max="100" value={transfer.percent??undefined}/><small>{transfer.error||`${transfer.percent??'—'}% · ${uploading?'Trwa przesyłanie pliku':'Plik zapisany na serwerze'}`}</small></div>}
+  </div>;
 };
-
 window.FileManager = FileManager;
