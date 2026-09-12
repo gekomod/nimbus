@@ -69,7 +69,7 @@ const Mini = ({ label, v }) => (
 
 // ── Storage root ──────────────────────────────────────────────────────────────
 const Storage = () => {
-  const [tab,           setTab]           = React.useState('overview');
+  const [tab,           setTab]           = React.useState(()=>{const target=window.__nimbusStorageTab;delete window.__nimbusStorageTab;return ['jobs','pools','disks','mounts'].includes(target)?target:'overview'});
   const [selectedPool,  setSelectedPool]  = React.useState(null);
   const [selectedDisk,  setSelectedDisk]  = React.useState(null);
   const [formatTarget,  setFormatTarget]  = React.useState(null);

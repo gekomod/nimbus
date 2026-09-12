@@ -1,362 +1,113 @@
-// ===== Dashboard =====
-// parseZFSSize zwraca TB; wyświetlaj GB jeśli < 1 TB
-const useStore = window.useStore || ((k) => { throw new Error("store not ready: " + k); });
-const Icon = window.Icon;
-const LineChart = window.LineChart;
-const Sparkline = window.Sparkline;
-const genSeries = window.genSeries;
-const Docker = window.Docker;
-
-const fmtSize = (tb) => {
-  if (!tb || tb <= 0) return '—';
-  if (tb < 1) return (tb * 1024).toFixed(1) + ' GB';
-  return tb.toFixed(2) + ' TB';
-};
-// HistoryChart — wykres historyczny z próbek metrycznych ──────────────────────
-const HistoryChart = ({ samples, width=560, height=80 }) => {
-  if (!samples || samples.length === 0) return (
-    <div style={{height,display:'flex',alignItems:'center',justifyContent:'center',
-      color:'var(--fg-dim)',fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-      Zbieranie danych… (próbka co 10s)
-    </div>
-  );
-  // Jeśli tylko 1 próbka — zduplikuj żeby narysować linię
-  if (samples.length === 1) samples = [samples[0], samples[0]];
-
-  const W = width, H = height;
-  const toPath = (key, color) => {
-    const vals = samples.map(s => s[key] || 0);
-    const max = 100;
-    const pts = vals.map((v, i) => {
-      const x = (i / (vals.length - 1)) * W;
-      const y = H - (v / max) * (H - 6) - 3;
-      return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
-    }).join(' ');
-    const area = pts + ` L${W},${H} L0,${H} Z`;
-    return { pts, area, color };
-  };
-
-  const cpuPath = toPath('cpu', 'var(--accent)');
-  const memPath = toPath('mem', 'oklch(0.7 0.15 280)');
-
-  // Etykiety czasu
-  const first = samples[0]?.t;
-  const last  = samples[samples.length-1]?.t;
-  const fmt = (ts) => {
-    const d = new Date(ts * 1000);
-    return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
-  };
-
-  return (
-    <div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{display:'block',height:H}}>
-        <defs>
-          <linearGradient id="lgCpuH" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.3"/>
-            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0"/>
-          </linearGradient>
-          <linearGradient id="lgMemH" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="oklch(0.7 0.15 280)" stopOpacity="0.2"/>
-            <stop offset="100%" stopColor="oklch(0.7 0.15 280)" stopOpacity="0"/>
-          </linearGradient>
-        </defs>
-        {[25,50,75].map(pct=>(
-          <line key={pct} x1="0" y1={H-(pct/100)*(H-6)-3} x2={W} y2={H-(pct/100)*(H-6)-3}
-            stroke="var(--line)" strokeWidth="0.5"/>
-        ))}
-        <path d={memPath.area} fill="url(#lgMemH)"/>
-        <path d={memPath.pts}  fill="none" stroke="oklch(0.7 0.15 280)" strokeWidth="1.5" strokeLinejoin="round"/>
-        <path d={cpuPath.area} fill="url(#lgCpuH)"/>
-        <path d={cpuPath.pts}  fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinejoin="round"/>
-      </svg>
-      <div style={{display:'flex',justifyContent:'space-between',
-        fontSize:9,fontFamily:'var(--font-mono)',color:'var(--fg-dim)',marginTop:3}}>
-        <span>{first ? fmt(first) : ''}</span>
-        <span>{last  ? fmt(last)  : ''}</span>
-      </div>
-    </div>
-  );
-};
-
-const Dashboard = () => {
-  const POOLS      = useStore('POOLS');
-  const CONTAINERS = useStore('CONTAINERS');
-  const DISKS      = useStore('DISKS');
-  const NETWORK    = useStore('NETWORK');
-  const LOGS       = useStore('LOGS');
-  const SERVICES   = useStore('SERVICES');
-
-  // Animacja sparklines
-  const [tick, setTick] = React.useState(0);
-  React.useEffect(() => {
-    const id = setInterval(() => setTick(t => t+1), 1500);
-    return () => clearInterval(id);
-  }, []);
-
-  // Dane z /api/overview co 3s
-  const [ov, setOv] = React.useState(null);
-  React.useEffect(() => {
-    const load = () => fetch('/api/overview',{credentials:'include'})
-      .then(r=>r.ok?r.json():null).then(d=>d&&setOv(d)).catch(()=>{});
-    load();
-    const id = setInterval(load, 3000);
-    return () => clearInterval(id);
-  }, []);
-
-  const cpuPct   = ov ? ov.cpu.percent       : 0;
-  const cpuModel = ov ? (ov.cpu.model||'CPU'): '—';
-  const cpuCores = ov ? (ov.cpu.cores||'—')  : '—';
-  const cpuTemp  = ov ? (ov.cpu.temp||0)      : 0;
-  const cpuLoad  = ov ? (ov.cpu.load||[0,0,0]): [0,0,0];
-  const memPct   = ov ? ov.memory.percent     : 0;
-  const memTotal = ov ? ov.memory.total_gb    : 0;
-  const memUsed  = ov ? ov.memory.used_gb     : 0;
-  const memAvail = ov ? ov.memory.avail_gb    : 0;
-  const memSwapT = ov ? ov.memory.swap_total_gb : 0;
-  const memSwapU = ov ? ov.memory.swap_used_gb  : 0;
-
-  const cpu = React.useMemo(() => genSeries(7+tick,  40, Math.max(5, cpuPct), 25), [tick, cpuPct]);
-  const mem = React.useMemo(() => genSeries(31+tick, 40, Math.max(5, memPct), 15), [tick, memPct]);
-  const net = React.useMemo(() => genSeries(99+tick, 40, 50, 70), [tick]);
-  const dsk = React.useMemo(() => genSeries(53+tick, 40, 30, 60), [tick]);
-
-  const ifaces    = (NETWORK && NETWORK.interfaces) ? NETWORK.interfaces : [];
-  const hostname  = (NETWORK && NETWORK.hostname)   ? NETWORK.hostname   : '—';
-  const activeIf  = ifaces.find(i=>i.state==='up') || {};
-
-  return (
-    <div className="col" style={{gap:'var(--gutter)'}}>
-      {/* KPIs */}
-      <div className="grid grid-4">
-        <div className="kpi">
-          <div className="kpi-label"><Icon name="cpu" size={12}/> CPU · {cpuModel.split(' ').slice(0,3).join(' ')}</div>
-          <div className="kpi-value">{cpuPct.toFixed(1)}<span className="kpi-unit">%</span></div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginTop:6,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-            <div><div className="dim" style={{fontSize:9,letterSpacing:'.06em',textTransform:'uppercase'}}>Obciąż.</div><div>{cpuPct.toFixed(1)}%</div></div>
-            <div><div className="dim" style={{fontSize:9,letterSpacing:'.06em',textTransform:'uppercase'}}>Temp.</div><div>{cpuTemp.toFixed(0)}°C</div></div>
-            <div><div className="dim" style={{fontSize:9,letterSpacing:'.06em',textTransform:'uppercase'}}>Load</div><div>{Array.isArray(cpuLoad)?cpuLoad[0].toFixed(2):'—'}</div></div>
-          </div>
-          <div className="kpi-foot" style={{marginTop:4}}><span>{cpuCores} rdzeni</span><span>load {Array.isArray(cpuLoad)?cpuLoad[0].toFixed(2):'—'}</span></div>
-          <Sparkline data={cpu} color="var(--accent)"/>
-        </div>
-
-        <div className="kpi">
-          <div className="kpi-label"><Icon name="ram" size={12}/> Pamięć · {memTotal.toFixed(0)} GB</div>
-          <div className="kpi-value">{memUsed.toFixed(1)}<span className="kpi-unit">/ {memTotal.toFixed(0)} GB</span></div>
-          <div style={{display:'flex',height:6,borderRadius:3,overflow:'hidden',marginTop:8,background:'var(--bg-3)'}}>
-            <div style={{width:(memPct*0.55)+'%',background:'var(--accent)'}} title="aplikacje"/>
-            <div style={{width:(memPct*0.25)+'%',background:'oklch(0.72 0.14 150)'}} title="ZFS ARC"/>
-            <div style={{width:(memPct*0.20)+'%',background:'oklch(0.78 0.15 75)'}} title="cache"/>
-          </div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginTop:6,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-            <div><span style={{display:'inline-block',width:6,height:6,background:'var(--accent)',borderRadius:1,marginRight:4}}/>App {(memUsed*0.55).toFixed(1)}G</div>
-            <div><span style={{display:'inline-block',width:6,height:6,background:'oklch(0.72 0.14 150)',borderRadius:1,marginRight:4}}/>ARC {(memUsed*0.25).toFixed(1)}G</div>
-            <div><span style={{display:'inline-block',width:6,height:6,background:'oklch(0.78 0.15 75)',borderRadius:1,marginRight:4}}/>Cache {(memUsed*0.20).toFixed(1)}G</div>
-          </div>
-          <div className="kpi-foot" style={{marginTop:4}}><span>Dostępne: {memAvail.toFixed(1)} GB</span><span>Swap: {memSwapU.toFixed(1)}/{memSwapT.toFixed(0)} GB</span></div>
-        </div>
-
-        <div className="kpi">
-          <div className="kpi-label"><Icon name="network" size={12}/> Sieć · {activeIf.name||hostname}</div>
-          <div className="kpi-value">{net[net.length-1].toFixed(0)}<span className="kpi-unit">MB/s</span></div>
-          <div className="kpi-foot"><span>↓ {(net[net.length-1]*0.7).toFixed(0)} MB/s</span><span>↑ {(net[net.length-1]*0.3).toFixed(0)} MB/s</span></div>
-          <Sparkline data={net} color="oklch(0.72 0.14 150)"/>
-        </div>
-
-        <div className="kpi">
-          <div className="kpi-label"><Icon name="disk" size={12}/> Dyski · I/O</div>
-          <div className="kpi-value">{dsk[dsk.length-1].toFixed(0)}<span className="kpi-unit">k IOPS</span></div>
-          <div className="kpi-foot">
-            <span>Pule ZFS: {POOLS.length}</span>
-            <span>Docker: {CONTAINERS.filter(c=>c.state==='running').length}</span>
-          </div>
-          <Sparkline data={dsk} color="oklch(0.78 0.15 75)"/>
-        </div>
-      </div>
-
-      <div className="grid grid-2-1">
-        {/* Wykres */}
-        <div className="card">
-          <div className="card-head">
-            <div><div className="card-title">Aktywność systemu</div><div className="card-sub">auto-odświeżanie · 3s</div></div>
-          </div>
-          <div className="card-body">
-            <div className="row" style={{gap:24,marginBottom:8,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',color:'var(--fg-muted)'}}>
-              <span><span style={{display:'inline-block',width:8,height:8,background:'var(--accent)',borderRadius:2,marginRight:6}}/>CPU %</span>
-              <span><span style={{display:'inline-block',width:8,height:8,background:'oklch(0.7 0.15 280)',borderRadius:2,marginRight:6}}/>Pamięć %</span>
-            </div>
-            <LineChart series={[cpu,mem]} colors={['var(--accent)','oklch(0.7 0.15 280)']} labels={['-60m','-45m','-30m','-15m','teraz']}/>
-          </div>
-        </div>
-
-        {/* Pule ZFS */}
-        <div className="card">
-          <div className="card-head">
-            <div><div className="card-title">Wykorzystanie pul</div><div className="card-sub">{POOLS.length} pule · {fmtSize(POOLS.reduce((s,p)=>s+p.total,0))} łącznie</div></div>
-          </div>
-          <div className="card-body col" style={{gap:12}}>
-            {POOLS.length === 0 && <div className="dim" style={{fontSize:'var(--fs-sm)'}}>Brak pul ZFS — ładowanie…</div>}
-            {POOLS.map(p => {
-              const pct = p.total > 0 ? (p.used/p.total)*100 : 0;
-              const cls = pct>90?'err':pct>75?'warn':'ok';
-              return (
-                <div key={p.id}>
-                  <div className="row" style={{justifyContent:'space-between',marginBottom:5}}>
-                    <span style={{fontWeight:500}}>{p.name}</span>
-                    <span className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{fmtSize(p.used)} / {fmtSize(p.total)}</span>
-                  </div>
-                  <div className={'bar '+cls}><i style={{width:pct+'%'}}/></div>
-                  <div className="row" style={{justifyContent:'space-between',marginTop:4,fontSize:'var(--fs-xs)',color:'var(--fg-dim)',fontFamily:'var(--font-mono)'}}>
-                    <span>{p.type} · {p.drives} dysków</span><span>{pct.toFixed(0)}%</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Docker + Dyski */}
-      <div className="grid grid-2">
-        <div className="card">
-          <div className="card-head">
-            <div><div className="card-title">Docker</div><div className="card-sub">stan kontenerów</div></div>
-            <div className="card-actions"><span className="badge accent">{CONTAINERS.length}</span></div>
-          </div>
-          <div className="card-body">
-            <div className="row" style={{gap:14,marginBottom:12}}>
-              {[
-                {label:'Aktywne',    count:CONTAINERS.filter(c=>c.state==='running').length,   color:'var(--ok)',     pulse:true},
-                {label:'Nieaktywne', count:CONTAINERS.filter(c=>c.state!=='running').length,   color:'var(--fg-dim)', pulse:false},
-                {label:'Restarting', count:CONTAINERS.filter(c=>c.state==='restarting').length,color:'var(--warn)',   pulse:false},
-              ].map(({label,count,color,pulse}) => (
-                <div key={label} style={{flex:1,padding:'10px 12px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:6}}>
-                  <div className="row gap-sm">
-                    <span className={'dot'+(pulse?' pulse':'')} style={{color}}/><span className="dim" style={{fontSize:10,letterSpacing:'.06em',textTransform:'uppercase',fontWeight:500}}>{label}</span>
-                  </div>
-                  <div className="mono" style={{fontSize:22,fontWeight:500,marginTop:4}}>{count}</div>
-                </div>
-              ))}
-            </div>
-            <div className="col" style={{gap:6}}>
-              {CONTAINERS.slice(0,5).map(c => (
-                <div key={c.id} className="row" style={{justifyContent:'space-between',fontSize:'var(--fs-sm)',padding:'4px 0'}}>
-                  <div className="row gap-sm">
-                    <span className={'dot'+(c.state==='running'?' pulse':'')} style={{color:c.state==='running'?'var(--ok)':c.state==='restarting'?'var(--warn)':'var(--fg-dim)'}}/>
-                    <span className="mono">{c.name}</span>
-                  </div>
-                  <span className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{c.cpu}% · {c.mem}MB</span>
-                </div>
-              ))}
-              {CONTAINERS.length === 0 && <div className="dim" style={{fontSize:'var(--fs-sm)'}}>Ładowanie kontenerów…</div>}
-            </div>
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-head">
-            <div><div className="card-title">Interfejsy sieciowe</div><div className="card-sub">IP · stan · prędkość</div></div>
-          </div>
-          <div className="card-body" style={{padding:0}}>
-            {ifaces.map((iface,k) => (
-              <div key={k} style={{padding:'9px 16px',borderBottom:'1px solid color-mix(in oklch,var(--line) 50%,transparent)'}}>
-                <div className="row" style={{justifyContent:'space-between',alignItems:'center'}}>
-                  <div className="row gap-sm">
-                    <span className={'dot'+(iface.state==='up'?' pulse':'')} style={{color:iface.state==='up'?'var(--ok)':'var(--fg-dim)'}}/>
-                    <span className="mono" style={{fontWeight:500}}>{iface.name}</span>
-                  </div>
-                  <span className={'chip'+(iface.state==='up'?' accent':'')} style={{fontSize:9}}>{iface.state.toUpperCase()}</span>
-                </div>
-                <div className="row" style={{justifyContent:'space-between',marginTop:3,fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)',color:'var(--fg-dim)'}}>
-                  <span>{iface.ip || '—'}</span><span>{iface.speed || '—'}</span>
-                </div>
-              </div>
-            ))}
-            {ifaces.length === 0 && <div className="dim" style={{padding:16,fontSize:'var(--fs-sm)'}}>Ładowanie interfejsów…</div>}
-          </div>
-        </div>
-      </div>
-
-      {/* Punkty montowania + Alerty + Usługi */}
-      <div className="grid" style={{gridTemplateColumns:'1.2fr 1fr 1fr',gap:'var(--gutter)'}}>
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Dyski / wolumeny</div><div className="card-sub">punkty montowania</div></div></div>
-          <div className="card-body" style={{padding:0}}>
-            {POOLS.map((p,i) => {
-              const pct = p.total>0?(p.used/p.total)*100:0;
-              const cls = pct>90?'err':pct>75?'warn':'ok';
-              return (
-                <div key={i} style={{padding:'8px 18px',borderBottom:'1px solid color-mix(in oklch,var(--line) 50%,transparent)'}}>
-                  <div className="row" style={{justifyContent:'space-between',marginBottom:4}}>
-                    <div className="row gap-sm">
-                      <span style={{display:'inline-flex',width:26,height:16,fontSize:9,fontFamily:'var(--font-mono)',fontWeight:600,background:'oklch(0.65 0.18 245)',color:'#fff',borderRadius:3,alignItems:'center',justifyContent:'center'}}>ZFS</span>
-                      <span className="mono" style={{fontWeight:500}}>{p.name}</span>
-                    </div>
-                    <span className="mono dim" style={{fontSize:'var(--fs-xs)'}}>{fmtSize(p.used)} / {fmtSize(p.total)}</span>
-                  </div>
-                  <div className={'bar '+cls}><i style={{width:pct+'%'}}/></div>
-                </div>
-              );
-            })}
-            {POOLS.length === 0 && <div className="dim" style={{padding:16,fontSize:'var(--fs-sm)'}}>Ładowanie…</div>}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-head">
-            <div><div className="card-title">Alerty</div><div className="card-sub"><span className="live-dot"/>na żywo</div></div>
-            <div className="card-actions"><button className="btn ghost sm">→</button></div>
-          </div>
-          <div className="card-body" style={{padding:0,maxHeight:280,overflow:'auto'}}>
-            {LOGS.filter(l=>l.lvl==='WARN'||l.lvl==='ERROR'||l.lvl==='ERR').slice(0,6).map((l,i) => (
-              <div key={i} style={{padding:'7px 14px',borderBottom:'1px solid color-mix(in oklch,var(--line) 50%,transparent)',fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-                <div className="row gap-sm" style={{justifyContent:'space-between'}}>
-                  <span className={'log-level '+l.lvl}>{l.lvl}</span>
-                  <span className="dim">{l.t}</span>
-                </div>
-                <div style={{marginTop:2,color:'var(--fg)',whiteSpace:'normal',lineHeight:1.4}}>{l.msg}</div>
-                <div className="dim" style={{marginTop:2}}>{l.src}</div>
-              </div>
-            ))}
-            {LOGS.filter(l=>l.lvl==='WARN'||l.lvl==='ERROR').length === 0 &&
-              <div style={{padding:14,color:'var(--ok)',fontSize:'var(--fs-sm)'}}>✓ Brak alertów</div>}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-head"><div><div className="card-title">Logi systemowe</div><div className="card-sub"><span className="live-dot"/>ostatnie zdarzenia</div></div></div>
-          <div className="card-body" style={{padding:0,maxHeight:280,overflow:'auto'}}>
-            {LOGS.slice(0,8).map((l,i) => (
-              <div key={i} style={{padding:'6px 14px',borderBottom:'1px solid color-mix(in oklch,var(--line) 50%,transparent)',fontSize:'var(--fs-xs)',fontFamily:'var(--font-mono)'}}>
-                <div className="row gap-sm" style={{justifyContent:'space-between'}}>
-                  <span className={'log-level '+(l.lvl||'INFO')}>{l.lvl||'INFO'}</span>
-                  <span className="dim">{l.t}</span>
-                </div>
-                <div style={{marginTop:1,color:'var(--fg)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.msg}</div>
-              </div>
-            ))}
-            {LOGS.length === 0 && <div className="dim" style={{padding:16,fontSize:'var(--fs-sm)'}}>Ładowanie logów…</div>}
-          </div>
-        </div>
-      </div>
-
-      {/* Usługi sieciowe */}
-      <div className="card">
-        <div className="card-head"><div><div className="card-title">Usługi sieciowe</div><div className="card-sub">stan w czasie rzeczywistym</div></div></div>
-        <div className="card-body grid" style={{gridTemplateColumns:'repeat(6,1fr)',gap:10}}>
-          {SERVICES.map(s => (
-            <div key={s.id} style={{padding:'10px 12px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:6}}>
-              <div className="row" style={{justifyContent:'space-between',marginBottom:4}}>
-                <span className="mono" style={{fontSize:11,fontWeight:600,letterSpacing:'.04em'}}>{s.id.toUpperCase()}</span>
-                <div className={'toggle'+(s.status==='running'?' on':'')} style={{transform:'scale(0.85)'}}/>
-              </div>
-              <div className="dim mono" style={{fontSize:10}}>port {s.port}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-window.Dashboard = Dashboard;
+// Nimbus dashboard — all values come from telemetry, never generated series.
+const dashNumber = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null;
+const dashFmt = (v, unit='', digits=0) => dashNumber(v)===null ? '—' : Number(v).toLocaleString('pl-PL',{maximumFractionDigits:digits})+unit;
+const dashSize = gb => dashNumber(gb)===null?'—':gb>=1024?dashFmt(gb/1024,' TiB',2):dashFmt(gb,' GiB',1);
+const dashTone = state => /^(ok|online|passed|running|completed|succeeded)$/i.test(state||'')?'ok':/^(warn|degraded|failed|faulted|offline|interrupted|restarting|crit)$/i.test(state||'')?'warn':'unknown';
+const dashList = (raw,key) => Array.isArray(raw)?raw:Array.isArray(raw?.[key])?raw[key]:[];
+function dashRates(previous,current,key){
+ if(!previous||!current||!current.boot||current.boot!==previous.boot||current.errors?.[key]||previous.errors?.[key])return null;
+ const dt=(current.t-previous.t)/1000, before=previous[key]||{},after=current[key]||{},names=Object.keys(after).sort();
+ if(dt<=0||dt>30||!names.length||names.join('|')!==Object.keys(before).sort().join('|'))return null;
+ let read=0,write=0;
+ for(const name of names){const a=before[name],b=after[name];if([a.read,a.write,b.read,b.write].some(v=>dashNumber(v)===null)||b.read<a.read||b.write<a.write)return null;read+=b.read-a.read;write+=b.write-a.write;}
+ return {read:read/dt/1e6,write:write/dt/1e6};
+}
+function dashSensorTone(s){
+ const raw=String(s.raw_status||'').toLowerCase();
+ if(['cr','lcr','ucr','lnr','unr','critical','failure'].includes(raw))return 'warn';
+ if(['nc','lnc','unc','non-critical'].includes(raw))return 'warn';
+ if(s.unavailable||s.discrete||dashNumber(s.val)===null)return 'unknown';
+ if(s.unit==='°C'&&((s.crit>0&&s.val>=s.crit)||(s.warn>0&&s.val>=s.warn)))return 'warn';
+ if((s.unit==='RPM'||s.kind==='fan')&&s.warn>0&&s.val<s.warn)return 'warn';
+ return raw==='ok'?'ok':'unknown';
+}
+function dashUPS(data,error){
+ if(error||!data?.connected)return {};
+ const raw=data.nut_raw||{},status=String(raw['ups.status']||'').split(/\s+/);
+ return {online:status.includes('OL')&&!status.includes('OB')&&!status.includes('ALARM')&&!status.includes('FSD'),battery:status.includes('OB'),fault:status.includes('ALARM')||status.includes('FSD')||status.includes('LB'),
+ battery_charge:dashNumber(raw['battery.charge']),runtime_min:dashNumber(raw['battery.runtime'])===null?null:Number(raw['battery.runtime'])/60,ups_load:dashNumber(raw['ups.load']),input_voltage:dashNumber(raw['input.voltage'])};
+}
+function useDashboardResource(path,delay=30000){
+ const [state,setState]=React.useState({data:null,error:'',at:null});
+ React.useEffect(()=>{
+  const lifetime=new AbortController();let timer,request;
+  const load=async()=>{
+   if(document.hidden){timer=setTimeout(load,delay);return;}
+   request=new AbortController();const timeout=setTimeout(()=>request.abort(),20000);
+   try{const r=await fetch(path,{credentials:'include',signal:request.signal});const data=await r.json();if(!r.ok||data?.error)throw Error(data?.error||'HTTP '+r.status);if(!lifetime.signal.aborted)setState({data,error:'',at:Date.now()});}
+   catch(e){if(!lifetime.signal.aborted)setState(s=>({...s,error:e.name==='AbortError'?'Brak odpowiedzi przez 20 sekund':e.message}));}
+   finally{clearTimeout(timeout);if(!lifetime.signal.aborted)timer=setTimeout(load,delay);}
+  };load();return()=>{lifetime.abort();request?.abort();clearTimeout(timer)};
+ },[path,delay]);return state;
+}
+const DashLink=({to,children,className='',storageTab})=><a className={'nd-link '+className} href={'#'+to} onClick={()=>{if(to==='disks')window.__nimbusStorageTab=storageTab||'overview'}}>{children}</a>;
+const DashState=({state,label})=><span className={'nd-state '+dashTone(state)}><i/>{label||state||'Brak danych'}</span>;
+const DashSource=({source})=>source.error?<div className="nd-source-error" role="status">{source.error}{source.at?' · ostatni odczyt '+new Date(source.at).toLocaleTimeString('pl-PL'):''}</div>:null;
+function DashChart({points,keys,colors,percent=false}){
+ const rows=(points||[]).slice(-90),width=360,height=85;
+ if(rows.filter(p=>keys.some(k=>dashNumber(p[k])!==null)).length<2)return <div className="nd-chart-empty">Zbieranie pomiarów…</div>;
+ const start=rows[0].t,end=rows[rows.length-1].t,values=rows.flatMap(p=>keys.map(k=>dashNumber(p[k]))).filter(v=>v!==null),max=percent?100:Math.max(1,...values)*1.12;
+ const paths=keys.map(k=>{let drawing=false;return rows.map(p=>{const v=dashNumber(p[k]);if(v===null){drawing=false;return '';}const x=(p.t-start)/Math.max(1,end-start)*width,y=height-4-Math.max(0,Math.min(max,v))/max*(height-8),piece=(drawing?'L':'M')+x.toFixed(1)+','+y.toFixed(1);drawing=true;return piece;}).join(' ')});
+ const time=t=>new Date(t).toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+ return <div className="nd-chart"><svg role="img" aria-label={'Historia pomiarów od '+time(start)+' do '+time(end)} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">{[.25,.5,.75,1].map(n=><line key={n} x1="0" x2={width} y1={height*n} y2={height*n}/>)}{paths.map((d,i)=><path key={i} d={d} fill="none" stroke={colors[i]} strokeWidth="2" vectorEffect="non-scaling-stroke"/>)}</svg><div className="nd-chart-times"><span>{time(start)}</span><span>{percent?'0–100%':dashFmt(max,' MB/s',1)}</span><span>{time(end)}</span></div></div>;
+}
+const DashPanel=({title,icon,to,children,className='',storageTab})=><section className={'nd-panel '+className}><div className="nd-panel-head"><h2><window.Icon name={icon} size={18}/>{title}</h2>{to&&<DashLink to={to} storageTab={storageTab}>Szczegóły →</DashLink>}</div>{children}</section>;
+function Dashboard(){
+ const overview=useDashboardResource('/api/overview',5000),metrics=useDashboardResource('/api/metrics?range=1h',15000),io=useDashboardResource('/api/dashboard/io',5000);
+ const bays=useDashboardResource('/api/bays',300000),ipmi=useDashboardResource('/api/ipmi',60000),ups=useDashboardResource('/api/ups/status',15000);
+ const pools=useDashboardResource('/api/storage/pools',30000),containers=useDashboardResource('/services/docker/containers',30000),vms=useDashboardResource('/api/kvm/vms',30000),jobs=useDashboardResource('/api/storage/jobs',15000);
+ const logs=window.useStore('LOGS')||[];
+ const [selectedBay,setSelectedBay]=React.useState(null),[traffic,setTraffic]=React.useState([]);const previous=React.useRef(null);
+ React.useEffect(()=>{if(!io.data||io.error)return;const current=io.data,net=dashRates(previous.current,current,'network'),disk=dashRates(previous.current,current,'disks');previous.current=current;setTraffic(p=>[...p,{t:current.t,rx:net?.read??null,tx:net?.write??null,read:disk?.read??null,write:disk?.write??null}].slice(-90));},[io.data,io.error]);
+ const ov=overview.data,cpu=ov?.cpu||{},mem=ov?.memory||{},hw=ipmi.data||{},power=hw.power||{},sensors=hw.sensors||[],fans=sensors.filter(s=>s.unit==='RPM'||s.kind==='fan');
+ const liveHW=!ipmi.error&&!hw.stale&&hw.bmc_present===true;
+ const u=dashUPS(ups.data,ups.error),uOnline=u.online,uBattery=u.battery;
+ const slots=bays.data?.slots||[],mapped=slots.some(s=>s.pd_id),slot=mapped?slots.find(s=>Number(s.slot)===selectedBay):null;
+ const poolList=dashList(pools.data,'pools').filter(p=>p.kind!=='mount'),mounts=dashList(pools.data,'pools').filter(p=>p.kind==='mount');
+ const apps=dashList(containers.data,'containers'),machines=dashList(vms.data,'vms'),taskList=dashList(jobs.data,'jobs');
+ const alarms=[];
+ sensors.filter(s=>dashSensorTone(s)==='warn').forEach(s=>alarms.push({text:s.name+': '+(s.unavailable?s.raw_status:dashFmt(s.val,' '+s.unit)),to:'ipmi'}));
+ [power.psu1,power.psu2].forEach((p,i)=>{if(p?.status&&p.status!=='—'&&p.status!=='OK')alarms.push({text:'PSU '+(i+1)+': '+p.status,to:'ipmi'})});
+ if(u.fault||uBattery)alarms.push({text:u.fault?'UPS zgłasza alarm':'UPS pracuje na baterii',to:'ups'});
+ poolList.filter(p=>dashTone(p.health)==='warn').forEach(p=>alarms.push({text:'Pula '+p.name+': '+p.health,to:'disks',storageTab:'pools'}));
+ taskList.filter(j=>['failed','interrupted'].includes(j.state)).slice(0,2).forEach(j=>alarms.push({text:(j.target||j.operation)+': '+(j.result?.error||j.stage||j.state),to:'disks',storageTab:'jobs'}));
+ logs.filter(l=>['ERROR','ERR','WARN'].includes(l.lvl)).slice(0,2).forEach(l=>alarms.push({text:l.msg,to:'logs'}));
+ const history=(metrics.error?[]:metrics.data?.samples||[]).map(s=>({...s,t:s.t*1000}));
+ const last=io.error?{}:traffic[traffic.length-1]||{};
+ const stateName=s=>({running:'Działa',stopped:'Wyłączona',exited:'Zatrzymany',paused:'Wstrzymana',restarting:'Restartowanie',queued:'Oczekuje',completed:'Ukończono',succeeded:'Ukończono',failed:'Błąd',interrupted:'Przerwano'})[s]||s||'Nieznany';
+ const graphColors=['#58adff','#64d994'];
+ return <div className="nd-dashboard">
+  <div className={'nd-alert '+(alarms.length?'warn':'neutral')} role="status"><window.Icon name={alarms.length?'bell':'hdd'} size={21}/><div><strong>{alarms.length?alarms.length+' zdarzeń wymaga uwagi':'Stan Twojego serwera'}</strong><span>{alarms.length?alarms[0].text:!ov?'Pobieranie stanu systemu…':overview.error?'Utracono odczyt systemu':`Ostatni odczyt: ${new Date(overview.at).toLocaleTimeString('pl-PL')} · ${ov.hostname}`}</span></div><DashLink to={alarms[0]?.to||'logs'} storageTab={alarms[0]?.storageTab}>Szczegóły →</DashLink></div>
+  {alarms.length>1&&<div className="nd-alert-more">{alarms.slice(1,5).map((a,i)=><DashLink key={i} to={a.to} storageTab={a.storageTab}>{a.text} →</DashLink>)}</div>}
+  <div className="nd-hero-grid">
+   <section className="nd-panel nd-server"><div className="nd-server-heading"><div><h2>HP ProLiant SE326M1R2</h2><p>{ov?.hostname||'Serwer NAS'} · 2U · 25 × 2,5″</p></div><div><DashState state={ov&&dashNumber(cpu.percent)!==null&&!overview.error?'online':'unknown'} label={overview.error?'Brak połączenia':ov?'Serwer online':'Odczyt…'}/><p>Czas pracy {ov?Math.floor(ov.uptime_secs/86400)+' dni '+Math.floor(ov.uptime_secs%86400/3600)+' godz.':'—'}</p></div></div>
+    <div className="nd-chassis"><div className="nd-rack-ear"><b>hp</b><i/><i/></div><div className="nd-rack-center"><div className="nd-rack-caption"><span>PROLIANT · STORAGE SERVER</span><span>25 SFF</span></div><div className="nd-bays" aria-label="25 zatok serwera">{Array.from({length:25},(_,i)=>{const b=mapped?slots.find(s=>Number(s.slot)===i+1):null;const known=b&&!bays.error;return <button key={i} className={'nd-bay '+(known&&b.occupied?'occupied ':'')+(known?dashTone(b.smart):'unknown')+(selectedBay===i+1?' selected':'')} onClick={()=>setSelectedBay(i+1)} aria-pressed={selectedBay===i+1} aria-label={'Zatoka '+(i+1)+': '+(!known?'brak danych':b.occupied?b.model||'dysk':'pusta')}><span>{String(i+1).padStart(2,'0')}</span><i className="nd-drive-grille"/><i className={'nd-led '+(known&&b.occupied?'lit':'')}/></button>})}</div></div><div className="nd-rack-ear right"><i/><span>ProLiant</span></div></div>
+    <div className="nd-bay-caption"><span>{mapped?'Mapa zatok z kontrolera':'Schemat 25 zatok · brak potwierdzonego mapowania'}</span><DashLink to="disks">Dyski i pule →</DashLink></div>
+    {selectedBay!==null&&<div className="nd-bay-detail" aria-live="polite"><strong>Zatoka {selectedBay}</strong><span>{slot?(slot.occupied?[slot.model,slot.size,slot.device||'Brak mapowania /dev',slot.serial].filter(Boolean).join(' · '):'Pusta zatoka'):'Brak danych kontrolera dla tej zatoki'}</span><DashLink to="disks">Zarządzaj →</DashLink><button className="btn ghost sm" aria-label="Zamknij szczegóły zatoki" onClick={()=>setSelectedBay(null)}>×</button></div>}
+    <div className="nd-server-facts"><DashLink to="temps"><window.Icon name="thermometer" size={23}/><span>CPU<strong>{cpu.temp>0?dashFmt(cpu.temp,'°C'):'Brak odczytu'}</strong></span></DashLink><DashLink to="ipmi"><window.Icon name="fan" size={23}/><span>Wentylatory<strong>{liveHW&&fans.length?fans.filter(f=>dashSensorTone(f)==='ok').length+' / '+fans.length+' OK':'Brak odczytu'}</strong></span></DashLink><DashLink to="ipmi"><window.Icon name="hdd" size={23}/><span>iLO / BMC<strong className={liveHW?'ok':''}>{liveHW?'Połączone':hw.stale?'Dane nieaktualne':'Brak odczytu'}</strong></span></DashLink></div>
+    <DashSource source={overview}/><DashSource source={bays}/><DashSource source={ipmi}/>
+   </section>
+   <DashPanel title="Zasilanie i UPS" icon="bolt" to="ups" className="nd-power">
+    {[power.psu1,power.psu2].map((p,i)=><div className="nd-psu" key={i}><window.Icon name="bolt" size={19}/><strong>PSU {i+1}</strong><DashState state={liveHW?p?.status:null} label={liveHW?p?.status||'Brak danych':'Brak odczytu'}/><small>{liveHW?p?.out||'—':'—'}</small></div>)}
+    <div className="nd-redundancy">Redundancja: <b>{liveHW?hw.power_meta?.redundancy||'Brak danych':'Brak danych'}</b></div>
+    <div className="nd-ups-title"><strong><window.Icon name="bolt" size={20}/> UPS</strong><DashState state={u.fault||uBattery?'warn':uOnline?'online':null} label={u.fault?'Alarm UPS':uBattery?'Praca na baterii':uOnline?'Zasilanie sieciowe':'Brak odczytu'}/></div>
+    <div className="nd-battery"><div><i style={{width:Math.max(0,Math.min(100,u.battery_charge??u.battery_pct??0))+'%',background:uBattery?'var(--warn)':'var(--ok)'}}/></div><strong>{dashFmt(u.battery_charge??u.battery_pct,'%')}</strong></div>
+    <div className="nd-power-facts"><div><span>Podtrzymanie</span><strong>{dashFmt(u.runtime_min,' min',1)}</strong></div><div><span>Pobór serwera</span><strong>{liveHW&&power.totalW>0?dashFmt(power.totalW,' W'):'—'}</strong></div><div><span>Obciążenie UPS</span><strong>{dashFmt(u.ups_load??u.output_current_pct,'%')}</strong></div><div><span>Napięcie wejściowe</span><strong>{dashFmt(u.input_voltage,' V')}</strong></div></div><DashSource source={ups}/>
+   </DashPanel>
+  </div>
+  <div className="nd-metrics">
+   <DashPanel title="CPU" icon="cpu" to="processes"><div className="nd-metric-value">{overview.error?'—':dashFmt(cpu.percent,'%',1)}</div><DashChart points={history} keys={['cpu']} colors={graphColors} percent/><p className="nd-footnote">{cpu.model||'Procesor —'} · {cpu.cores||'—'} rdzeni</p></DashPanel>
+   <DashPanel title="Pamięć" icon="ram" to="hardware"><div className="nd-metric-value">{overview.error?'—':dashFmt(mem.used_gb,'',1)} <small>/ {dashFmt(mem.total_gb,' GiB')}</small><em>{overview.error?'—':dashFmt(mem.percent,'%',1)}</em></div><DashChart points={history} keys={['mem']} colors={['#bc8aff']} percent/><p className="nd-footnote">Dostępne {dashFmt(mem.avail_gb,' GiB',1)} · cache {dashFmt(mem.cached_gb,' GiB',1)}</p></DashPanel>
+   <DashPanel title="Sieć" icon="network" to="network"><div className="nd-metric-value nd-rates"><span>↓ {dashFmt(last.rx,' MB/s',1)}</span><span>↑ {dashFmt(last.tx,' MB/s',1)}</span></div><DashChart points={traffic} keys={['rx','tx']} colors={graphColors}/><p className="nd-footnote"><i style={{background:graphColors[0]}}/>Pobieranie <i style={{background:graphColors[1]}}/>Wysyłanie · porty fizyczne</p></DashPanel>
+   <DashPanel title="Dyski I/O" icon="disk" to="disks"><div className="nd-metric-value nd-rates"><span>↓ {dashFmt(last.read,' MB/s',1)}</span><span>↑ {dashFmt(last.write,' MB/s',1)}</span></div><DashChart points={traffic} keys={['read','write']} colors={graphColors}/><p className="nd-footnote"><i style={{background:graphColors[0]}}/>Odczyt <i style={{background:graphColors[1]}}/>Zapis · urządzenia fizyczne</p></DashPanel>
+  </div><DashSource source={metrics}/><DashSource source={io}/>{Object.entries(io.data?.errors||{}).map(([k,v])=><div className="nd-source-error" key={k}>{k==='disks'?'Dyski':'Sieć'}: {v}</div>)}
+  <div className="nd-bottom-grid">
+   <DashPanel title="Pule ZFS" icon="disk" to="disks"><DashSource source={pools}/>{poolList.slice(0,4).map(p=>{const pct=p.total>0?Math.max(0,Math.min(100,p.used/p.total*100)):null;return <DashLink className="nd-pool" key={p.id||p.name} to="disks" storageTab="pools"><div><strong>{p.name}</strong><span>{p.type||'ZFS'}</span><DashState state={pools.error?null:p.health} label={pools.error?'Nieaktualne':p.health}/></div><div><div className="nd-pool-bar"><i style={{width:(pct||0)+'%',background:pct>90?'var(--warn)':undefined}}/></div><span>{dashSize(p.used)} / {dashSize(p.total)}</span><b>{dashFmt(pct,'%')}</b></div></DashLink>})}{!poolList.length&&<p className="nd-empty">{pools.data?'Brak pul ZFS w odpowiedzi serwera.':'Pobieranie pul…'}</p>}{mounts.length>0&&<DashLink to="disks">Montowania danych: {mounts.length} →</DashLink>}</DashPanel>
+   <DashPanel title="Aplikacje i maszyny" icon="docker" to="docker"><div className="nd-app-summary"><DashLink to="docker">Docker <b>{containers.data&&!containers.error?apps.filter(c=>(c.state||c.State)==='running').length:'—'}</b> działa</DashLink><DashLink to="kvm">VM <b>{vms.data&&!vms.error?machines.filter(v=>v.state==='running').length:'—'}</b> działa</DashLink></div><DashSource source={containers}/><DashSource source={vms}/>{[...apps.slice(0,3).map(c=>({name:c.name||c.Names||c.ID,state:c.state||c.State,type:'Kontener Docker',to:'docker',stale:!!containers.error})),...machines.slice(0,2).map(v=>({...v,type:'Maszyna wirtualna',to:'kvm',stale:!!vms.error}))].map((a,i)=><DashLink className="nd-app" key={i} to={a.to}><span className={'nd-app-icon '+a.to}><window.Icon name={a.to==='docker'?'docker':'hdd'} size={19}/></span><strong>{a.name}</strong><small>{a.type}</small><DashState state={a.stale?null:a.state} label={a.stale?'Nieaktualne':stateName(a.state)}/><span>›</span></DashLink>)}{!apps.length&&!machines.length&&<p className="nd-empty">{containers.data&&vms.data?'Brak kontenerów i maszyn wirtualnych.':'Pobieranie aplikacji…'}</p>}</DashPanel>
+  </div>
+  <DashPanel title="Ostatnie zadania" icon="clock" to="disks" storageTab="jobs"><DashSource source={jobs}/><div className="nd-tasks">{taskList.slice(0,5).map(j=><DashLink key={j.id} className="nd-task" to="disks" storageTab="jobs"><window.Icon name="disk" size={18}/><strong>{j.target||j.operation}</strong><span>{j.stage||j.operation}</span><DashState state={j.state} label={stateName(j.state)}/>{j.result?.error&&<small>{j.result.error}</small>}</DashLink>)}{!taskList.length&&<p className="nd-empty">{jobs.data?'Brak zadań dyskowych w historii.':'Pobieranie historii operacji…'}</p>}</div></DashPanel>
+  <div className="nd-footer"><span>Wykresy CPU/RAM: historia serwera · Sieć i I/O: pomiary bieżącej sesji</span><DashLink to="updates">Aktualizacje →</DashLink><DashLink to="logs">Logi systemowe {logs.filter(l=>['ERROR','ERR','WARN'].includes(l.lvl)).length?'· zgłoszone ostrzeżenia':''} →</DashLink></div>
+ </div>;
+}
+window.Dashboard=Dashboard;
+window.DashboardHelpers={dashRates,dashNumber,dashFmt,dashSensorTone,dashUPS};

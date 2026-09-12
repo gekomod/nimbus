@@ -81,6 +81,7 @@ func (s *Server) routes() {
 
 	// system
 	a("/api/overview", s.handleOverview)
+	a("/api/dashboard/io", s.handleDashboardIO)
 	a("/api/cpu", s.handleCPU)
 	a("/api/memory", s.handleMemory)
 	a("/api/system-health", s.handleSystemHealth)
