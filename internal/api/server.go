@@ -620,6 +620,7 @@ func (s *Server) routes() {
 	a("/api/files/mkdir", s.handleFilesMkdir)
 	a("/api/files/delete", s.handleFilesDelete)
 	a("/api/files/rename", s.handleFilesRename)
+	a("/api/files/move", s.handleFilesMove)
 	a("/api/files/chmod", s.handleFilesChmod)
 	a("/api/files/preview", s.handleFilesPreview)
 	a("/api/files/download", s.handleFilesDownload)
