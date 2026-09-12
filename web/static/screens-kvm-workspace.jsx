@@ -22,7 +22,7 @@ function KVMSnapshots({vm,onChange}){
 function KVMWorkspace(){
   const panels=window.KVMPanels;
   const [vms,setVms]=React.useState([]),[status,setStatus]=React.useState(null),[loading,setLoading]=React.useState(true),[fetchError,setFetchError]=React.useState(''),[actionError,setActionError]=React.useState(''),[notice,setNotice]=React.useState(''),[updated,setUpdated]=React.useState(null);
-  const [tab,setTab]=React.useState('vms'),[query,setQuery]=React.useState(''),[filter,setFilter]=React.useState('all'),[view,setView]=React.useState('grid'),[selected,setSelected]=React.useState(null),[detailTab,setDetailTab]=React.useState('overview'),[dialog,setDialog]=React.useState(null),[pending,setPending]=React.useState({}),[confirm,setConfirm]=React.useState(null),[installing,setInstalling]=React.useState(false);
+  const [tab,setTab]=React.useState(()=>{const tab=window.__nimbusKVMTab;delete window.__nimbusKVMTab;return tab==='templates'?'templates':'vms'}),[query,setQuery]=React.useState(''),[filter,setFilter]=React.useState('all'),[view,setView]=React.useState('grid'),[selected,setSelected]=React.useState(null),[detailTab,setDetailTab]=React.useState('overview'),[dialog,setDialog]=React.useState(null),[pending,setPending]=React.useState({}),[confirm,setConfirm]=React.useState(null),[installing,setInstalling]=React.useState(false);
   const inflight=React.useRef(null),alive=React.useRef(false),locks=React.useRef(new Set());
   const load=React.useCallback(()=>{
     if(inflight.current)return inflight.current;

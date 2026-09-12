@@ -3,11 +3,13 @@ package api
 import (
 	"archive/zip"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -134,5 +136,117 @@ func TestDownloadTemplateFileResumesPartialDownload(t *testing.T) {
 	}
 	if string(got) != string(content) {
 		t.Fatalf("downloaded %q; want %q", got, content)
+	}
+}
+
+func fakeQemuInfo(t *testing.T, success bool) {
+	t.Helper()
+	dir := t.TempDir()
+	body := "#!/bin/sh\nexit 1\n"
+	if success {
+		body = "#!/bin/sh\nprintf '%s' '{\"format\":\"qcow2\",\"virtual-size\":1073741824}'\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "qemu-img"), []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestTemplateErrorRetainsCommandFailure(t *testing.T) {
+	err := templateCommandError("genisoimage", "", fmt.Errorf("executable not found"))
+	if !strings.Contains(err.Error(), "executable not found") {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedValidationPreservesDownloadedImage(t *testing.T) {
+	fakeQemuInfo(t, false)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.qcow2")
+	base := filepath.Join(dir, "base.qcow2")
+	content := []byte("QFI\xfbsource payload")
+	if err := os.WriteFile(source, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureTemplateBase(&templateJob{}, VMTemplate{ID: "preserve-test", Format: "qcow2", LocalPath: source}, base)
+	if err == nil || !strings.Contains(err.Error(), "zachowano") {
+		t.Fatalf("expected preserved-path error, got %v", err)
+	}
+	for _, path := range []string{source, base + ".part"} {
+		got, e := os.ReadFile(path)
+		if e != nil || string(got) != string(content) {
+			t.Fatalf("lost image %s: %v", path, e)
+		}
+	}
+}
+
+func TestSavedPartCanFinishWithoutDownloadingAgain(t *testing.T) {
+	fakeQemuInfo(t, true)
+	base := filepath.Join(t.TempDir(), "base.qcow2")
+	if err := os.WriteFile(base+".part", []byte("complete image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureTemplateBase(&templateJob{}, VMTemplate{ID: "reuse-test", URL: "invalid-no-network"}, base); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(base); err != nil || string(got) != "complete image" {
+		t.Fatalf("base: %s %v", got, err)
+	}
+}
+
+func TestZIPContentDetectedWithoutURLSuffix(t *testing.T) {
+	fakeQemuInfo(t, true)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "no-extension")
+	base := filepath.Join(dir, "base.qcow2")
+	f, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z := zip.NewWriter(f)
+	entry, err := z.Create("disk.qcow2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("qcow2 content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := ensureTemplateBase(&templateJob{}, VMTemplate{ID: "zip-magic", Format: "qcow2", LocalPath: source}, base); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(base)
+	if err != nil || string(got) != "qcow2 content" {
+		t.Fatalf("base %q %v", got, err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatal("source archive removed", err)
+	}
+}
+
+func TestCopyTemplateRejectsEmptySource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "empty")
+	os.WriteFile(source, nil, 0600)
+	if err := copyTemplateImage(source, filepath.Join(dir, "copy"), nil); err == nil {
+		t.Fatal("empty source accepted")
+	}
+}
+
+func TestExistingBaseIsNeverMovedOnInspectionFailure(t *testing.T) {
+	fakeQemuInfo(t, false)
+	base := filepath.Join(t.TempDir(), "in-use.qcow2")
+	if err := os.WriteFile(base, []byte("VM backing image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureTemplateBase(&templateJob{}, VMTemplate{ID: "in-use-test"}, base); err == nil {
+		t.Fatal("expected inspection error")
+	}
+	content, err := os.ReadFile(base)
+	if err != nil || string(content) != "VM backing image" {
+		t.Fatalf("moved a live backing image: %v", err)
 	}
 }

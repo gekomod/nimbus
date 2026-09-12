@@ -30,18 +30,25 @@ const kvmApi = {
 
 const KVMModal = window.Modal;
 
+async function kvmTemplateRequest(path,body){
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);
+ try{const r=await fetch('/api/kvm/'+path,{credentials:'include',signal:ctrl.signal,...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});let d;try{d=await r.json()}catch(e){throw Error('HTTP '+r.status+' — nieprawidłowa odpowiedź KVM')};if(!r.ok||d.error)throw Error(d.error||'HTTP '+r.status);return d}
+ catch(e){if(ctrl.signal.aborted)throw Error('KVM nie odpowiedziało przez 20 sekund. Sprawdź listę wdrożeń przed ponowieniem.');throw e}finally{clearTimeout(timer)}
+}
+
 const KVMTemplatesPanel = ({ onReady }) => {
   const [templates,setTemplates]=React.useState([]), [jobs,setJobs]=React.useState([]);
   const [networks,setNetworks]=React.useState([]);
-  const [chosen,setChosen]=React.useState(null), [error,setError]=React.useState('');
+  const [chosen,setChosen]=React.useState(null), [error,setError]=React.useState(''),[jobsError,setJobsError]=React.useState(''),[deploying,setDeploying]=React.useState(false);
+ const jobFlight=React.useRef(false),alive=React.useRef(false),deployLock=React.useRef(false);
 	const [editor,setEditor]=React.useState(null), [editorError,setEditorError]=React.useState('');
   const [form,setForm]=React.useState({name:'',network:'default',cpu:2,ram:2048,disk:20,sshKey:''});
 	const loadTemplates=()=>kvmApi.templates().then(d=>setTemplates(d.templates||[])).catch(()=>{});
-  const loadJobs=()=>kvmApi.templateJobs().then(d=>setJobs(d.jobs||[])).catch(()=>{});
-	React.useEffect(()=>{loadTemplates();kvmApi.networks().then(d=>setNetworks(d.networks||[])).catch(()=>{});loadJobs();const t=setInterval(loadJobs,1800);return()=>clearInterval(t)},[]);
+  const loadJobs=async()=>{if(jobFlight.current)return;jobFlight.current=true;try{const d=await kvmTemplateRequest('template-jobs');if(!Array.isArray(d.jobs))throw Error('Brak listy wdrożeń w odpowiedzi KVM');if(alive.current){setJobs(d.jobs);setJobsError('')}}catch(e){if(alive.current)setJobsError(e.message)}finally{jobFlight.current=false}};
+	React.useEffect(()=>{alive.current=true;loadTemplates();kvmApi.networks().then(d=>setNetworks(d.networks||[])).catch(()=>{});loadJobs();const t=setInterval(loadJobs,1800);return()=>{alive.current=false;clearInterval(t)}},[]);
   React.useEffect(()=>{if(jobs.some(j=>j.status==='done'))onReady&&onReady()},[jobs.map(j=>j.status).join(',')]);
   const select=t=>{setChosen(t);setForm(f=>({...f,name:t.id+'-01',cpu:t.min_cpu,ram:t.min_ram,disk:t.min_disk}))};
-  const deploy=async()=>{setError('');try{await kvmApi.templateDeploy({template:chosen.id,...form});setChosen(null);loadJobs()}catch(e){setError(e.message)}};
+  const deploy=async()=>{if(deployLock.current)return;deployLock.current=true;setDeploying(true);setError('');try{await kvmTemplateRequest('template-deploy',{template:chosen.id,...form});setChosen(null);loadJobs()}catch(e){setError(e.message)}finally{deployLock.current=false;setDeploying(false)}};
 	const fieldStyle={width:'100%',marginTop:6,background:'var(--bg-2)',border:'1px solid var(--line-strong)',borderRadius:7,padding:'9px 11px',color:'var(--fg)',fontFamily:'var(--font-mono)',fontSize:'var(--fs-sm)',outline:'none'};
 	const labelStyle={display:'block',fontSize:'var(--fs-xs)',fontWeight:600,color:'var(--fg-muted)'};
 	const emptyTemplate={id:'',name:'',version:'',family:'linux',icon:'💿',description:'',url:'',format:'qcow2',min_cpu:1,min_ram:1024,min_disk:10};
@@ -65,7 +72,7 @@ const KVMTemplatesPanel = ({ onReady }) => {
 	  </div>{editorError&&<div style={{color:'var(--err)',marginTop:12}}>{editorError}</div>}
 	</KVMModal>}
 	{chosen&&<KVMModal title={`Wdróż ${chosen.name} ${chosen.version}`} sub={chosen.format==='qcow2.zip'?'Archiwum zostanie pobrane, rozpakowane i sprawdzone. Gotowy QCOW2 pozostanie bazą kolejnych maszyn.':'Obraz zostanie pobrany raz i zachowany jako baza kolejnych maszyn.'} onClose={()=>{setChosen(null);setError('')}} width={680}
-	  footer={<><button className="btn" onClick={()=>{setChosen(null);setError('')}}>Anuluj</button><button className="btn primary" onClick={deploy} disabled={!form.name||!form.network}>Pobierz i uruchom system</button></>}>
+	  footer={<><button className="btn" onClick={()=>{setChosen(null);setError('')}}>Anuluj</button><button className="btn primary" onClick={deploy} disabled={deploying||!form.name||!form.network}>{deploying?'Sprawdzanie KVM…':'Pobierz i uruchom system'}</button></>}>
 	  <div style={{display:'flex',gap:14,alignItems:'center',padding:'12px 14px',background:'color-mix(in oklch,var(--accent) 7%,var(--bg-2))',border:'1px solid color-mix(in oklch,var(--accent) 22%,var(--line))',borderRadius:9,marginBottom:18}}><span style={{fontSize:34}}>{chosen.icon}</span><div><div style={{fontWeight:700}}>{chosen.name} {chosen.version}</div><div className="card-sub" style={{marginTop:3}}>{chosen.description}</div></div></div>
 	  <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:14}}>
 	    <label style={labelStyle}>Nazwa maszyny<input style={fieldStyle} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>
@@ -78,7 +85,7 @@ const KVMTemplatesPanel = ({ onReady }) => {
 	  <div className="mono dim" style={{fontSize:'var(--fs-xs)',marginTop:14,padding:'9px 11px',background:'var(--bg-2)',borderRadius:7}}>Minimum: {chosen.min_cpu} vCPU · {Math.round(chosen.min_ram/1024*10)/10} GB RAM · {chosen.min_disk} GB dysku{chosen.format==='qcow2.zip'?' · automatyczne rozpakowanie ZIP':''}</div>
 	  {error&&<div style={{color:'var(--err)',marginTop:12,padding:'9px 11px',border:'1px solid color-mix(in oklch,var(--err) 35%,var(--line))',borderRadius:7}}>{error}</div>}
 	</KVMModal>}
-    {jobs.length>0&&<div className="card"><div style={{padding:16,borderBottom:'1px solid var(--line)'}}><div className="card-title">Wdrożenia</div></div>{jobs.map(j=><div key={j.id} style={{padding:'14px 16px',borderBottom:'1px solid var(--line)'}}><div className="row" style={{justifyContent:'space-between'}}><b>{j.name}</b><span className={`badge ${j.status==='done'?'ok':j.status==='error'?'err':'warn'}`}>{j.status==='done'?'GOTOWE':j.status==='error'?'BŁĄD':j.progress+'%'}</span></div><div className="card-sub" style={{marginTop:4}}>{j.error||j.step}</div><div style={{height:4,background:'var(--line)',borderRadius:4,marginTop:9}}><div style={{height:'100%',width:j.progress+'%',background:j.status==='error'?'var(--err)':'var(--accent)',borderRadius:4}}/></div></div>)}</div>}
+    {jobsError&&<div className="dlw-error" role="alert">{jobsError}</div>}{jobs.length>0&&<div className="card"><div style={{padding:16,borderBottom:'1px solid var(--line)'}}><div className="card-title">Wdrożenia</div></div>{jobs.map(j=><div key={j.id} style={{padding:'14px 16px',borderBottom:'1px solid var(--line)'}}><div className="row" style={{justifyContent:'space-between'}}><b>{j.name}</b><span className={`badge ${j.status==='done'?'ok':j.status==='error'?'err':'warn'}`}>{j.status==='done'?'GOTOWE':j.status==='error'?'BŁĄD':j.progress+'%'}</span></div><div className="card-sub" style={{marginTop:4}}>{j.step}</div>{j.error&&<div className="dlw-error" style={{marginTop:8}} role="alert">{j.error}</div>}{j.image_path&&<div className="mono dim" style={{fontSize:11,marginTop:8,overflowWrap:"anywhere"}}>Obraz: {j.image_path}</div>}<div style={{height:4,background:'var(--line)',borderRadius:4,marginTop:9}}><div style={{height:'100%',width:j.progress+'%',background:j.status==='error'?'var(--err)':'var(--accent)',borderRadius:4}}/></div></div>)}</div>}
   </div>
 };
 

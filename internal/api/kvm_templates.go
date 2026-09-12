@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,6 +32,7 @@ type VMTemplate struct {
 	MinRAM      int    `json:"min_ram"`
 	MinDisk     int    `json:"min_disk"`
 	Custom      bool   `json:"custom,omitempty"`
+	LocalPath   string `json:"-"`
 }
 
 const vmTemplatesPath = "/etc/nimbus/kvm-templates.json"
@@ -130,14 +133,15 @@ func validateVMTemplate(t *VMTemplate) error {
 }
 
 type templateJob struct {
-	ID       string    `json:"id"`
-	Template string    `json:"template"`
-	Name     string    `json:"name"`
-	Status   string    `json:"status"`
-	Step     string    `json:"step"`
-	Error    string    `json:"error,omitempty"`
-	Progress int       `json:"progress"`
-	Started  time.Time `json:"started"`
+	ID        string    `json:"id"`
+	Template  string    `json:"template"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	Step      string    `json:"step"`
+	Error     string    `json:"error,omitempty"`
+	Progress  int       `json:"progress"`
+	Started   time.Time `json:"started"`
+	ImagePath string    `json:"image_path,omitempty"`
 }
 
 var templateJobs = struct {
@@ -261,8 +265,8 @@ func (s *Server) handleKVMTemplateDeploy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var q struct {
-		Template, Name, Network, SSHKey string
-		CPU, RAM, Disk                  int
+		Template, Name, Network, SSHKey, DownloadID string
+		CPU, RAM, Disk                              int
 	}
 	if json.NewDecoder(r.Body).Decode(&q) != nil {
 		jsonErr(w, "nieprawidłowe dane", http.StatusBadRequest)
@@ -281,6 +285,14 @@ func (s *Server) handleKVMTemplateDeploy(w http.ResponseWriter, r *http.Request)
 			break
 		}
 	}
+	if q.DownloadID != "" {
+		var err error
+		tpl, err = s.templateFromDownload(r, q.DownloadID)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	if tpl == nil {
 		jsonErr(w, "nieznany szablon", http.StatusBadRequest)
 		return
@@ -297,7 +309,16 @@ func (s *Server) handleKVMTemplateDeploy(w http.ResponseWriter, r *http.Request)
 	if q.Network == "" {
 		q.Network = "default"
 	}
-	if out, err := runCmd("virsh", "dominfo", q.Name); err == nil && out != "" {
+	if err := templatePreflight(q.Network); err != nil {
+		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	target := filepath.Join(loadKVMConfig().ImagePath, q.Name+".qcow2")
+	if _, err := os.Lstat(target); err == nil {
+		jsonErr(w, "Dysk tej maszyny już istnieje: "+target+". Wybierz inną nazwę lub sprawdź poprzednie wdrożenie.", http.StatusConflict)
+		return
+	}
+	if out, err := templateExec("virsh", "dominfo", q.Name); err == nil && out != "" {
 		jsonErr(w, "VM o tej nazwie już istnieje", http.StatusConflict)
 		return
 	}
@@ -307,6 +328,172 @@ func (s *Server) handleKVMTemplateDeploy(w http.ResponseWriter, r *http.Request)
 	templateJobs.Unlock()
 	go deployTemplate(job, *tpl, q.Name, q.Network, q.SSHKey, q.CPU, q.RAM, q.Disk)
 	jsonOK(w, map[string]any{"status": "accepted", "job_id": job.ID})
+}
+
+// Resolve a completed daemon task, never accept a client-provided filesystem path.
+func (s *Server) templateFromDownload(r *http.Request, id string) (*VMTemplate, error) {
+	raw, err := s.fetchJSONWithReq("/api/downloads", r)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Tasks []struct {
+			ID       string `json:"id"`
+			Filename string `json:"filename"`
+			Dir      string `json:"dest_dir"`
+			Status   string `json:"status"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		return nil, err
+	}
+	for _, task := range data.Tasks {
+		if task.ID != id {
+			continue
+		}
+		if task.Status != "done" {
+			return nil, fmt.Errorf("pobieranie nie zostało ukończone")
+		}
+		name := strings.ToLower(task.Filename)
+		if !strings.HasSuffix(name, ".qcow2") && !strings.HasSuffix(name, ".qcow2.zip") {
+			return nil, fmt.Errorf("wybierz plik QCOW2 lub QCOW2.ZIP")
+		}
+		if filepath.Base(task.Filename) != task.Filename || !filepath.IsAbs(task.Dir) {
+			return nil, fmt.Errorf("nieprawidłowa ścieżka pobranego pliku")
+		}
+		path := filepath.Join(task.Dir, task.Filename)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("obraz nie jest zwykłym plikiem")
+		}
+		return &VMTemplate{ID: "download-" + safeVMName(id), Name: task.Filename, LocalPath: path, Format: normalizeTemplateFormat("qcow2", name), MinCPU: 1, MinRAM: 512, MinDisk: 1}, nil
+	}
+	return nil, fmt.Errorf("nie znaleziono ukończonego zadania Download Center")
+}
+
+func copyTemplateImage(source, destination string, progress func(int64, int64)) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("obraz źródłowy jest pusty")
+	}
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	buf := make([]byte, 4*1024*1024)
+	var done int64
+	last := time.Now()
+	for {
+		n, readErr := in.Read(buf)
+		if n > 0 {
+			written, writeErr := out.Write(buf[:n])
+			done += int64(written)
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+			if progress != nil && time.Since(last) > time.Second {
+				progress(done, info.Size())
+				last = time.Now()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if done != info.Size() {
+		return fmt.Errorf("rozmiar pliku zmienił się podczas kopiowania")
+	}
+	if progress != nil {
+		progress(done, info.Size())
+	}
+	return out.Sync()
+}
+
+var templateCommands = make(chan struct{}, 2)
+
+func templateExec(name string, args ...string) (string, error) {
+	select {
+	case templateCommands <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		return "", fmt.Errorf("kolejka poleceń KVM jest zajęta; ponów za chwilę")
+	}
+	defer func() { <-templateCommands }()
+	limit := 30 * time.Second
+	if name == "virsh" {
+		limit = 5 * time.Second
+	}
+	if name == "virt-install" {
+		limit = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() != nil {
+		return strings.TrimSpace(string(out)), fmt.Errorf("%s: przekroczono limit %s", name, limit)
+	}
+	return strings.TrimSpace(string(out)), err
+}
+
+func templateCommandError(command, output string, err error) error {
+	message := strings.TrimSpace(output)
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	if message == "" {
+		message = "polecenie nie zwróciło szczegółów"
+	}
+	return fmt.Errorf("%s: %s", command, message)
+}
+
+func templatePreflight(network string) error {
+	for _, tool := range []string{"qemu-img", "virsh", "virt-install", "genisoimage"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return fmt.Errorf("Brak %s. Zainstaluj pakiety KVM (qemu-utils, virtinst, genisoimage) przed pobraniem obrazu.", tool)
+		}
+	}
+	if out, err := templateExec("virsh", "uri"); err != nil {
+		return templateCommandError("Połączenie z libvirt", out, err)
+	}
+	if out, err := templateExec("virsh", "net-info", network); err != nil {
+		return templateCommandError("Sieć "+network, out, err)
+	}
+	return nil
+}
+
+// Some download links omit .zip; inspect bytes instead of trusting the suffix.
+func templateIsZIP(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return false, fmt.Errorf("pobrany plik jest pusty lub niekompletny: %w", err)
+	}
+	return magic == [4]byte{'P', 'K', 3, 4}, nil
 }
 
 func setTemplateJob(j *templateJob, status, step string, progress int, err error) {
@@ -552,7 +739,7 @@ func extractQCOW2FromZIP(archivePath, destination string, progress func(done, to
 }
 
 func inspectQCOW2(path string) (int64, error) {
-	out, err := runCmd("qemu-img", "info", "--output=json", path)
+	out, err := templateExec("qemu-img", "info", "--output=json", path)
 	if err != nil {
 		if out == "" {
 			out = err.Error()
@@ -591,16 +778,25 @@ func ensureTemplateBase(j *templateJob, t VMTemplate, base string) error {
 	defer unlock()
 
 	if _, err := os.Stat(base); err == nil {
-		if err := validateQCOW2(base); err == nil {
+		validationErr := validateQCOW2(base)
+		if validationErr == nil {
 			setTemplateJob(j, "running", "Obraz bazowy jest już pobrany", 52, nil)
 			return nil
 		}
-		invalidPath := base + ".invalid-" + time.Now().Format("20060102-150405")
-		if err := os.Rename(base, invalidPath); err != nil {
-			return fmt.Errorf("zapisany obraz bazowy jest uszkodzony i nie można go odłożyć: %w", err)
-		}
+		return fmt.Errorf("nie można sprawdzić istniejącego obrazu bazowego %s. Zachowano go bez zmian, ponieważ mogą korzystać z niego inne VM: %w", base, validationErr)
 	}
 
+	imagePart := base + ".part"
+	if _, err := os.Stat(imagePart); err == nil {
+		setTemplateJob(j, "running", "Ponowne sprawdzanie zachowanego obrazu", 49, nil)
+		if err := validateQCOW2(imagePart); err == nil {
+			return os.Rename(imagePart, base)
+		}
+		// Preserve the bytes for diagnosis while allowing a clean download on retry.
+		if err := os.Rename(imagePart, imagePart+".invalid-"+strconv.FormatInt(time.Now().UnixNano(), 10)); err != nil {
+			return err
+		}
+	}
 	format := normalizeTemplateFormat(t.Format, t.URL)
 	downloadPath := base + ".download.part"
 	if format == "qcow2.zip" {
@@ -618,12 +814,24 @@ func ensureTemplateBase(j *templateJob, t VMTemplate, base string) error {
 	setTemplateJob(j, "running", "Łączenie z serwerem obrazu", 12, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Hour)
 	defer cancel()
-	if err := downloadTemplateFile(ctx, t.URL, downloadPath, downloadProgress); err != nil {
+	if t.LocalPath != "" {
+		setTemplateJob(j, "running", "Kopiowanie obrazu z Download Center", 15, nil)
+		if err := copyTemplateImage(t.LocalPath, downloadPath, func(done, total int64) {
+			setTemplateJob(j, "running", "Kopiowanie: "+humanTemplateBytes(done)+" / "+humanTemplateBytes(total), 15+int(float64(done)/float64(total)*20), nil)
+		}); err != nil {
+			return err
+		}
+	} else if err := downloadTemplateFile(ctx, t.URL, downloadPath, downloadProgress); err != nil {
 		return fmt.Errorf("pobieranie obrazu: %w (częściowy plik zachowano do wznowienia)", err)
 	}
 
-	imagePart := base + ".part"
-	_ = os.Remove(imagePart)
+	zipContent, err := templateIsZIP(downloadPath)
+	if err != nil {
+		return err
+	}
+	if zipContent {
+		format = "qcow2.zip"
+	}
 	if format == "qcow2.zip" {
 		setTemplateJob(j, "running", "Rozpakowywanie obrazu QCOW2", 36, nil)
 		err := extractQCOW2FromZIP(downloadPath, imagePart, func(done, total uint64) {
@@ -631,7 +839,13 @@ func ensureTemplateBase(j *templateJob, t VMTemplate, base string) error {
 			setTemplateJob(j, "running", "Rozpakowywanie: "+humanTemplateBytes(int64(done))+" / "+humanTemplateBytes(int64(total)), progress, nil)
 		})
 		if err != nil {
-			return err
+			if errors.Is(err, zip.ErrChecksum) || errors.Is(err, zip.ErrFormat) {
+				bad := downloadPath + ".invalid-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+				if moveErr := os.Rename(downloadPath, bad); moveErr == nil {
+					return fmt.Errorf("%w. Uszkodzone archiwum zachowano: %s; ponowienie pobierze nową kopię", err, bad)
+				}
+			}
+			return fmt.Errorf("rozpakowanie QCOW2: %w. Archiwum zachowano: %s", err, downloadPath)
 		}
 	} else if err := os.Rename(downloadPath, imagePart); err != nil {
 		return fmt.Errorf("przygotowanie pobranego obrazu: %w", err)
@@ -639,8 +853,7 @@ func ensureTemplateBase(j *templateJob, t VMTemplate, base string) error {
 
 	setTemplateJob(j, "running", "Sprawdzanie obrazu QCOW2", 49, nil)
 	if err := validateQCOW2(imagePart); err != nil {
-		_ = os.Remove(imagePart)
-		return err
+		return fmt.Errorf("%w. Pobrany obraz zachowano: %s", err, imagePart)
 	}
 	if err := os.Rename(imagePart, base); err != nil {
 		return fmt.Errorf("zapisywanie obrazu bazowego: %w", err)
@@ -653,7 +866,19 @@ func ensureTemplateBase(j *templateJob, t VMTemplate, base string) error {
 }
 
 func deployTemplate(j *templateJob, t VMTemplate, name, network, sshKey string, cpu, ram, disk int) {
+	unlockName := lockTemplateBase("vm:" + name)
+	defer unlockName()
 	cfg := loadKVMConfig()
+	absolute, err := filepath.Abs(cfg.ImagePath)
+	if err != nil {
+		setTemplateJob(j, "error", "Katalog obrazów", 0, err)
+		return
+	}
+	cfg.ImagePath = absolute
+	if _, err := os.Lstat(filepath.Join(cfg.ImagePath, name+".qcow2")); err == nil {
+		setTemplateJob(j, "error", "Dysk już istnieje", 0, fmt.Errorf("Nie nadpisano dysku %s. Wybierz inną nazwę maszyny.", name))
+		return
+	}
 	if err := os.MkdirAll(cfg.ImagePath, 0755); err != nil {
 		setTemplateJob(j, "error", "Tworzenie katalogu", 0, err)
 		return
@@ -664,15 +889,25 @@ func deployTemplate(j *templateJob, t VMTemplate, name, network, sshKey string, 
 		return
 	}
 	base := filepath.Join(baseDir, t.ID+".qcow2")
+	templateJobs.Lock()
+	j.ImagePath = base
+	templateJobs.Unlock()
 	target := filepath.Join(cfg.ImagePath, name+".qcow2")
 	if err := ensureTemplateBase(j, t, base); err != nil {
 		setTemplateJob(j, "error", "Przygotowanie obrazu bazowego", currentTemplateJobProgress(j), err)
 		return
 	}
 
+	reserved, reserveErr := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if reserveErr != nil {
+		setTemplateJob(j, "error", "Rezerwowanie dysku maszyny", 55, reserveErr)
+		return
+	}
+	reserved.Close()
 	setTemplateJob(j, "running", "Tworzenie dysku maszyny", 56, nil)
-	if out, err := runCmd("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base, target); err != nil {
-		setTemplateJob(j, "error", "Tworzenie dysku", 56, fmt.Errorf("%s", out))
+	if out, err := templateExec("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base, target); err != nil {
+		_ = os.Remove(target)
+		setTemplateJob(j, "error", "Tworzenie dysku", 56, templateCommandError("qemu-img", out, err))
 		return
 	}
 	virtualSize, err := inspectQCOW2(target)
@@ -683,9 +918,9 @@ func deployTemplate(j *templateJob, t VMTemplate, name, network, sshKey string, 
 	}
 	requestedSize := int64(disk) * 1024 * 1024 * 1024
 	if requestedSize > virtualSize {
-		if out, err := runCmd("qemu-img", "resize", target, fmt.Sprintf("%dG", disk)); err != nil {
+		if out, err := templateExec("qemu-img", "resize", target, fmt.Sprintf("%dG", disk)); err != nil {
 			_ = os.Remove(target)
-			setTemplateJob(j, "error", "Powiększanie dysku", 62, fmt.Errorf("%s", out))
+			setTemplateJob(j, "error", "Powiększanie dysku", 62, templateCommandError("qemu-img", out, err))
 			return
 		}
 	}
@@ -712,16 +947,39 @@ func deployTemplate(j *templateJob, t VMTemplate, name, network, sshKey string, 
 		setTemplateJob(j, "error", "Cloud-init", 70, err)
 		return
 	}
-	if out, err := runCmd("genisoimage", "-output", seed, "-volid", "cidata", "-joliet", "-rock", filepath.Join(tmp, "user-data"), filepath.Join(tmp, "meta-data")); err != nil {
+	if out, err := templateExec("genisoimage", "-output", seed, "-volid", "cidata", "-joliet", "-rock", filepath.Join(tmp, "user-data"), filepath.Join(tmp, "meta-data")); err != nil {
 		_ = os.Remove(target)
-		setTemplateJob(j, "error", "Cloud-init ISO", 76, fmt.Errorf("%s", out))
+		setTemplateJob(j, "error", "Cloud-init ISO", 76, templateCommandError("genisoimage", out, err))
 		return
 	}
 
+	if err := os.Chmod(seed, 0644); err != nil {
+		setTemplateJob(j, "error", "Uprawnienia cloud-init", 80, err)
+		return
+	}
+	// A defined but inactive network cannot be used by virt-install.
+	if out, err := templateExec("virsh", "net-start", network); err != nil {
+		// net-start also fails when already active; confirm by listing active names.
+		active, checkErr := templateExec("virsh", "net-list", "--name")
+		found := false
+		for _, n := range strings.Fields(active) {
+			if n == network {
+				found = true
+			}
+		}
+		if checkErr != nil || !found {
+			setTemplateJob(j, "error", "Uruchamianie sieci", 82, templateCommandError("virsh net-start", out, err))
+			return
+		}
+	}
 	setTemplateJob(j, "running", "Rejestrowanie maszyny", 86, nil)
-	args := []string{"--name", name, "--memory", strconv.Itoa(ram), "--vcpus", strconv.Itoa(cpu), "--import", "--disk", "path=" + target + ",format=qcow2,bus=virtio", "--disk", "path=" + seed + ",device=cdrom", "--network", "network=" + network + ",model=virtio", "--graphics", "vnc,listen=127.0.0.1", "--noautoconsole", "--os-variant", "generic"}
-	if out, err := runCmd("virt-install", args...); err != nil {
-		setTemplateJob(j, "error", "Rejestrowanie VM", 86, fmt.Errorf("%s", out))
+	args := []string{"--name", name, "--memory", strconv.Itoa(ram), "--vcpus", strconv.Itoa(cpu), "--import", "--disk", "path=" + target + ",format=qcow2,bus=virtio", "--disk", "path=" + seed + ",device=cdrom", "--network", "network=" + network + ",model=virtio", "--graphics", "vnc,listen=127.0.0.1", "--noautoconsole", "--wait", "0", "--os-variant", "generic"}
+	if out, err := templateExec("virt-install", args...); err != nil {
+		setTemplateJob(j, "error", "Rejestrowanie VM", 86, fmt.Errorf("%w. Sprawdź listę VM przed ponowieniem; zachowano dysk: %s", templateCommandError("virt-install", out, err), target))
+		return
+	}
+	if out, err := templateExec("virsh", "dominfo", name); err != nil {
+		setTemplateJob(j, "error", "Weryfikacja rejestracji VM", 95, templateCommandError("virsh dominfo", out, err))
 		return
 	}
 	setTemplateJob(j, "done", "System gotowy", 100, nil)

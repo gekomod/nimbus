@@ -78,8 +78,13 @@ const DL_SERVICE_META = {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
-const api = (path, opts = {}) =>
-  fetch(path, { credentials: "include", ...opts }).then(r => r.json());
+const api = async (path, opts = {}) => {
+ const controller = new AbortController(), timer=setTimeout(()=>controller.abort(),20000);
+ try { const r=await fetch(path,{credentials:"include",...opts,signal:opts.signal||controller.signal});
+ let d;try{d=await r.json()}catch(e){throw new Error('HTTP '+r.status+' — nieprawidłowa odpowiedź serwera')}
+ if(!r.ok||d?.error||d?.ok===false)throw new Error(d?.error||'HTTP '+r.status);return d;
+ }catch(e){if(controller.signal.aborted)throw new Error('Brak odpowiedzi przez 20 sekund. Sprawdź stan zadania przed ponowieniem.');throw e}finally{clearTimeout(timer)}
+};
 
 const apiPost = (path, body) => api(path, {
   method: "POST",
@@ -1951,25 +1956,29 @@ const Downloads = () => {
   const [loading, setLoading]           = useState(true);
   const [defaultDir, setDefaultDir]     = useState("/var/lib/nimbus/downloads");
   const [showArrQueue, setShowArrQueue] = useState(true);
-  const pollRef = useRef(null);
+  const pollRef = useRef(null), alive=useRef(false), inFlight=useRef(false);
+  const [loadError,setLoadError]=useState(""),[actionError,setActionError]=useState(""),[busy,setBusy]=useState(""),[freeBytes,setFreeBytes]=useState(null),[spaceDir,setSpaceDir]=useState(""),[advanced,setAdvanced]=useState(false);
 
   const loadTasks = useCallback(async () => {
+    if(inFlight.current)return;inFlight.current=true;
     try {
       const [dl, arr] = await Promise.all([
         api("/api/downloads"),
         api("/api/downloads/arr/queue").catch(() => ({ tasks: [] })),
       ]);
-      setTasks(dl.tasks || []);
-      setArrTasks(arr.tasks || []);
-    } catch {}
-    setLoading(false);
+      if(!alive.current)return;
+      if(!Array.isArray(dl.tasks))throw new Error("Brak listy zadań w odpowiedzi");
+      setTasks(dl.tasks);setFreeBytes(dl.free_bytes??null);setSpaceDir(dl.default_dir||"");
+      setArrTasks(arr.tasks || []);setLoadError("");
+    } catch(e) {if(alive.current)setLoadError(e.message)}
+    finally{inFlight.current=false;if(alive.current)setLoading(false)}
   }, []);
 
   useEffect(() => {
-    loadTasks();
+    alive.current=true;loadTasks();
     api("/api/downloads/config").then(d => { if (d.default_dir) setDefaultDir(d.default_dir); }).catch(() => {});
     pollRef.current = setInterval(loadTasks, 2000);
-    return () => clearInterval(pollRef.current);
+    return () => {alive.current=false;clearInterval(pollRef.current)};
   }, []);
 
   // Scal kolejki — nimbus-dl zadania + zadania z zewnętrznych klientów
@@ -1978,10 +1987,8 @@ const Downloads = () => {
     ...(showArrQueue ? arrTasks : []),
   ];
 
-  const handleCancel    = async id => { await apiPost("/api/downloads/cancel",      { id }); loadTasks(); };
-  const handleDelete    = async id => { await apiPost("/api/downloads/delete",      { id }); loadTasks(); };
-  const handleRetry     = async id => { await apiPost("/api/downloads/retry",       { id }); loadTasks(); };
-  const handleClearDone = async ()  => { await apiPost("/api/downloads/clear-done", {}); loadTasks(); };
+  const action=async(kind,id)=>{if(busy)return;if(id&&!tasks.some(t=>t.id===id)){setActionError('To zadanie jest zarządzane przez klienta zewnętrznego.');return;}setBusy(id||kind);setActionError('');try{await apiPost('/api/downloads/'+kind,id?{id}:{});await loadTasks()}catch(e){setActionError(e.message)}finally{setBusy('')}};
+  const handleCancel=id=>action('cancel',id),handleDelete=id=>action('delete',id),handleRetry=id=>action('retry',id),handleClearDone=()=>action('clear-done');
 
   return (
     <div className="col" style={{ gap: "var(--gutter)" }}>
@@ -1994,7 +2001,8 @@ const Downloads = () => {
       {tab === "tools"  && <ToolsTab/>}
       {tab === "cda"    && <CDATab/>}
       {tab === "config" && <ConfigTab defaultDir={defaultDir} setDefaultDir={setDefaultDir}/>}
-      {tab === "queue"  && (
+      {tab === "queue" && <><div className="row" style={{justifyContent:'flex-end'}}><button className="btn sm" onClick={()=>setAdvanced(v=>!v)}>{advanced?'Nowy widok':'Narzędzia zaawansowane i RSS'}</button></div>{(loadError||actionError)&&<div className="dlw-error" role="alert">{actionError||loadError}</div>}{!advanced&&<window.DownloadWorkspace tasks={allTasks} loading={loading} stale={!!loadError} busy={busy} freeBytes={freeBytes} spaceDir={spaceDir} defaultDir={defaultDir} setDefaultDir={setDefaultDir} onRefresh={loadTasks} onCancel={handleCancel} onDelete={handleDelete} onRetry={handleRetry} onClearDone={handleClearDone} showArrQueue={showArrQueue} onToggleArrQueue={()=>setShowArrQueue(v=>!v)} request={api} post={apiPost}/>}</>}
+      {tab === "queue" && advanced && (
         <DownloadsQueue tasks={allTasks} loading={loading}
           nimbusCount={tasks.length} arrCount={arrTasks.length}
           showArrQueue={showArrQueue} onToggleArrQueue={() => setShowArrQueue(s => !s)}

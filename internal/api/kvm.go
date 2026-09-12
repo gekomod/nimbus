@@ -1026,7 +1026,7 @@ func (s *Server) handleKVMInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := runCmd("apt-get", "install", "-y",
-		"qemu-kvm", "libvirt-daemon-system", "libvirt-clients",
+		"qemu-kvm", "qemu-utils", "libvirt-daemon-system", "libvirt-clients",
 		"bridge-utils", "virtinst", "novnc", "websockify", "genisoimage")
 	if err != nil {
 		jsonErr(w, out, http.StatusInternalServerError)

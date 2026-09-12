@@ -41,6 +41,7 @@ import './screens-kvm-workspace.jsx';
 import './screens-network-detail.jsx';
 import './screens-filemanager.jsx';
 import './screens-packages.jsx';
+import './screens-downloads-workspace.jsx';
 import './screens-downloads.jsx';
 import './screens-terminal.jsx';
 import './app.jsx';

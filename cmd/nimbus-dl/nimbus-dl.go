@@ -369,7 +369,8 @@ func saveState() {
 	result := make([]*DownloadTask, 0, len(dlOrder))
 	for _, id := range dlOrder {
 		if t, ok := dlTasks[id]; ok {
-			result = append(result, t)
+			snapshot := *t
+			result = append(result, &snapshot)
 		}
 	}
 	dlMu.Unlock()
@@ -1795,7 +1796,8 @@ func handleDownloadsList(w http.ResponseWriter, r *http.Request) {
 	result := make([]*DownloadTask, 0, len(dlOrder))
 	for _, id := range dlOrder {
 		if t, ok := dlTasks[id]; ok {
-			result = append(result, t)
+			snapshot := *t
+			result = append(result, &snapshot)
 		}
 	}
 	dlMu.Unlock()
@@ -1811,7 +1813,11 @@ func handleDownloadsList(w http.ResponseWriter, r *http.Request) {
 		result = filtered
 	}
 
-	jsonOK(w, map[string]any{"tasks": result})
+	var freeBytes any
+	var usage syscall.Statfs_t
+	dir := loadDLConfig().DefaultDir
+	if err := syscall.Statfs(dir, &usage); err == nil { freeBytes = usage.Bavail * uint64(usage.Bsize) }
+	jsonOK(w, map[string]any{"tasks": result, "free_bytes": freeBytes, "default_dir": dir})
 }
 
 // POST /api/downloads/add
@@ -1985,11 +1991,12 @@ func handleDownloadsRetry(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/downloads/clear-done
 func handleDownloadsClearDone(w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w,r) { return }
 	dlMu.Lock()
 	newOrder := dlOrder[:0]
 	for _, id := range dlOrder {
 		if t, ok := dlTasks[id]; ok {
-			if t.Status == "downloading" || t.Status == "queued" {
+			if t.Status != "done" && t.Status != "completed" {
 				newOrder = append(newOrder, id)
 			} else {
 				delete(dlTasks, id)
