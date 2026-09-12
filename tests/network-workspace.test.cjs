@@ -31,3 +31,12 @@ test('advanced form keeps API errors visible and stays open after success',async
   assert.equal(closed,false);assert.equal(updates[8],false);if(fail)assert.equal(updates[7],'DHCP timeout');else assert.match(updates[9],/brak połączenia fizycznego/);
  }
 });
+
+test('server list hides container links while preserving host bridges and VLANs',()=>{
+ const h=load().NetworkWorkspaceHelpers;
+ const list=[{name:'eth0',physical:true,kind:'physical'},{name:'br0',kind:'bridge'},{name:'br-office',kind:'bridge'},{name:'eth0.100',kind:'vlan'},{name:'docker0',kind:'bridge'},{name:'vethabcd',kind:'virtual'},{name:'br-012345abcdef',kind:'bridge'}];
+ assert.deepEqual(Array.from(h.netFilterInterfaces(list,'all',''),i=>i.name),['eth0','br0','br-office','eth0.100']);
+ assert.deepEqual(Array.from(h.netFilterInterfaces(list,'containers',''),i=>i.name),['docker0','vethabcd','br-012345abcdef']);
+ assert.equal(h.netFilterInterfaces(list,'bridge','').length,2);
+ assert.equal(h.netFilterInterfaces(list,'all','docker').length,0);
+});

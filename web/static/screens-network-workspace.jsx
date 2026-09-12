@@ -1,4 +1,6 @@
 // Network workspace: all interfaces, physical-only totals, confirmed mutations.
+const netContainerLink = i => !i.physical && /^(docker\d+$|veth|br-[0-9a-f]{12}$)/i.test(i.name||'');
+const netFilterInterfaces=(ifaces,filter,search)=>ifaces.filter(i=>(filter==='containers'?netContainerLink(i):!netContainerLink(i)&&(filter==='all'||netKind(i)===filter))&&[i.name,...(i.addresses||[]),i.master].join(' ').toLowerCase().includes(search.toLowerCase()));
 const netKind = i => i.kind || 'virtual';
 const netRate = value => Number.isFinite(value) ? (value < 1 ? (value*1000).toFixed(1)+' kB/s' : value.toFixed(2)+' MB/s') : '—';
 const netSpeed = i => i.physical && !i.carrier ? 'Brak linku' : Number(i.speed_mbps)>0 ? (i.speed_mbps>=1000 ? (i.speed_mbps/1000)+' Gb/s' : i.speed_mbps+' Mb/s') : '—';
@@ -23,11 +25,11 @@ const NetworkWorkspace = ({onAdvanced}) => {
  const [edit,setEdit]=React.useState(null),[value,setValue]=React.useState('');
  const [pollError,setPollError]=React.useState('');
  const [started,setStarted]=React.useState(0),[notice,setNotice]=React.useState('');
- const kinds={all:'Wszystkie',physical:'Fizyczne',bridge:'Bridge',bond:'Bond',vlan:'VLAN',virtual:'Wirtualne'};
+ const kinds={all:'Sieć serwera',physical:'Fizyczne',bridge:'Bridge',bond:'Bond',vlan:'VLAN',virtual:'Wirtualne',containers:'Kontenery'};
  const refresh=React.useCallback(async(signal)=>{
   const [inventory,bandwidth,changes]=await Promise.all([networkRequest('/network/interfaces',null,signal),networkRequest('/api/network/bandwidth',null,signal),networkRequest('/network/changes',null,signal)]);
   const list=inventory.interfaces||[];setIfaces(list);setSeries(Object.fromEntries((bandwidth.interfaces||[]).map(i=>[i.name,i])));setPending(changes.pending||null);
-  setSelected(prev=>list.some(i=>i.name===prev)?prev:(list.find(i=>i.physical&&i.admin_up)||list[0])?.name||'');setLoaded(true);setUpdated(new Date());setPollError('');
+  setSelected(prev=>list.some(i=>i.name===prev)?prev:(list.find(i=>i.physical&&i.admin_up)||list.find(i=>!netContainerLink(i)))?.name||'');setLoaded(true);setUpdated(new Date());setPollError('');
  },[]);
  React.useEffect(()=>{
   const ctrl=new AbortController();let timer;
@@ -39,7 +41,7 @@ const NetworkWorkspace = ({onAdvanced}) => {
  const iface=ifaces.find(i=>i.name===selected),physical=ifaces.filter(i=>i.physical);
  const last=(i,key)=>{const samples=series[i.name]?.[key];return samples?.length?samples[samples.length-1]:null};
  const total=key=>{const vals=physical.map(i=>last(i,key));return vals.length&&vals.every(Number.isFinite)?vals.reduce((a,b)=>a+b,0):null};
- const visible=ifaces.filter(i=>(filter==='all'||netKind(i)===filter)&&[i.name,...(i.addresses||[]),i.master].join(' ').toLowerCase().includes(search.toLowerCase()));
+ const visible=netFilterInterfaces(ifaces,filter,search);
  const mutate=async body=>{
   setBusy(true);setStarted(Date.now());setError('');setNotice('');
   try {
@@ -80,6 +82,6 @@ const NetworkWorkspace = ({onAdvanced}) => {
  </div>;
 };
 window.NetworkWorkspace=NetworkWorkspace;
-window.NetworkWorkspaceHelpers={netKind,netRate,netSpeed,netState,networkRequest};
+window.NetworkWorkspaceHelpers={netContainerLink,netFilterInterfaces,netKind,netRate,netSpeed,netState,networkRequest};
 
 window.networkRequest = networkRequest;
